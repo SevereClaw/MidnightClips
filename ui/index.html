@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MidnightClips</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <div class="wordmark" aria-label="MidnightClips">
+      <span class="wm-top">Midnight</span>
+      <span class="wm-bottom">Clips</span>
+    </div>
+
+    <div class="tv" id="tv" data-state="starting">
+      <div class="tv-antenna"></div>
+      <div class="tv-body">
+        <div class="tv-screen">
+          <div class="tv-bars"></div>
+          <div class="tv-static"></div>
+          <div class="tv-rec"><span class="dot"></span><span id="recTimer">00:00</span></div>
+        </div>
+        <div class="tv-knobs"><i></i><i></i></div>
+      </div>
+    </div>
+    <p class="status" id="statusLine">Включаю захват…</p>
+    <p class="status-sub" id="statusSub"></p>
+
+    <button class="btn btn-clip" id="btnClip">
+      <span class="btn-title">Сохранить клип</span>
+      <span class="btn-hint"><kbd id="kbdClip">Alt+F10</kbd><span id="clipLen">последние 60 с</span></span>
+    </button>
+    <button class="btn btn-rec" id="btnRec">
+      <span class="btn-title" id="recTitle">Начать запись</span>
+      <span class="btn-hint"><kbd id="kbdRec">Alt+F9</kbd></span>
+    </button>
+
+    <nav class="nav">
+      <button class="nav-item is-active" data-view="clips">Клипы</button>
+      <button class="nav-item" data-view="settings">Настройки</button>
+    </nav>
+  </aside>
+
+  <main class="stage">
+    <section class="view is-active" id="view-clips">
+      <header class="view-head">
+        <h1>Клипы</h1>
+        <div class="head-tools">
+          <input type="search" id="search" placeholder="Найти по названию" aria-label="Найти клип">
+          <button class="mini" id="btnFolder">Открыть папку</button>
+        </div>
+      </header>
+      <div class="chips" id="chips"></div>
+      <div class="grid" id="grid"></div>
+      <div class="empty" id="empty" hidden>
+        <h2>Здесь пока пусто</h2>
+        <p>Нажмите <kbd id="kbdEmpty">Alt+F10</kbd> во время игры — и последние секунды сохранятся сюда.</p>
+      </div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <header class="view-head"><h1>Настройки</h1></header>
+
+      <div class="panel">
+        <h2>Буфер повтора</h2>
+        <label class="row"><span>Постоянно записывать последние секунды
+          <small>Нужно, чтобы клип можно было сохранить уже после момента</small></span>
+          <input type="checkbox" data-key="buffer_enabled"></label>
+        <label class="row"><span>Длина клипа</span>
+          <select data-key="buffer_seconds" data-type="int">
+            <option value="15">15 секунд</option><option value="30">30 секунд</option>
+            <option value="60">1 минута</option><option value="120">2 минуты</option>
+            <option value="300">5 минут</option><option value="600">10 минут</option>
+          </select></label>
+      </div>
+
+      <div class="panel">
+        <h2>Видео</h2>
+        <label class="row"><span>Монитор</span><select data-key="monitor" data-type="int" id="selMonitor"></select></label>
+        <label class="row"><span>Кадров в секунду</span>
+          <select data-key="fps" data-type="int"><option value="30">30</option><option value="60">60</option></select></label>
+        <label class="row"><span>Разрешение</span>
+          <select data-key="height" data-type="int">
+            <option value="0">Как на экране</option><option value="1080">1080p</option><option value="720">720p</option>
+          </select></label>
+        <label class="row"><span>Качество
+          <small>Чем выше, тем больше весит клип</small></span>
+          <select data-key="bitrate_mbps" data-type="int">
+            <option value="6">Лёгкое — 6 Мбит/с</option><option value="12">Обычное — 12 Мбит/с</option>
+            <option value="20">Высокое — 20 Мбит/с</option><option value="35">Максимальное — 35 Мбит/с</option>
+          </select></label>
+        <label class="row"><span>Кодировщик
+          <small>«Авто» выберет видеокарту, если она умеет</small></span>
+          <select data-key="encoder">
+            <option value="auto">Авто</option><option value="h264_nvenc">NVIDIA NVENC</option>
+            <option value="h264_amf">AMD AMF</option><option value="h264_qsv">Intel Quick Sync</option>
+            <option value="libx264">Процессор (x264)</option>
+          </select></label>
+        <label class="row"><span>Способ захвата
+          <small>Если в клипе чёрный экран — попробуйте другой</small></span>
+          <select data-key="capture">
+            <option value="auto">Авто</option><option value="dda">Desktop Duplication</option><option value="gdi">GDI</option>
+          </select></label>
+      </div>
+
+      <div class="panel">
+        <h2>Звук</h2>
+        <label class="row"><span>Записывать звук компьютера</span><input type="checkbox" data-key="audio"></label>
+        <label class="row"><span>Микрофон</span><select data-key="mic" id="selMic"><option value="">Не записывать</option></select></label>
+        <label class="row"><span>Сдвиг звука, мс
+          <small>Если звук отстаёт от картинки — поставьте минус, если спешит — плюс</small></span>
+          <input type="number" data-key="audio_offset_ms" data-type="int" min="-2000" max="2000" step="20"></label>
+      </div>
+
+      <div class="panel">
+        <h2>Горячие клавиши</h2>
+        <div class="row"><span>Сохранить клип<small class="warn" id="warnClip" hidden>Сочетание занято другой программой</small></span>
+          <button class="hotkey" data-hotkey="hotkey_clip"></button></div>
+        <div class="row"><span>Начать и остановить запись<small class="warn" id="warnRec" hidden>Сочетание занято другой программой</small></span>
+          <button class="hotkey" data-hotkey="hotkey_record"></button></div>
+      </div>
+
+      <div class="panel">
+        <h2>Файлы</h2>
+        <div class="row"><span>Папка клипов<small id="clipsDir"></small></span>
+          <button class="mini" id="btnPick">Выбрать папку</button></div>
+        <label class="row"><span>Отдельная папка для каждой игры</span><input type="checkbox" data-key="folder_per_game"></label>
+      </div>
+
+      <div class="panel">
+        <h2>Программа</h2>
+        <label class="row"><span>Запускать вместе с Windows</span><input type="checkbox" data-key="autostart"></label>
+        <label class="row"><span>Звуковой сигнал при сохранении</span><input type="checkbox" data-key="sound"></label>
+        <label class="row"><span>Уведомление в углу экрана</span><input type="checkbox" data-key="toast"></label>
+        <div class="row"><span>Захват<small id="captureInfo"></small></span>
+          <span class="row-buttons"><button class="mini" id="btnRestart">Перезапустить захват</button>
+          <button class="mini" id="btnLog">Журнал</button></span></div>
+      </div>
+      <p class="version" id="version"></p>
+    </section>
+  </main>
+</div>
+
+<div class="flashes" id="flashes" aria-live="polite"></div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true">
+    <h2 id="modalTitle"></h2>
+    <p id="modalText"></p>
+    <input type="text" id="modalInput" hidden>
+    <div class="modal-actions">
+      <button class="mini" id="modalCancel">Отмена</button>
+      <button class="mini mini-strong" id="modalOk">Ок</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

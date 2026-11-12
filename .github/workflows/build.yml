@@ -1,0 +1,30 @@
+name: Сборка
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Собрать exe
+        shell: cmd
+        run: build.bat
+      - name: Упаковать
+        shell: pwsh
+        run: Compress-Archive -Path dist\MidnightClips -DestinationPath MidnightClips-win64.zip
+      - name: Выложить релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: MidnightClips v0.1.${{ github.run_number }}
+          files: MidnightClips-win64.zip
