@@ -156,13 +156,16 @@ class Recorder:
     # --------------------------------------------------------------- поток
 
     def _run(self):
+        crashed = False
         while not self._stop.is_set():
             self._restart.clear()
-            self._set_state("starting", "Включаю захват…")
+            self._set_state("starting", "Восстанавливаю захват…" if crashed else "Включаю захват…")
             if self._encoders is None:
                 self._encoders = self._detect_encoders()
-            session = self._launch_any()
+            session = self._launch_any(retry_last=crashed)
             if session is None:
+                if self._stop.is_set() or self._restart.is_set():
+                    continue
                 self._set_state(
                     "error",
                     "Не удалось запустить захват экрана. Подробности — в журнале (Настройки → Журнал).",
@@ -172,26 +175,58 @@ class Recorder:
             proc, source, pump, started = session
             self._set_state("on", "")
             reason = ""
+            last_mark, last_change = None, time.time()
             while not self._stop.is_set() and not self._restart.is_set():
                 if proc.poll() is not None:
-                    reason = "ffmpeg остановился, перезапускаю захват"
+                    reason = "ffmpeg остановился (код %s)" % proc.returncode
                     break
                 if source is not None and not source.alive():
-                    reason = "устройство звука сменилось, перезапускаю захват"
+                    reason = "устройство звука сменилось"
                     break
                 if time.time() - started > 20 * 3600 and self.recording_since is None:
-                    break  # плановый перезапуск: метки времени в .ts не бесконечны
+                    reason = "плановый перезапуск"   # метки времени в .ts не бесконечны
+                    break
+                mark = self._newest_mark()
+                if mark != last_mark:
+                    last_mark, last_change = mark, time.time()
+                elif time.time() - last_change > 12:
+                    reason = "запись зависла: 12 секунд нет новых данных"
+                    break
                 self._prune()
                 self._wait(1)
-            if self.recording_since is not None:
+            deliberate = self._stop.is_set() or self._restart.is_set()
+            if deliberate and self.recording_since is not None:
                 self._finish_recording(wait_next=False)
             self._shutdown(proc, source, pump)
-            with self._save_lock:
-                for path in glob.glob(os.path.join(self.work_dir, "*.ts")):
-                    self._remove(path)
-            if reason:
-                self.on_event("warning", {"text": reason.capitalize() + "."})
+            if deliberate:
+                # Настройки могли измениться — старые кусочки с новыми не склеить.
+                with self._save_lock:
+                    for path in glob.glob(os.path.join(self.work_dir, "*.ts")):
+                        self._remove(path)
+                crashed = False
+            else:
+                # Сбой (игра сменила режим экрана, UAC, сон монитора…): буфер и идущая
+                # запись сохраняются, захват поднимается заново и продолжает с того же места.
+                crashed = True
+                self._log("%s — перезапускаю захват, буфер и запись сохранены" % reason)
         self._set_state("off", "")
+
+    def _log(self, text):
+        try:
+            with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
+                log.write("\n*** %s | %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), text))
+        except OSError:
+            pass
+
+    def _newest_mark(self):
+        """(имя, размер) самого свежего кусочка — чтобы заметить, что запись встала."""
+        current = self._current_segments()
+        if not current:
+            return None
+        try:
+            return current[-1], os.path.getsize(current[-1])
+        except OSError:
+            return current[-1], -1
 
     def _wait(self, seconds):
         end = time.time() + seconds
@@ -243,7 +278,17 @@ class Recorder:
             result.insert(0, self._good)
         return result
 
-    def _launch_any(self):
+    def _launch_any(self, retry_last=False):
+        if retry_last and self._good:
+            # После сбоя захват экрана бывает недоступен секунду-другую — сначала
+            # несколько раз пробуем тот же вариант, а не сползаем на запасной.
+            for _ in range(4):
+                if self._stop.is_set() or self._restart.is_set():
+                    return None
+                session = self._launch(self._good)
+                if session:
+                    return session
+                self._wait(1.5)
         # Если не запускается со звуком — лучше писать без микрофона или без звука, чем никак.
         levels = [0]
         if self.cfg["mic"] and not TEST:
@@ -417,6 +462,10 @@ class Recorder:
     # ------------------------------------------------------ кусочки
 
     def _segments(self):
+        """Все кусочки по порядку, включая оставшиеся от прошлых запусков захвата."""
+        return sorted(glob.glob(os.path.join(self.work_dir, "s[0-9][0-9][0-9][0-9]_*.ts")))
+
+    def _current_segments(self):
         return sorted(glob.glob(os.path.join(self.work_dir, "s%04d_*.ts" % self._session)))
 
     def _prune(self):
@@ -444,17 +493,16 @@ class Recorder:
 
     def _closed_segments(self, wait_next=True):
         """Дождаться, пока текущий кусочек допишется, и вернуть все готовые."""
-        segments = self._segments()
-        if not segments:
-            return []
-        if not wait_next:
-            return segments
-        current = segments[-1]
+        current_list = self._current_segments()
+        alive = self._proc is not None and self._proc.poll() is None
+        if not wait_next or not current_list or not alive:
+            return self._segments()   # захват перезапускается — берём всё, что есть
+        current = current_list[-1]
         deadline = time.time() + SEGMENT + 3
         while time.time() < deadline:
-            segments = self._segments()
-            if segments and segments[-1] != current:
-                return [p for p in segments if p <= current]
+            latest = self._current_segments()
+            if latest and latest[-1] != current:
+                return [p for p in self._segments() if p <= current]
             if self._proc is None or self._proc.poll() is not None:
                 break
             time.sleep(0.1)
@@ -479,12 +527,51 @@ class Recorder:
         return path
 
     def _mux(self, segments, out_path, skip=0.0):
-        """Склеить кусочки в mp4 без перекодирования."""
+        """Склеить кусочки в mp4 без перекодирования.
+
+        Кусочки одного запуска захвата идут с непрерывными метками времени и склеиваются
+        напрямую. Если захват перезапускался, каждая часть собирается отдельно, а потом
+        части соединяются — так клип переживает сбой захвата.
+        """
+        groups = []
+        for path in segments:
+            prefix = os.path.basename(path)[:6]
+            if groups and groups[-1][0] == prefix:
+                groups[-1][1].append(path)
+            else:
+                groups.append((prefix, [path]))
+        if len(groups) == 1:
+            return self._mux_run(segments, out_path, skip)
+        stamp = int(time.time() * 1000)
+        parts = []
+        list_path = os.path.join(self.work_dir, "parts_%d.txt" % stamp)
+        try:
+            for i, (_prefix, group) in enumerate(groups):
+                part = os.path.join(self.work_dir, "part_%d_%d.mp4" % (stamp, i))
+                parts.append(part)
+                if not self._mux_run(group, part, 0.0, faststart=False):
+                    parts.pop()   # битая часть (например, оборванный кусочек) — пропускаем
+            if not parts:
+                return False
+            with open(list_path, "w", encoding="utf-8") as f:
+                for part in parts:
+                    f.write("file '%s'\n" % os.path.basename(part))
+            cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                   "-f", "concat", "-safe", "0", "-i", os.path.basename(list_path)]
+            if skip > 0.05:
+                cmd += ["-ss", "%.3f" % skip]
+            cmd += ["-c", "copy", "-movflags", "+faststart", out_path]
+            return self._run_mux(cmd, out_path)
+        finally:
+            for path in parts + [list_path]:
+                self._remove(path)
+
+    def _mux_run(self, segments, out_path, skip=0.0, faststart=True):
         names = [os.path.basename(p) for p in segments]
         joined = None
         if sum(len(n) + 1 for n in names) < CONCAT_LIMIT:
             source = "concat:" + "|".join(names)
-        else:  # длинная запись: командная строка Windows ограничена
+        else:  # очень длинная запись: командная строка Windows ограничена
             joined = os.path.join(self.work_dir, "joined_%d.tmp" % int(time.time() * 1000))
             with open(joined, "wb") as dst:
                 for path in segments:
@@ -494,27 +581,37 @@ class Recorder:
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", source]
         if skip > 0.05:
             cmd += ["-ss", "%.3f" % skip]
-        cmd += ["-c", "copy", "-movflags", "+faststart", out_path]
+        cmd += ["-c", "copy"]
+        if faststart:
+            cmd += ["-movflags", "+faststart"]
+        cmd += [out_path]
         try:
-            result = subprocess.run(
-                cmd, cwd=self.work_dir, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE, creationflags=NO_WINDOW, timeout=1800,
-            )
-            ok = result.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0
-            if not ok:
-                with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
-                    log.write("\n=== сохранение не удалось ===\n%s\n%s\n" % (
-                        " ".join(cmd), result.stderr.decode("utf-8", "replace")))
-            return ok
-        except (OSError, subprocess.SubprocessError):
-            return False
+            return self._run_mux(cmd, out_path)
         finally:
             if joined:
                 self._remove(joined)
 
+    def _run_mux(self, cmd, out_path):
+        try:
+            result = subprocess.run(
+                cmd, cwd=self.work_dir, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, creationflags=NO_WINDOW, timeout=3600,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._log("сохранение не удалось: %s" % exc)
+            return False
+        ok = os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+        if result.returncode != 0 or not ok:
+            self._log("сохранение не удалось (код %s)\n%s\n%s" % (
+                result.returncode, " ".join(cmd)[:2000], result.stderr.decode("utf-8", "replace")[-3000:]))
+        return ok
+
     def _save_clip(self, title, seconds):
-        if self.state != "on" or not self.cfg["buffer_enabled"]:
+        if not self.cfg["buffer_enabled"]:
             self.on_event("error", {"text": "Буфер повтора выключен — сохранять нечего."})
+            return
+        if not self.is_running() or not self._segments():
+            self.on_event("error", {"text": "Захват ещё не запущен — в буфере пусто."})
             return
         seconds = int(seconds or self.cfg["buffer_seconds"])
         self.on_event("saving", {})

@@ -9,7 +9,7 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9",
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10,
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -33,6 +33,7 @@ const demoApi = {
   rename_clip: async (p, n) => { demo.clips.find((c) => c.path === p).name = n; return p; },
   delete_clip: async (p) => { demo.clips = demo.clips.filter((c) => c.path !== p); return true; },
   copy_clip: async () => true,
+  pick_sound: async () => demo.settings,
   media_url: async () => window.DEMO_VIDEO || "",
   clip_action: async (p, action) => {
     let n = 0;
@@ -396,6 +397,8 @@ function applySettings(s) {
   $("clipLen").textContent = fmtBuffer(s.buffer_seconds);
   $("clipsDir").textContent = s.clips_dir_resolved || "";
   $("edCompress").textContent = "Сжать до " + s.discord_limit_mb + " МБ";
+  $("volText").textContent = s.sound_volume + "%" + (s.sound_volume > 100 ? " — громче исходного файла" : "");
+  renderSounds();
 }
 async function saveSetting(key, value) {
   applySettings(await api.set_settings({ [key]: value }));
@@ -408,6 +411,32 @@ document.querySelectorAll("[data-key]").forEach((el) => {
     saveSetting(el.dataset.key, value);
   });
 });
+
+// Свои звуки сигналов
+const SOUNDS = [["saved", "Клип или запись сохранены"], ["rec_on", "Запись началась"], ["rec_off", "Запись остановлена"], ["error", "Что-то не получилось"]];
+function renderSounds() {
+  const box = $("soundRows");
+  box.innerHTML = "";
+  SOUNDS.forEach(([event, label]) => {
+    const file = settings["sound_" + event] || "";
+    const row = document.createElement("div");
+    row.className = "row";
+    const text = document.createElement("span");
+    text.textContent = label;
+    const small = document.createElement("small");
+    small.textContent = file ? file.split(/[\\/]/).pop() : "Стандартный звук";
+    text.appendChild(small);
+    const buttons = document.createElement("span");
+    buttons.className = "row-buttons";
+    const add = (title, fn) => { const b = document.createElement("button"); b.className = "mini"; b.textContent = title; b.onclick = fn; buttons.appendChild(b); };
+    add("Прослушать", () => api.test_sound(event));
+    add("Выбрать файл", async () => applySettings(await api.pick_sound(event)));
+    if (file) add("Вернуть стандартный", () => saveSetting("sound_" + event, ""));
+    row.append(text, buttons);
+    box.appendChild(row);
+  });
+}
+document.querySelector(".vol").addEventListener("change", () => setTimeout(() => api.test_sound("saved"), 250));
 
 // Назначение горячей клавиши: нажали кнопку — ждём сочетание.
 const KEY_NAMES = { Space: "Space", Enter: "Enter", Tab: "Tab", Insert: "Insert", Delete: "Delete", Home: "Home", End: "End",

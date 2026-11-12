@@ -130,6 +130,14 @@
       </div>
 
       <div class="panel">
+        <h2>Звуки</h2>
+        <label class="row"><span>Звуковые сигналы</span><input type="checkbox" data-key="sound"></label>
+        <label class="row"><span>Громкость<small id="volText"></small></span>
+          <input type="range" class="vol" data-key="sound_volume" data-type="int" min="0" max="200" step="5"></label>
+        <div id="soundRows"></div>
+      </div>
+
+      <div class="panel">
         <h2>Discord</h2>
         <label class="row"><span>Ссылка вебхука
           <small>В Discord: настройки канала → Интеграции → Вебхуки → Новый вебхук → Скопировать URL. Клипы будут приходить в этот канал</small></span>
@@ -152,7 +160,6 @@
       <div class="panel">
         <h2>Программа</h2>
         <label class="row"><span>Запускать вместе с Windows</span><input type="checkbox" data-key="autostart"></label>
-        <label class="row"><span>Звуковой сигнал при сохранении</span><input type="checkbox" data-key="sound"></label>
         <label class="row"><span>Уведомление в углу экрана</span><input type="checkbox" data-key="toast"></label>
         <label class="row"><span>Обновлять автоматически
           <small>Новая версия ставится сама при запуске программы</small></span><input type="checkbox" data-key="auto_update"></label>

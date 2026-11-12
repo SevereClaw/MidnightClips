@@ -297,6 +297,8 @@ input[type="checkbox"]:checked::after { left: 28px; }
   background: var(--yellow); border: 3px solid var(--black); transform: skewX(-8deg);
 }
 .hotkey.is-listening { background: var(--black); color: var(--yellow); }
+input.vol { appearance: none; -webkit-appearance: none; width: 240px; height: 12px; background: var(--black); border: 0; padding: 0; transform: skewX(-12deg); }
+input.vol::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 28px; background: var(--yellow); border: 3px solid var(--black); cursor: ew-resize; }
 .version { color: #5c5200; font-size: 12.5px; margin: 0 0 10px; }
 
 /* ------------------------------------------------ просмотр и обрезка */

@@ -52,6 +52,11 @@ DEFAULTS = {
     "toast": True,
     "autostart": False,
     "auto_update": True,
+    "sound_volume": 100,        # громкость сигналов, 0–200 %
+    "sound_saved": "",          # свои файлы сигналов; пусто = стандартный
+    "sound_rec_on": "",
+    "sound_rec_off": "",
+    "sound_error": "",
     "discord_webhook": "",      # ссылка вебхука канала
     "discord_limit_mb": 10,     # предел размера файла при сжатии и отправке
 }

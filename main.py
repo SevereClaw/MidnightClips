@@ -11,6 +11,7 @@ from midnightclips.hotkeys import Hotkeys
 from midnightclips.library import Library
 from midnightclips.recorder import Recorder, find_ffmpeg
 from midnightclips.media import MediaServer
+from midnightclips.sounds import EVENTS as SOUND_EVENTS, SoundBank
 from midnightclips.toast import Toast
 from midnightclips.tools import ClipTools
 from midnightclips.updater import Updater
@@ -35,6 +36,7 @@ class App:
         self.hotkeys = Hotkeys()
         self.toast = Toast()
         self.library = Library(self.cfg, self.ffmpeg, cache_dir())
+        self.sounds = SoundBank(self.cfg, self.ffmpeg, os.path.join(self.res, "assets"), cache_dir())
         self.media = MediaServer(self.library.inside)
         self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event)
         self.recorder = Recorder(
@@ -152,8 +154,7 @@ class App:
         self.recorder.toggle_recording(winutil.foreground_app())
 
     def sound(self, name):
-        if self.cfg["sound"]:
-            winutil.play_sound(os.path.join(self.res, "assets", name + ".wav"))
+        self.sounds.play(name)
 
     def on_event(self, kind, payload):
         if kind == "saved":
@@ -299,6 +300,29 @@ class Api:
 
     def rename_clip(self, path, new_name):
         return self._app.library.rename(path, new_name or "")
+
+    def pick_sound(self, event):
+        """Выбрать свой файл для сигнала."""
+        import webview
+        if event not in SOUND_EVENTS:
+            return self.get_settings()
+        types = ("Звук (*.wav;*.mp3;*.ogg;*.flac;*.m4a;*.opus)", "Все файлы (*.*)")
+        try:
+            result = self._app.window.create_file_dialog(webview.OPEN_DIALOG, file_types=types)
+        except Exception:
+            try:
+                result = self._app.window.create_file_dialog(webview.OPEN_DIALOG)
+            except Exception:
+                result = None
+        if result:
+            path = result[0] if isinstance(result, (list, tuple)) else result
+            self._app.cfg.update({"sound_" + event: path})
+            self._app.sounds.play(event, force=True)
+        return self.get_settings()
+
+    def test_sound(self, event):
+        self._app.sounds.play(event, force=True)
+        return True
 
     def pick_folder(self):
         import webview
