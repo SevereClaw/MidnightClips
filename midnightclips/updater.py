@@ -23,21 +23,61 @@ ASSET = "MidnightClips-win64.zip"
 API_URL = "https://api.github.com/repos/%s/releases/latest" % REPO
 EXE = "MidnightClips.exe"
 
-# Скрипт без кириллицы: пути приходят аргументами, так что кодировка не важна.
-APPLY_PS1 = r"""param([int]$ProcId, [string]$Src, [string]$Dst, [string]$Tmp, [string]$ExeArgs)
-try { Wait-Process -Id $ProcId -Timeout 40 -ErrorAction SilentlyContinue } catch {}
+APPLY_PS1 = r"""$procId = @PID@
+$src = '@SRC@'
+$dst = '@DST@'
+$tmp = '@TMP@'
+$log = '@LOG@'
+$exeArgs = '@ARGS@'
+function Log($m) {
+  try { Add-Content -LiteralPath $log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m) -Encoding UTF8 } catch {}
+}
+Log "update start: $src -> $dst"
+try { Wait-Process -Id $procId -Timeout 40 -ErrorAction SilentlyContinue } catch {}
 Start-Sleep -Milliseconds 700
 $ok = $false
-for ($i = 0; $i -lt 5 -and -not $ok; $i++) {
-  try { Copy-Item -Path (Join-Path $Src '*') -Destination $Dst -Recurse -Force -ErrorAction Stop; $ok = $true }
-  catch { Start-Sleep -Seconds 2 }
+for ($i = 0; $i -lt 8 -and -not $ok; $i++) {
+  try { Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force -ErrorAction Stop; $ok = $true }
+  catch { Log ("copy failed: " + $_.Exception.Message); Start-Sleep -Seconds 2 }
 }
-$exe = Join-Path $Dst 'MidnightClips.exe'
-if ($ExeArgs) { Start-Process -FilePath $exe -ArgumentList $ExeArgs -WorkingDirectory $Dst }
-else { Start-Process -FilePath $exe -WorkingDirectory $Dst }
+Log "copied: $ok"
+$exe = Join-Path $dst 'MidnightClips.exe'
+try {
+  if ($exeArgs) { Start-Process -FilePath $exe -ArgumentList $exeArgs -WorkingDirectory $dst -ErrorAction Stop }
+  else { Start-Process -FilePath $exe -WorkingDirectory $dst -ErrorAction Stop }
+  Log "started"
+} catch { Log ("start failed: " + $_.Exception.Message) }
 Start-Sleep -Seconds 2
-Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
+Set-Location $env:TEMP
+Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+Log "done"
 """
+
+
+def build_script(pid, src, dst, tmp, log, exe_args=""):
+    """Текст установщика. Значения вшиты в сам скрипт: у PowerShell -File
+    пустой аргумент теряется, и из-за этого обновление 0.1.2-0.1.4 не ставилось."""
+    def q(value):
+        return str(value).replace("'", "''")
+    return (APPLY_PS1.replace("@PID@", str(int(pid))).replace("@SRC@", q(src)).replace("@DST@", q(dst))
+            .replace("@TMP@", q(tmp)).replace("@LOG@", q(log)).replace("@ARGS@", q(exe_args)))
+
+
+def launch_script(script_text, folder):
+    """Записать установщик в folder и запустить его отдельно от программы."""
+    script = os.path.join(folder, "apply.ps1")
+    with open(script, "w", encoding="utf-8-sig") as f:   # BOM — чтобы PowerShell понял кириллицу в путях
+        f.write(script_text)
+    powershell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                              "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    if not os.path.isfile(powershell):
+        powershell = "powershell"
+    return subprocess.Popen(
+        [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-WindowStyle", "Hidden", "-File", script],
+        cwd=tempfile.gettempdir(), close_fds=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=0x00000200 | 0x08000000)  # своя группа процессов, без окна
 
 
 def parse_version(text):
@@ -51,6 +91,7 @@ class Updater:
         self.enabled = bool(getattr(sys, "frozen", False)) and sys.platform == "win32"
         self.install_dir = os.path.dirname(sys.executable) if self.enabled else ""
         self._marker = os.path.join(data_dir, "update_attempt.json")
+        self._log = os.path.join(data_dir, "update.log")
         self._lock = threading.Lock()
         self.status = "idle"                # idle / checking / downloading / ready / current / error / disabled
         self.latest = ""                    # номер найденной версии
@@ -151,17 +192,9 @@ class Updater:
         try:
             with open(self._marker, "w", encoding="utf-8") as f:
                 json.dump({"version": self.latest, "time": time.time()}, f)
-            script = os.path.join(self._tmp, "apply.ps1")
-            with open(script, "w", encoding="ascii") as f:
-                f.write(APPLY_PS1)
-            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                   "-WindowStyle", "Hidden", "-File", script,
-                   "-ProcId", str(os.getpid()), "-Src", self._src, "-Dst", self.install_dir,
-                   "-Tmp", self._tmp, "-ExeArgs", exe_args]
-            subprocess.Popen(
-                cmd, cwd=tempfile.gettempdir(), close_fds=True,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=0x00000008 | 0x00000200 | 0x08000000)  # отдельно от нас, без окна
+            text = build_script(os.getpid(), self._src, self.install_dir, self._tmp,
+                                self._log, exe_args)
+            launch_script(text, self._tmp)
             return True
         except Exception as exc:
             self._set("error", "Не удалось запустить установку: %s" % exc)

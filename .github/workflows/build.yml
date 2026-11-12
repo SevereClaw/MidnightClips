@@ -21,6 +21,10 @@ jobs:
         run: |
           (Get-Content midnightclips/__init__.py) -replace '__version__ = ".*"', '__version__ = "0.1.${{ github.run_number }}"' | Set-Content midnightclips/__init__.py
           Get-Content midnightclips/__init__.py
+      - name: Проверить установщик обновлений
+        run: python tests/test_updater_win.py
+        env:
+          PYTHONUTF8: "1"
       - name: Собрать exe
         shell: cmd
         run: build.bat
