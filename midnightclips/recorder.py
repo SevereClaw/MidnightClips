@@ -18,7 +18,7 @@ from datetime import datetime
 from . import audio as audio_mod
 
 SEGMENT = 2  # секунд в одном кусочке
-CONCAT_LIMIT = 6000  # длиннее — склеиваем через общий файл
+CONCAT_LIMIT = 24000  # длиннее — склеиваем через общий файл
 TEST = bool(os.environ.get("MC_TEST_SOURCE"))  # проверка без Windows
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
@@ -305,9 +305,9 @@ class Recorder:
 
     def _build_cmd(self, capture, encoder, zero_copy, source, prefix):
         cfg = self.cfg
-        fps = 30 if int(cfg["fps"]) <= 30 else 60
+        fps = max(15, min(240, int(cfg["fps"])))
         height = int(cfg["height"])
-        mbps = max(2, min(60, int(cfg["bitrate_mbps"])))
+        mbps = max(2, min(100, int(cfg["bitrate_mbps"])))
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats", "-y"]
 
         # --- вход 0: экран

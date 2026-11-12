@@ -73,7 +73,7 @@ def main():
     out = os.path.join(tmp, "joined.mp4")
     rec.CONCAT_LIMIT = 0
     ok = r._mux(r._segments()[:-1], out)
-    rec.CONCAT_LIMIT = 6000
+    rec.CONCAT_LIMIT = 24000
     assert ok and os.path.getsize(out) > 0
     assert not [f for f in os.listdir(os.path.join(tmp, "buf")) if f.endswith(".tmp")]
     print("склейка через файл: ok,", os.path.getsize(out) // 1024, "КБ")
