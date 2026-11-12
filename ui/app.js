@@ -9,7 +9,7 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9",
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true,
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10,
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -33,6 +33,16 @@ const demoApi = {
   rename_clip: async (p, n) => { demo.clips.find((c) => c.path === p).name = n; return p; },
   delete_clip: async (p) => { demo.clips = demo.clips.filter((c) => c.path !== p); return true; },
   copy_clip: async () => true,
+  media_url: async () => window.DEMO_VIDEO || "",
+  clip_action: async (p, action) => {
+    let n = 0;
+    const timer = setInterval(() => {
+      n += 20;
+      window.onBackendEvent("job", { stage: action === "send" ? "Отправляю в Discord…" : "Сжимаю до 10 МБ…", percent: action === "send" ? null : n });
+      if (n >= 100) { clearInterval(timer); window.onBackendEvent("job_done", { ok: true, action, text: "Готово (демо)", path: "" }); }
+    }, 300);
+    return true;
+  },
 };
 const api = new Proxy({}, {
   get: (_t, name) => (...args) => {
@@ -149,6 +159,8 @@ window.onBackendEvent = (kind, data) => {
   if (kind === "state") applyState(data);
   else if (kind === "hotkeys") applyHotkeyStatus(data);
   else if (kind === "update") applyUpdate(data);
+  else if (kind === "job") showJob(data);
+  else if (kind === "job_done") finishJob(data);
   else if (kind === "saving") $("btnClip").classList.add("is-busy");
   else if (kind === "saved") {
     $("btnClip").classList.remove("is-busy");
@@ -204,10 +216,10 @@ function renderClips() {
     const thumb = document.createElement("button");
     thumb.className = "thumb";
     thumb.dataset.path = clip.path;
-    thumb.title = "Смотреть";
+    thumb.title = "Смотреть и обрезать";
     thumb.innerHTML = '<span class="play"></span><span class="badge badge-time" hidden></span>' + (clip.recording ? '<span class="badge badge-rec">запись</span>' : "");
     if (clip.duration != null) { const b = thumb.querySelector(".badge-time"); b.textContent = fmtDuration(clip.duration); b.hidden = false; }
-    thumb.onclick = () => api.open_clip(clip.path);
+    thumb.onclick = () => openEditor(clip);
     thumbObserver.observe(thumb);
 
     const name = document.createElement("div");
@@ -252,6 +264,118 @@ async function loadClips() {
   renderClips();
 }
 
+// ---------------------------------------------------------------- просмотр и обрезка
+
+const video = $("edVideo");
+let edClip = null;
+let edBusy = false;
+
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60), s = sec - m * 60;
+  return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
+}
+function trimValues() {
+  return [parseFloat($("trimStart").value), parseFloat($("trimEnd").value)];
+}
+function drawTrim() {
+  const dur = video.duration || 0;
+  if (!dur) return;
+  const [a, b] = trimValues();
+  $("trimRange").style.left = (a / dur * 100) + "%";
+  $("trimRange").style.width = ((b - a) / dur * 100) + "%";
+  const whole = a < 0.05 && b > dur - 0.05;
+  $("trimText").textContent = whole
+    ? "Весь клип, " + fmtTime(dur)
+    : "Отрезок " + fmtTime(a) + " – " + fmtTime(b) + ", длина " + fmtTime(b - a);
+  $("edTrim").disabled = whole || edBusy;
+}
+function setTrim(a, b) {
+  const dur = video.duration || 0;
+  a = Math.max(0, Math.min(a, dur - 0.5));
+  b = Math.max(a + 0.5, Math.min(b, dur));
+  $("trimStart").value = a;
+  $("trimEnd").value = b;
+  drawTrim();
+}
+async function openEditor(clip) {
+  edClip = clip;
+  $("edName").textContent = clip.name;
+  $("editor").hidden = false;
+  $("edJob").hidden = true;
+  $("trimText").textContent = "Загружаю клип…";
+  video.src = await api.media_url(clip.path);
+  $("edClose").focus();
+}
+function closeEditor() {
+  if (edBusy) api.cancel_job();
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  $("editor").hidden = true;
+  edClip = null;
+}
+video.addEventListener("loadedmetadata", () => {
+  const dur = video.duration;
+  ["trimStart", "trimEnd"].forEach((id) => { $(id).max = dur; });
+  setTrim(0, dur);
+});
+video.addEventListener("error", () => { if (edClip) $("trimText").textContent = "Этот клип не открывается во встроенном плеере — нажмите «Открыть в плеере»."; });
+video.addEventListener("timeupdate", () => {
+  const dur = video.duration || 0;
+  if (!dur) return;
+  const [a, b] = trimValues();
+  $("trimPlay").style.left = (video.currentTime / dur * 100) + "%";
+  if (!video.paused && b < dur - 0.05 && video.currentTime >= b) { video.pause(); video.currentTime = a; }
+});
+$("trimStart").addEventListener("input", () => { const [a, b] = trimValues(); setTrim(Math.min(a, b - 0.5), b); video.currentTime = trimValues()[0]; });
+$("trimEnd").addEventListener("input", () => { const [a, b] = trimValues(); setTrim(a, Math.max(b, a + 0.5)); video.currentTime = trimValues()[1]; });
+$("trimSetStart").onclick = () => setTrim(video.currentTime, trimValues()[1]);
+$("trimSetEnd").onclick = () => setTrim(trimValues()[0], video.currentTime);
+$("trimReset").onclick = () => setTrim(0, video.duration || 0);
+$("edClose").onclick = closeEditor;
+$("edOpen").onclick = () => edClip && api.open_clip(edClip.path);
+$("edCancel").onclick = () => api.cancel_job();
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("editor").hidden && $("modal").hidden) closeEditor();
+});
+
+function setEditorBusy(busy) {
+  edBusy = busy;
+  ["edCompress", "edSend"].forEach((id) => { $(id).disabled = busy; });
+  drawTrim();
+}
+async function runAction(action) {
+  if (!edClip || edBusy) return;
+  const dur = video.duration || 0;
+  let [a, b] = dur ? trimValues() : [null, null];
+  if (dur && a < 0.05 && b > dur - 0.05) { a = null; b = null; }
+  if (action === "send" && !(settings.discord_webhook || "").trim()) {
+    flash("Сначала вставьте ссылку вебхука: Настройки → Discord", true);
+    return;
+  }
+  video.pause();
+  setEditorBusy(true);
+  showJob({ stage: "Начинаю…", percent: null });
+  if (!(await api.clip_action(edClip.path, action, a, b))) {
+    finishJob({ ok: false, text: "Сейчас занято другой задачей — подождите." });
+  }
+}
+function showJob(job) {
+  $("edJob").hidden = false;
+  $("edJobText").textContent = job.stage + (job.percent != null ? " " + job.percent + "%" : "");
+  $("edJobFill").parentElement.classList.toggle("is-unknown", job.percent == null);
+  $("edJobFill").style.width = job.percent != null ? job.percent + "%" : "";
+}
+function finishJob(result) {
+  setEditorBusy(false);
+  $("edJob").hidden = true;
+  flash(result.text, !result.ok);
+  if (result.ok && result.action !== "send") loadClips();
+}
+$("edTrim").onclick = () => runAction("trim");
+$("edCompress").onclick = () => runAction("compress");
+$("edSend").onclick = () => runAction("send");
+
 // ---------------------------------------------------------------- настройки
 
 function applySettings(s) {
@@ -271,6 +395,7 @@ function applySettings(s) {
   $("kbdRec").textContent = s.hotkey_record || "кнопкой";
   $("clipLen").textContent = fmtBuffer(s.buffer_seconds);
   $("clipsDir").textContent = s.clips_dir_resolved || "";
+  $("edCompress").textContent = "Сжать до " + s.discord_limit_mb + " МБ";
 }
 async function saveSetting(key, value) {
   applySettings(await api.set_settings({ [key]: value }));

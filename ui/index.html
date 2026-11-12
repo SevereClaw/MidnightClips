@@ -130,6 +130,19 @@
       </div>
 
       <div class="panel">
+        <h2>Discord</h2>
+        <label class="row"><span>Ссылка вебхука
+          <small>В Discord: настройки канала → Интеграции → Вебхуки → Новый вебхук → Скопировать URL. Клипы будут приходить в этот канал</small></span>
+          <input type="text" data-key="discord_webhook" id="inpWebhook" placeholder="https://discord.com/api/webhooks/…" spellcheck="false"></label>
+        <label class="row"><span>Предел размера файла
+          <small>До него сжимает кнопка «Сжать», и под него подгоняется клип при отправке</small></span>
+          <select data-key="discord_limit_mb" data-type="int">
+            <option value="10">10 МБ — без Nitro</option><option value="25">25 МБ</option>
+            <option value="50">50 МБ</option><option value="100">100 МБ</option><option value="500">500 МБ</option>
+          </select></label>
+      </div>
+
+      <div class="panel">
         <h2>Файлы</h2>
         <div class="row"><span>Папка клипов<small id="clipsDir"></small></span>
           <button class="mini" id="btnPick">Выбрать папку</button></div>
@@ -160,6 +173,41 @@
 </div>
 
 <div class="flashes" id="flashes" aria-live="polite"></div>
+
+<div class="editor" id="editor" hidden>
+  <div class="editor-box" role="dialog" aria-modal="true">
+    <header class="editor-head">
+      <h2 id="edName"></h2>
+      <button class="mini" id="edClose">Закрыть</button>
+    </header>
+    <video id="edVideo" controls preload="metadata"></video>
+    <div class="trim">
+      <div class="trim-track">
+        <div class="trim-range" id="trimRange"></div>
+        <div class="trim-play" id="trimPlay"></div>
+        <input type="range" id="trimStart" min="0" max="1" step="0.05" value="0" aria-label="Начало отрезка">
+        <input type="range" id="trimEnd" min="0" max="1" step="0.05" value="1" aria-label="Конец отрезка">
+      </div>
+      <div class="trim-info">
+        <strong id="trimText"></strong>
+        <button class="link" id="trimSetStart">Начало здесь</button>
+        <button class="link" id="trimSetEnd">Конец здесь</button>
+        <button class="link" id="trimReset">Весь клип</button>
+      </div>
+    </div>
+    <div class="editor-actions" id="edActions">
+      <button class="mini" id="edTrim">Сохранить обрезку</button>
+      <button class="mini" id="edCompress">Сжать</button>
+      <button class="mini mini-discord" id="edSend">Отправить в Discord</button>
+      <button class="mini mini-quiet" id="edOpen">Открыть в плеере</button>
+    </div>
+    <div class="job" id="edJob" hidden>
+      <div class="job-bar"><i id="edJobFill"></i></div>
+      <span id="edJobText"></span>
+      <button class="link" id="edCancel">Отменить</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal" id="modal" hidden>
   <div class="modal-box" role="dialog" aria-modal="true">

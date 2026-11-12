@@ -52,6 +52,8 @@ DEFAULTS = {
     "toast": True,
     "autostart": False,
     "auto_update": True,
+    "discord_webhook": "",      # ссылка вебхука канала
+    "discord_limit_mb": 10,     # предел размера файла при сжатии и отправке
 }
 
 # Изменение этих ключей требует перезапуска захвата.

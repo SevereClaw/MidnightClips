@@ -299,6 +299,41 @@ input[type="checkbox"]:checked::after { left: 28px; }
 .hotkey.is-listening { background: var(--black); color: var(--yellow); }
 .version { color: #5c5200; font-size: 12.5px; margin: 0 0 10px; }
 
+/* ------------------------------------------------ просмотр и обрезка */
+
+.editor { position: fixed; inset: 0; background: rgba(0,0,0,.78); z-index: 25; display: flex; align-items: center; justify-content: center; padding: 18px; }
+.editor-box {
+  background: var(--yellow); border: 5px solid var(--black); box-shadow: 10px 10px 0 var(--black);
+  padding: 14px 18px 16px; width: min(980px, 100%); max-height: 100%; display: flex; flex-direction: column; gap: 12px;
+}
+.editor-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.editor-head h2 { font-family: var(--display); font-style: italic; font-size: 22px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#edVideo { width: 100%; min-height: 0; flex: 1 1 auto; max-height: 56vh; background: #000; border: 4px solid var(--black); }
+.trim-track { position: relative; height: 34px; background: var(--black); }
+.trim-range { position: absolute; top: 0; bottom: 0; background: var(--orange); }
+.trim-play { position: absolute; top: -4px; bottom: -4px; width: 3px; background: var(--white); pointer-events: none; }
+.trim-track input[type="range"] {
+  appearance: none; -webkit-appearance: none; position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; padding: 0; background: none; border: 0; pointer-events: none;
+}
+.trim-track input[type="range"]::-webkit-slider-runnable-track { background: none; height: 100%; }
+.trim-track input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; pointer-events: auto; cursor: ew-resize;
+  width: 16px; height: 46px; margin-top: -6px; background: var(--white); border: 4px solid var(--black);
+}
+.trim-info { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; margin-top: 12px; }
+.trim-info strong { margin-right: auto; }
+.editor-actions { display: flex; flex-wrap: wrap; gap: 10px 14px; padding-left: 4px; }
+.mini-discord { background: #5865F2; }
+.mini-quiet { background: transparent; color: var(--black); box-shadow: inset 0 0 0 3px var(--black); margin-left: auto; }
+.mini:disabled { opacity: .45; cursor: default; }
+.job { display: flex; align-items: center; gap: 14px; font-weight: 700; }
+.job-bar { flex: 1; height: 16px; background: var(--white); border: 3px solid var(--black); transform: skewX(-12deg); overflow: hidden; }
+.job-bar i { display: block; height: 100%; width: 0; background: var(--black); transition: width .2s; }
+.job-bar.is-unknown i { width: 35%; animation: unknown 1s linear infinite; }
+@keyframes unknown { from { margin-left: -35%; } to { margin-left: 100%; } }
+input#inpWebhook { width: 300px; }
+
 .update-bar {
   position: fixed; left: calc(var(--rail) + 6px); bottom: 18px; z-index: 15;
   background: var(--black); color: var(--white); font-weight: 600;
@@ -310,7 +345,7 @@ input[type="checkbox"]:checked::after { left: 28px; }
 
 /* ----------------------------------------------- сообщения и диалог */
 
-.flashes { position: fixed; right: 22px; bottom: 20px; display: flex; flex-direction: column; gap: 10px; z-index: 20; align-items: flex-end; }
+.flashes { position: fixed; right: 22px; bottom: 20px; display: flex; flex-direction: column; gap: 10px; z-index: 40; align-items: flex-end; }
 .flash {
   background: var(--black); color: var(--white); padding: 11px 20px 11px 30px; max-width: 420px;
   font-weight: 600; clip-path: polygon(16px 0, 100% 0, 100% 100%, 0 100%);
@@ -333,5 +368,5 @@ input[type="checkbox"]:checked::after { left: 28px; }
   h1 { font-size: 42px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .tv-static, .tv-rec .dot, .flash { animation: none; }
+  .tv-static, .tv-rec .dot, .flash, .job-bar.is-unknown i { animation: none; }
 }

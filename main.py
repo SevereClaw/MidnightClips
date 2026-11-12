@@ -10,7 +10,9 @@ from midnightclips.config import CAPTURE_KEYS, Config, cache_dir, data_dir, reso
 from midnightclips.hotkeys import Hotkeys
 from midnightclips.library import Library
 from midnightclips.recorder import Recorder, find_ffmpeg
+from midnightclips.media import MediaServer
 from midnightclips.toast import Toast
+from midnightclips.tools import ClipTools
 from midnightclips.updater import Updater
 
 
@@ -33,6 +35,8 @@ class App:
         self.hotkeys = Hotkeys()
         self.toast = Toast()
         self.library = Library(self.cfg, self.ffmpeg, cache_dir())
+        self.media = MediaServer(self.library.inside)
+        self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event)
         self.recorder = Recorder(
             self.cfg, self.ffmpeg, os.path.join(cache_dir(), "buffer"), self.log_path,
             self.on_event, winutil.monitors)
@@ -167,6 +171,11 @@ class App:
                 self.toast.show("Не получилось", payload.get("text", ""))
         self.push(kind, payload)
 
+    def on_tool_event(self, kind, payload):
+        if kind == "job_done":
+            self.sound("saved" if payload.get("ok") else "error")
+        self.push(kind, payload)
+
     def push(self, kind, payload):
         """Отправить событие в интерфейс."""
         if self.window is None or self.quitting:
@@ -242,6 +251,22 @@ class Api:
 
     def get_thumb(self, path):
         return self._app.library.thumb(path)
+
+    def media_url(self, path):
+        """Адрес клипа для встроенного плеера."""
+        if self._app.library.inside(path) and os.path.isfile(path):
+            return self._app.media.url(path)
+        return ""
+
+    def clip_action(self, path, action, start=None, end=None):
+        """action: trim — сохранить обрезку, compress — сжать под лимит, send — отправить в Discord."""
+        if not (self._app.library.inside(path) and os.path.isfile(path)):
+            return False
+        return self._app.tools.start(path, action, start, end)
+
+    def cancel_job(self):
+        self._app.tools.cancel()
+        return True
 
     def open_clip(self, path):
         if self._app.library.inside(path) and os.path.isfile(path):
