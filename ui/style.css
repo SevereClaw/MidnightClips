@@ -299,6 +299,15 @@ input[type="checkbox"]:checked::after { left: 28px; }
 .hotkey.is-listening { background: var(--black); color: var(--yellow); }
 .version { color: #5c5200; font-size: 12.5px; margin: 0 0 10px; }
 
+.update-bar {
+  position: fixed; left: calc(var(--rail) + 6px); bottom: 18px; z-index: 15;
+  background: var(--black); color: var(--white); font-weight: 600;
+  padding: 9px 14px 9px 22px; display: flex; align-items: center; gap: 16px;
+  border-left: 8px solid var(--orange);
+}
+.update-bar .mini { background: var(--yellow); color: var(--black); }
+.update-bar .mini:hover { background: var(--white); }
+
 /* ----------------------------------------------- сообщения и диалог */
 
 .flashes { position: fixed; right: 22px; bottom: 20px; display: flex; flex-direction: column; gap: 10px; z-index: 20; align-items: flex-end; }

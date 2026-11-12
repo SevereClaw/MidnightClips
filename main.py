@@ -11,6 +11,7 @@ from midnightclips.hotkeys import Hotkeys
 from midnightclips.library import Library
 from midnightclips.recorder import Recorder, find_ffmpeg
 from midnightclips.toast import Toast
+from midnightclips.updater import Updater
 
 
 class App:
@@ -27,6 +28,8 @@ class App:
         self.window = None
         self.tray = None
         self.quitting = False
+        self.visible = True
+        self.updater = Updater(data_dir(), lambda kind, data: self.push(kind, data))
         self.hotkeys = Hotkeys()
         self.toast = Toast()
         self.library = Library(self.cfg, self.ffmpeg, cache_dir())
@@ -47,6 +50,32 @@ class App:
             self.recorder.message = "Не найден ffmpeg.exe — положите его рядом с программой."
         else:
             self.recorder.start()
+        threading.Thread(target=self.update_loop, daemon=True, name="updater").start()
+
+    def update_loop(self):
+        """При запуске — проверить и сразу обновиться; дальше проверять раз в 6 часов."""
+        first = True
+        while not self.quitting:
+            if self.cfg["auto_update"]:
+                ready = self.updater.check()
+                if ready and first and not self.updater.already_tried() \
+                        and self.recorder.recording_since is None:
+                    self.apply_update()
+                    return
+            first = False
+            time.sleep(6 * 3600)
+
+    def apply_update(self):
+        if self.recorder.recording_since is not None:
+            self.push("error", {"text": "Сначала остановите запись — потом обновлюсь."})
+            return False
+        if not self.updater.apply("" if self.visible else "--minimized"):
+            return False
+        if self.cfg["toast"]:
+            self.toast.show("Обновляюсь", "MidnightClips " + self.updater.latest)
+            time.sleep(1.2)
+        self.quit()
+        return True
 
     def bind_hotkeys(self):
         self.hotkeys.bind("clip", self.cfg["hotkey_clip"], self.save_clip)
@@ -77,6 +106,7 @@ class App:
         try:
             self.window.show()
             self.window.restore()
+            self.visible = True
         except Exception:
             pass
 
@@ -86,6 +116,7 @@ class App:
             return True
         try:
             self.window.hide()
+            self.visible = False
         except Exception:
             return True
         return False  # не закрывать: программа остаётся в трее
@@ -158,6 +189,7 @@ class Api:
         state = app.recorder.snapshot()
         state["hotkeys"] = dict(app.hotkeys.status)
         state["version"] = __version__
+        state["update"] = app.updater.snapshot()
         return state
 
     def get_settings(self):
@@ -192,6 +224,13 @@ class Api:
     def toggle_record(self):
         self._app.recorder.toggle_recording("")
         return True
+
+    def check_update(self):
+        threading.Thread(target=self._app.updater.check, daemon=True).start()
+        return True
+
+    def apply_update(self):
+        return self._app.apply_update()
 
     def restart_capture(self):
         if self._app.ffmpeg:
@@ -270,6 +309,7 @@ def main():
     if app.cfg["autostart"]:
         winutil.set_autostart(True)  # обновить путь, если программу перенесли
     minimized = "--minimized" in sys.argv
+    app.visible = not minimized
     app.window = webview.create_window(
         "MidnightClips", os.path.join(app.res, "ui", "index.html"), js_api=Api(app),
         width=1180, height=760, min_size=(940, 620), background_color="#FFE100",

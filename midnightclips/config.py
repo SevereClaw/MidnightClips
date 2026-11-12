@@ -51,6 +51,7 @@ DEFAULTS = {
     "sound": True,
     "toast": True,
     "autostart": False,
+    "auto_update": True,
 }
 
 # Изменение этих ключей требует перезапуска захвата.

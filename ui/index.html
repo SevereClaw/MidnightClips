@@ -135,6 +135,10 @@
         <label class="row"><span>Запускать вместе с Windows</span><input type="checkbox" data-key="autostart"></label>
         <label class="row"><span>Звуковой сигнал при сохранении</span><input type="checkbox" data-key="sound"></label>
         <label class="row"><span>Уведомление в углу экрана</span><input type="checkbox" data-key="toast"></label>
+        <label class="row"><span>Обновлять автоматически
+          <small>Новая версия ставится сама при запуске программы</small></span><input type="checkbox" data-key="auto_update"></label>
+        <div class="row"><span>Версия<small id="updateInfo"></small></span>
+          <button class="mini" id="btnCheckUpdate">Проверить обновления</button></div>
         <div class="row"><span>Захват<small id="captureInfo"></small></span>
           <span class="row-buttons"><button class="mini" id="btnRestart">Перезапустить захват</button>
           <button class="mini" id="btnLog">Журнал</button></span></div>
@@ -142,6 +146,11 @@
       <p class="version" id="version"></p>
     </section>
   </main>
+</div>
+
+<div class="update-bar" id="updateBar" hidden>
+  <span id="updateBarText"></span>
+  <button class="mini" id="btnUpdate">Перезапустить и обновить</button>
 </div>
 
 <div class="flashes" id="flashes" aria-live="polite"></div>

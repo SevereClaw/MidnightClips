@@ -16,6 +16,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Проставить версию
+        shell: pwsh
+        run: |
+          (Get-Content midnightclips/__init__.py) -replace '__version__ = ".*"', '__version__ = "0.1.${{ github.run_number }}"' | Set-Content midnightclips/__init__.py
+          Get-Content midnightclips/__init__.py
       - name: Собрать exe
         shell: cmd
         run: build.bat

@@ -9,7 +9,7 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9",
-    folder_per_game: true, sound: true, toast: true, autostart: false,
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true,
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -18,7 +18,7 @@ const demo = {
   ].map((c, i) => ({ path: "demo" + i, name: c[0], game: c[1], duration: c[2], size: c[3], recording: !!c[4], mtime: Date.now() / 1000 - i * 5400 })),
 };
 const demoApi = {
-  get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", recording: false, hotkeys: { clip: true, record: true }, version: "демо" }),
+  get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", recording: false, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
   get_settings: async () => demo.settings,
   set_settings: async (v) => Object.assign(demo.settings, v),
   get_options: async () => ({ monitors: ["Монитор 1 — 2560×1440 (основной)", "Монитор 2 — 1920×1080"], mics: ["Микрофон (USB Audio)"] }),
@@ -123,6 +123,19 @@ function applyState(st) {
   $("recTitle").textContent = st.recording ? "Остановить" : "Начать запись";
   if (st.hotkeys) applyHotkeyStatus(st.hotkeys);
   if (st.version) $("version").textContent = "MidnightClips " + st.version;
+  if (st.update) applyUpdate(st.update);
+}
+function applyUpdate(u) {
+  const texts = {
+    disabled: "Обновления работают только в собранной программе (exe)",
+    checking: "Проверяю…", downloading: "Скачиваю версию " + u.latest + "…",
+    ready: "Версия " + u.latest + " скачана и готова к установке",
+    current: "Установлена последняя версия", error: u.message, idle: "",
+  };
+  $("updateInfo").textContent = "Сейчас " + u.current + ". " + (texts[u.status] || "");
+  $("updateBar").hidden = u.status !== "ready";
+  $("updateBarText").textContent = "Готово обновление " + u.latest;
+  $("btnCheckUpdate").disabled = u.status === "checking" || u.status === "downloading" || u.status === "disabled";
 }
 function applyHotkeyStatus(h) {
   $("warnClip").hidden = h.clip !== false;
@@ -135,6 +148,7 @@ setInterval(() => {
 window.onBackendEvent = (kind, data) => {
   if (kind === "state") applyState(data);
   else if (kind === "hotkeys") applyHotkeyStatus(data);
+  else if (kind === "update") applyUpdate(data);
   else if (kind === "saving") $("btnClip").classList.add("is-busy");
   else if (kind === "saved") {
     $("btnClip").classList.remove("is-busy");
@@ -312,6 +326,8 @@ $("btnClip").onclick = () => api.save_clip();
 $("btnRec").onclick = () => api.toggle_record();
 $("btnFolder").onclick = () => api.open_clips_folder();
 $("btnLog").onclick = () => api.open_log();
+$("btnCheckUpdate").onclick = () => api.check_update();
+$("btnUpdate").onclick = () => api.apply_update();
 $("btnRestart").onclick = () => { api.restart_capture(); flash("Перезапускаю захват"); };
 $("btnPick").onclick = async () => { applySettings(await api.pick_folder()); loadClips(); };
 $("search").addEventListener("input", renderClips);
