@@ -75,6 +75,7 @@ class Recorder:
         self._rec_title = ""
         self._encoders = None
         self._good = None                 # последний сработавший вариант захвата
+        self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
 
         os.makedirs(work_dir, exist_ok=True)
         for old in glob.glob(os.path.join(work_dir, "*.ts")):
@@ -243,14 +244,26 @@ class Recorder:
         return result
 
     def _launch_any(self):
-        for cand in self._candidates():
-            if self._stop.is_set() or self._restart.is_set():
-                return None
-            session = self._launch(cand)
-            if session:
-                self._good = cand
-                self.capture, self.encoder = cand[0], cand[1]
-                return session
+        # Если не запускается со звуком — лучше писать без микрофона или без звука, чем никак.
+        levels = [0]
+        if self.cfg["mic"] and not TEST:
+            levels.append(1)
+        if self.cfg["audio"] or self.cfg["mic"]:
+            levels.append(2)
+        for level in levels:
+            self._degrade = level
+            for cand in self._candidates():
+                if self._stop.is_set() or self._restart.is_set():
+                    return None
+                session = self._launch(cand)
+                if session:
+                    self._good = cand
+                    self.capture, self.encoder = cand[0], cand[1]
+                    if level == 1:
+                        self.audio_note = "Микрофон не подключился — пишу без него. Подробности в журнале."
+                    elif level == 2:
+                        self.audio_note = "Звук не подключился — пишу без звука. Подробности в журнале."
+                    return session
         return None
 
     def _launch(self, cand):
@@ -259,7 +272,7 @@ class Recorder:
         prefix = "s%04d_" % self._session
         source = None
         self.audio_note = ""
-        if self.cfg["audio"]:
+        if self.cfg["audio"] and self._degrade < 2:
             source = audio_mod.FakeSource() if TEST else audio_mod.LoopbackSource()
             try:
                 source.open()
@@ -331,15 +344,14 @@ class Recorder:
         # --- входы звука
         audio_inputs = []
         if source:
-            cmd += ["-f", "s16le", "-ar", str(source.rate), "-ac", str(source.channels),
-                    "-thread_queue_size", "4096"]
+            cmd += ["-f", "s16le", "-ar", str(source.rate), "-ac", str(source.channels)]
             offset = int(cfg["audio_offset_ms"])
             if offset:
                 cmd += ["-itsoffset", "%.3f" % (offset / 1000.0)]
             cmd += ["-i", "pipe:0"]
             audio_inputs.append(1)
-        if cfg["mic"] and not TEST:
-            cmd += ["-f", "dshow", "-thread_queue_size", "4096", "-i", "audio=" + cfg["mic"]]
+        if cfg["mic"] and not TEST and self._degrade < 1:
+            cmd += ["-f", "dshow", "-i", "audio=" + cfg["mic"]]
             audio_inputs.append(len(audio_inputs) + 1)
 
         # --- видео
