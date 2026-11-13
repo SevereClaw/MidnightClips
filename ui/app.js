@@ -19,7 +19,7 @@ const demo = {
     favorite: i === 0 || i === 3, tags: [["босс"], [], [], ["эйс", "смешное"], ["эйс"], []][i] })),
 };
 const demoApi = {
-  get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", recording: false, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
+  get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", fps_real: 59.8, fps_target: 60, slow: false, fallback: false, recording: !!demo.rec, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
   get_settings: async () => demo.settings,
   set_settings: async (v) => Object.assign(demo.settings, v),
   get_options: async () => ({ monitors: ["Монитор 1 — 2560×1440 (основной)", "Монитор 2 — 1920×1080"], mics: ["Микрофон (USB Audio)"] }),
@@ -133,8 +133,19 @@ function applyState(st) {
     if (!settings.buffer_enabled) sub = "Буфер повтора выключен. " + sub;
     if (st.audio_note) sub = st.audio_note;
   }
+  let warn = false;
+  if (st.state === "on" && st.slow) {
+    sub = "Запись не успевает: " + Math.round(st.fps_real) + " из " + st.fps_target + " кадров в секунду. Выберите набор попроще в настройках.";
+    warn = true;
+  } else if (st.state === "on" && st.fallback && !st.audio_note) {
+    sub += ". Запасной режим — возможны рывки";
+    warn = true;
+  }
   $("statusSub").textContent = sub;
-  $("captureInfo").textContent = st.state === "on" ? [st.encoder, st.capture].filter(Boolean).join(", ") : (st.message || "");
+  $("statusSub").classList.toggle("is-warn", warn);
+  $("captureInfo").textContent = st.state === "on"
+    ? [st.encoder, st.capture, st.fps_real != null ? "пишется " + Math.round(st.fps_real) + " из " + st.fps_target + " кадров в секунду" : ""].filter(Boolean).join(", ")
+    : (st.message || "");
   $("btnRec").classList.toggle("is-on", !!st.recording);
   $("recTitle").textContent = st.recording ? "Остановить" : "Начать запись";
   if (st.hotkeys) applyHotkeyStatus(st.hotkeys);
@@ -449,6 +460,7 @@ function applySettings(s) {
   $("edCompress").textContent = "Сжать до " + s.discord_limit_mb + " МБ";
   $("volText").textContent = s.sound_volume + "%" + (s.sound_volume > 100 ? " — громче исходного файла" : "");
   renderSounds();
+  renderPresets();
 }
 async function saveSetting(key, value) {
   applySettings(await api.set_settings({ [key]: value }));
@@ -461,6 +473,37 @@ document.querySelectorAll("[data-key]").forEach((el) => {
     saveSetting(el.dataset.key, value);
   });
 });
+
+// Готовые наборы настроек
+const PRESETS = [
+  ["Слабый компьютер", "720p, 30 кадров, клип 30 секунд. Меньше всего нагрузки", { height: 720, fps: 30, bitrate_mbps: 6, buffer_seconds: 30 }],
+  ["Для Discord", "720p, 60 кадров, клип 30 секунд. Лёгкие файлы", { height: 720, fps: 60, bitrate_mbps: 6, buffer_seconds: 30 }],
+  ["Стандарт", "1080p, 60 кадров, клип 1 минута", { height: 1080, fps: 60, bitrate_mbps: 12, buffer_seconds: 60 }],
+  ["Высокое качество", "Как на экране, 60 кадров, клип 1 минута", { height: 0, fps: 60, bitrate_mbps: 20, buffer_seconds: 60 }],
+  ["Плавность", "Как на экране, 120 кадров. Нужны мощная видеокарта и быстрый монитор", { height: 0, fps: 120, bitrate_mbps: 50, buffer_seconds: 60 }],
+  ["Долгие моменты", "1080p, 30 кадров, клип 10 минут. Для длинных записей", { height: 1080, fps: 30, bitrate_mbps: 12, buffer_seconds: 600 }],
+];
+function renderPresets() {
+  const box = $("presets");
+  box.innerHTML = "";
+  PRESETS.forEach(([title, text, values]) => {
+    const b = document.createElement("button");
+    const active = Object.keys(values).every((k) => settings[k] === values[k]);
+    b.className = "preset" + (active ? " is-active" : "");
+    b.setAttribute("aria-pressed", active ? "true" : "false");
+    const strong = document.createElement("strong");
+    strong.textContent = title;
+    const span = document.createElement("span");
+    span.textContent = text;
+    b.append(strong, span);
+    b.onclick = async () => {
+      applySettings(await api.set_settings(values));
+      flash("Набор «" + title + "» включён");
+      applyState(await api.get_state());
+    };
+    box.appendChild(b);
+  });
+}
 
 // Автоочистка: перед включением показываем, сколько клипов уйдёт прямо сейчас.
 document.querySelectorAll("[data-cleanup]").forEach((el) => {
@@ -577,6 +620,7 @@ async function init() {
   options.mics.forEach((name) => mic.add(new Option(name, name)));
   applySettings(settings);
 }
+setInterval(async () => { if (started && !document.hidden) applyState(await api.get_state()); }, 5000);
 let started = false;
 function start() { if (!started) { started = true; init(); } }
 window.addEventListener("pywebviewready", start);

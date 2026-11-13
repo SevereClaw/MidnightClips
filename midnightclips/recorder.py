@@ -21,6 +21,7 @@ SEGMENT = 2  # секунд в одном кусочке
 CONCAT_LIMIT = 24000  # длиннее — склеиваем через общий файл
 TEST = bool(os.environ.get("MC_TEST_SOURCE"))  # проверка без Windows
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+ABOVE_NORMAL = 0x00008000 if sys.platform == "win32" else 0   # приоритет процесса «выше среднего»
 
 HW_ENCODERS = ["h264_nvenc", "h264_amf", "h264_qsv"]
 ENCODER_TITLES = {
@@ -76,6 +77,9 @@ class Recorder:
         self._encoders = None
         self._good = None                 # последний сработавший вариант захвата
         self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
+        self.fps_real = None              # сколько кадров в секунду реально успевает записываться
+        self.fps_target = 0
+        self.slow = False                 # захват не успевает за выбранной частотой
 
         os.makedirs(work_dir, exist_ok=True)
         for old in glob.glob(os.path.join(work_dir, "*.ts")):
@@ -116,6 +120,10 @@ class Recorder:
             "encoder": ENCODER_TITLES.get(self.encoder, self.encoder),
             "capture": CAPTURE_TITLES.get(self.capture, self.capture),
             "audio_note": self.audio_note,
+            "fps_real": self.fps_real,
+            "fps_target": self.fps_target,
+            "slow": self.slow,
+            "fallback": self.state == "on" and (self.capture == "gdi" or self.encoder == "libx264"),
             "recording": self.recording_since is not None,
             "recording_since": self.recording_since,
         }
@@ -332,11 +340,18 @@ class Recorder:
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), capture, encoder,
                 " (zero-copy)" if zero_copy else "", " ".join(cmd)))
             log.flush()
+            # Кодирование видеокартой почти не грузит процессор, поэтому ему можно дать
+            # приоритет повыше — тогда игра не «выдавливает» запись и в клипе меньше рывков.
+            priority = ABOVE_NORMAL if encoder != "libx264" else 0
             proc = subprocess.Popen(
                 cmd, cwd=self.work_dir, bufsize=0,
                 stdin=subprocess.PIPE if source else subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=log, creationflags=NO_WINDOW,
+                stdout=subprocess.PIPE, stderr=log, creationflags=NO_WINDOW | priority,
             )
+            self.fps_real, self.slow = None, False
+            self.fps_target = max(15, min(240, int(self.cfg["fps"])))
+            threading.Thread(target=self._watch_progress, args=(proc, self.fps_target),
+                             daemon=True, name="progress").start()
             log.close()
         except OSError as exc:
             self.message = str(exc)
@@ -366,7 +381,8 @@ class Recorder:
         fps = max(15, min(240, int(cfg["fps"])))
         height = int(cfg["height"])
         mbps = max(2, min(100, int(cfg["bitrate_mbps"])))
-        cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats", "-y"]
+        cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats", "-y",
+               "-progress", "pipe:1", "-stats_period", "2"]
 
         # --- вход 0: экран
         if capture == "test":
@@ -410,7 +426,8 @@ class Recorder:
         rate = ["-b:v", "%dM" % mbps, "-maxrate", "%dM" % int(mbps * 1.5),
                 "-bufsize", "%dM" % (mbps * 2), "-g", str(fps)]
         if encoder == "h264_nvenc":
-            cmd += ["-c:v", encoder, "-preset", "p4", "-rc", "vbr"] + rate
+            # при высокой частоте кадров берём более быстрый пресет, чтобы кодер успевал
+            cmd += ["-c:v", encoder, "-preset", "p4" if fps <= 60 else "p2", "-rc", "vbr"] + rate
         elif encoder == "h264_amf":
             cmd += ["-c:v", encoder, "-usage", "transcoding", "-quality", "balanced",
                     "-rc", "vbr_peak"] + rate
@@ -436,6 +453,37 @@ class Recorder:
         cmd += ["-f", "segment", "-segment_time", str(SEGMENT), "-segment_format", "mpegts",
                 prefix + "%06d.ts"]
         return cmd
+
+    def _watch_progress(self, proc, target):
+        """Читает отчёт ffmpeg раз в 2 секунды и считает, сколько кадров реально пишется."""
+        last_frame, last_time, low, started = None, None, 0, time.time()
+        frame = None
+        try:
+            for raw in proc.stdout:
+                line = raw.decode("ascii", "replace").strip()
+                if line.startswith("frame="):
+                    try:
+                        frame = int(line[6:])
+                    except ValueError:
+                        frame = None
+                elif line.startswith("progress=") and frame is not None:
+                    now = time.time()
+                    if last_frame is not None and now - last_time > 0.5:
+                        fps = (frame - last_frame) / (now - last_time)
+                        self.fps_real = round(fps, 1)
+                        if now - started > 8:
+                            low = low + 1 if fps < target * 0.8 else 0
+                            slow = low >= 3
+                            if slow != self.slow:
+                                self.slow = slow
+                                if slow:
+                                    self._log("захват не успевает: %.0f из %d кадров в секунду (%s + %s)" % (
+                                        fps, target, self.capture, self.encoder))
+                                if proc is self._proc:
+                                    self._emit_state()
+                    last_frame, last_time = frame, now
+        except (OSError, ValueError):
+            pass
 
     def _shutdown(self, proc, source, pump):
         if pump:
