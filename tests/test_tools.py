@@ -14,7 +14,8 @@ from midnightclips import tools  # noqa: E402
 from midnightclips.config import Config  # noqa: E402
 from midnightclips.media import MediaServer  # noqa: E402
 
-FFMPEG = shutil.which("ffmpeg")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FFMPEG = os.path.join(ROOT, "ffmpeg.exe") if os.path.isfile(os.path.join(ROOT, "ffmpeg.exe")) else shutil.which("ffmpeg")
 
 
 def main():
@@ -37,6 +38,11 @@ def main():
         while t.busy:
             time.sleep(0.2)
         done = [p for k, p in events if k == "job_done"][-1]
+        if not done["ok"]:
+            try:
+                print("   ffmpeg:", open(os.path.join(tmp, "work", "tools_err.log"), encoding="utf-8", errors="replace").read()[-1500:], flush=True)
+            except OSError:
+                pass
         return done, [p["percent"] for k, p in events if k == "job" and p["percent"] is not None]
 
     done, _ = run("trim", 10.3, 25.0)
