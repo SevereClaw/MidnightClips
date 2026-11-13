@@ -102,7 +102,8 @@ def post_file(url, path, filename):
 
 
 class ClipTools:
-    def __init__(self, cfg, ffmpeg, tmp_dir, on_event):
+    def __init__(self, cfg, ffmpeg, tmp_dir, on_event, log_path=None):
+        self.log_path = log_path
         self.cfg = cfg
         self.ffmpeg = ffmpeg
         self.tmp_dir = tmp_dir
@@ -225,6 +226,13 @@ class ClipTools:
                 detail = open(err_path, encoding="utf-8", errors="replace").read().strip().splitlines()[-1]
             except (OSError, IndexError):
                 detail = ""
+            try:   # полный ответ ffmpeg — в общий журнал, чтобы причину было видно
+                if self.log_path:
+                    with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
+                        log.write("\n*** работа с клипом не удалась\n%s\n%s\n" % (
+                            " ".join(cmd)[:1500], open(err_path, encoding="utf-8", errors="replace").read()[-2500:]))
+            except OSError:
+                pass
             raise Fail("ffmpeg не справился. " + detail[:200])
 
     def _trim(self, src, out, s, e):
@@ -248,8 +256,8 @@ class ClipTools:
                       "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                       "-b:v", "%dk" % video, "-passlogfile", passlog]
             label = "Сжимаю до %d МБ…" % limit_mb
-            self._ffmpeg(common + ["-pass", "1", "-an", "-f", "null", "-"], duration, 0, 45, label)
-            self._ffmpeg(common + ["-pass", "2", "-c:a", "aac", "-b:a", "%dk" % audio, "-ac", "2",
+            self._ffmpeg(common + ["-pass:v", "1", "-an", "-f", "null", "-"], duration, 0, 45, label)
+            self._ffmpeg(common + ["-pass:v", "2", "-c:a", "aac", "-b:a", "%dk" % audio, "-ac", "2",
                                    "-movflags", "+faststart", out], duration, 45, 55, label)
             size = os.path.getsize(out)
             if size <= limit_bytes:

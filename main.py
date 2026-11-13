@@ -38,7 +38,8 @@ class App:
         self.library = Library(self.cfg, self.ffmpeg, cache_dir())
         self.sounds = SoundBank(self.cfg, self.ffmpeg, os.path.join(self.res, "assets"), cache_dir())
         self.media = MediaServer(self.library.inside)
-        self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event)
+        self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event,
+                               self.log_path)
         self.recorder = Recorder(
             self.cfg, self.ffmpeg, os.path.join(cache_dir(), "buffer"), self.log_path,
             self.on_event, winutil.monitors, self.overlay_diag, find_engine(self.res))
