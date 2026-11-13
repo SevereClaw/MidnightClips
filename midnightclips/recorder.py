@@ -30,7 +30,8 @@ ENCODER_TITLES = {
     "h264_qsv": "Intel Quick Sync",
     "libx264": "процессор (x264)",
 }
-CAPTURE_TITLES = {"dda": "Desktop Duplication", "gdi": "GDI", "test": "тест"}
+CAPTURE_TITLES = {"dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
+                  "gdi": "GDI", "test": "тест"}
 
 
 def find_ffmpeg(resource_dir):
@@ -78,6 +79,8 @@ class Recorder:
         self._good = None                 # последний сработавший вариант захвата
         self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
         self._soft = False                # мягкий перезапуск: буфер не стирать
+        self._avoid_precise = False       # точный режим захвата здесь не работает
+        self._stalls = []                 # когда запись «зависала» в точном режиме
         self.fps_real = None              # сколько кадров в секунду реально успевает записываться
         self.fps_target = 0
         self.slow = False                 # захват не успевает за выбранной частотой
@@ -132,7 +135,8 @@ class Recorder:
             "fps_real": self.fps_real,
             "fps_target": self.fps_target,
             "slow": self.slow,
-            "fallback": self.state == "on" and (self.capture == "gdi" or self.encoder == "libx264"),
+            "fallback": self.state == "on" and (self.capture in ("gdi", "ddal") or self.encoder == "libx264"),
+            "capture_kind": self.capture,
             "recording": self.recording_since is not None,
             "recording_since": self.recording_since,
         }
@@ -208,6 +212,15 @@ class Recorder:
                     last_mark, last_change = mark, time.time()
                 elif time.time() - last_change > 12:
                     reason = "запись зависла: 12 секунд нет новых данных"
+                    if self.capture == "dda":
+                        # Точный режим ждёт обновлений экрана. Если их нет раз за разом —
+                        # значит, здесь он не работает; возвращаемся к старому режиму.
+                        now = time.time()
+                        self._stalls = [t for t in self._stalls if now - t < 240] + [now]
+                        if len(self._stalls) >= 3:
+                            self._avoid_precise = True
+                            self._good = None
+                            reason += "; точный режим захвата отключён до перезапуска программы"
                     break
                 self._prune()
                 self._wait(1)
@@ -287,11 +300,16 @@ class Recorder:
         else:
             encoders = list(self._encoders)
         capture = self.cfg["capture"]
-        captures = [capture] if capture in ("dda", "gdi") else ["dda", "gdi"]
+        # dda  — точный режим: кадр берётся в момент обновления экрана, без неточного Sleep;
+        # ddal — старый режим: ffmpeg сам отмеряет кадры (на Windows получается с рывками);
+        # gdi  — самый медленный запасной.
+        captures = {"dda": ["dda", "ddal"], "ddal": ["ddal"], "gdi": ["gdi"]}.get(capture, ["dda", "ddal", "gdi"])
+        if self._avoid_precise and "dda" in captures and len(captures) > 1:
+            captures.remove("dda")
         result = []
         for enc in encoders:
             for cap in captures:
-                if cap == "dda" and enc in ("h264_nvenc", "h264_amf") and not self.cfg["height"]:
+                if cap in ("dda", "ddal") and enc in ("h264_nvenc", "h264_amf") and not self.cfg["height"]:
                     result.append((cap, enc, True))   # кадры не покидают видеокарту
                 result.append((cap, enc, False))
         if self._good in result:
@@ -401,6 +419,14 @@ class Recorder:
         if capture == "test":
             cmd += ["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=%d" % fps]
         elif capture == "dda":
+            # Частота с большим запасом и без повторов кадров: ddagrab тогда не «спит» между
+            # кадрами (Sleep в Windows ошибается на 10–15 мс), а ждёт настоящего обновления
+            # экрана. До нужной частоты поток выравнивает уже сам ffmpeg (-r ниже).
+            graph = "ddagrab=output_idx=%d:framerate=1000:dup_frames=0:draw_mouse=1" % int(cfg["monitor"])
+            if not zero_copy:
+                graph += ",hwdownload,format=bgra"
+            cmd += ["-f", "lavfi", "-i", graph]
+        elif capture == "ddal":
             graph = "ddagrab=output_idx=%d:framerate=%d:draw_mouse=1" % (int(cfg["monitor"]), fps)
             if not zero_copy:
                 graph += ",hwdownload,format=bgra"
@@ -436,6 +462,7 @@ class Recorder:
                 scale = "scale='trunc(iw/2)*2':'trunc(ih/2)*2'"
             pix = "yuv420p" if encoder == "libx264" else "nv12"
             cmd += ["-vf", "%s,format=%s" % (scale, pix)]
+        cmd += ["-r", str(fps), "-fps_mode", "cfr"]   # ровная частота кадров на выходе
         rate = ["-b:v", "%dM" % mbps, "-maxrate", "%dM" % int(mbps * 1.5),
                 "-bufsize", "%dM" % (mbps * 2), "-g", str(fps)]
         if encoder == "h264_nvenc":

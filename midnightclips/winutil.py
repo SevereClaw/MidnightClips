@@ -32,6 +32,15 @@ def set_dpi_aware():
             pass
 
 
+def precise_timers():
+    """Точные таймеры в нашем процессе (иначе шаг таймера в Windows — около 15 мс)."""
+    if WIN:
+        try:
+            ctypes.WinDLL("winmm").timeBeginPeriod(1)
+        except Exception:
+            pass
+
+
 def single_instance():
     """False, если программа уже запущена."""
     global _mutex

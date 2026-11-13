@@ -172,7 +172,24 @@ class App:
     def sound(self, name):
         self.sounds.play(name)
 
+    def monitor_rect(self):
+        mons = winutil.monitors()
+        idx = self.cfg["monitor"]
+        return mons[idx] if 0 <= idx < len(mons) else (mons[0] if mons else None)
+
+    def sync_overlays(self):
+        """Точка записи и «метроном» точного захвата — по текущему состоянию."""
+        rec = self.recorder
+        rect = self.monitor_rect()
+        self.toast.set_indicator(rec.recording_since is not None and self.cfg["indicator"],
+                                 rect, self.cfg["indicator_corner"])
+        wants = rec.state in ("starting", "on") and self.cfg["capture"] in ("auto", "dda") \
+            and not rec._avoid_precise and not (rec.state == "on" and rec.capture != "dda")
+        self.toast.set_tickle(wants, rect, 1000 / max(30, min(120, int(self.cfg["fps"]))))
+
     def on_event(self, kind, payload):
+        if kind in ("state", "recording"):
+            self.sync_overlays()
         if kind == "saved":
             threading.Thread(target=self.run_cleanup, daemon=True).start()
             self.sound("saved")
@@ -231,6 +248,8 @@ class Api:
             app.bind_hotkeys()
         if changed & {"cleanup_days", "cleanup_gb", "clips_dir"}:
             threading.Thread(target=app.run_cleanup, daemon=True).start()
+        if changed & {"indicator", "indicator_corner", "monitor", "capture", "fps"}:
+            app.sync_overlays()
         if "autostart" in changed:
             winutil.set_autostart(app.cfg["autostart"])
         if changed & CAPTURE_KEYS and app.ffmpeg:
@@ -386,6 +405,7 @@ class Api:
 
 def main():
     winutil.set_dpi_aware()
+    winutil.precise_timers()
     if not winutil.single_instance():
         winutil.message_box("MidnightClips уже запущен — значок в трее, возле часов.")
         return

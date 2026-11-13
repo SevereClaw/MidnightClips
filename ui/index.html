@@ -114,7 +114,8 @@
         <label class="row"><span>Способ захвата
           <small>Если в клипе чёрный экран — попробуйте другой</small></span>
           <select data-key="capture">
-            <option value="auto">Авто</option><option value="dda">Desktop Duplication</option><option value="gdi">GDI</option>
+            <option value="auto">Авто</option><option value="dda">Desktop Duplication</option>
+            <option value="ddal">Desktop Duplication, старый режим</option><option value="gdi">GDI</option>
           </select></label>
       </div>
 
@@ -183,6 +184,14 @@
         <h2>Программа</h2>
         <label class="row"><span>Запускать вместе с Windows</span><input type="checkbox" data-key="autostart"></label>
         <label class="row"><span>Уведомление в углу экрана</span><input type="checkbox" data-key="toast"></label>
+        <label class="row"><span>Точка поверх игры, пока идёт запись
+          <small>В сам клип точка не попадает. В играх в эксклюзивном полноэкранном режиме её не видно</small></span>
+          <input type="checkbox" data-key="indicator"></label>
+        <label class="row"><span>Где показывать точку</span>
+          <select data-key="indicator_corner">
+            <option value="tl">Слева сверху</option><option value="tr">Справа сверху</option>
+            <option value="bl">Слева снизу</option><option value="br">Справа снизу</option>
+          </select></label>
         <label class="row"><span>Обновлять автоматически
           <small>Новая версия ставится сама при запуске программы</small></span><input type="checkbox" data-key="auto_update"></label>
         <div class="row"><span>Версия<small id="updateInfo"></small></span>

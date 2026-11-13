@@ -25,6 +25,10 @@ jobs:
         run: python tests/test_updater_win.py
         env:
           PYTHONUTF8: "1"
+      - name: Проверить окна поверх экрана
+        run: python tests/test_overlay_win.py
+        env:
+          PYTHONUTF8: "1"
       - name: Собрать exe
         shell: cmd
         run: build.bat

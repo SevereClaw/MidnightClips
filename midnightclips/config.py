@@ -59,6 +59,8 @@ DEFAULTS = {
     "sound_rec_on": "",
     "sound_rec_off": "",
     "sound_error": "",
+    "indicator": True,          # красная точка поверх экрана, пока идёт запись
+    "indicator_corner": "tl",   # tl / tr / bl / br
     "cleanup_days": 0,          # удалять клипы старше N дней; 0 = не удалять
     "cleanup_gb": 0,            # держать папку клипов в пределах N ГБ; 0 = без предела
     "discord_webhook": "",      # ссылка вебхука канала
