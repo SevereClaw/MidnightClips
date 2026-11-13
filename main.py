@@ -41,7 +41,7 @@ class App:
         self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event)
         self.recorder = Recorder(
             self.cfg, self.ffmpeg, os.path.join(cache_dir(), "buffer"), self.log_path,
-            self.on_event, winutil.monitors)
+            self.on_event, winutil.monitors, self.overlay_diag)
 
     # ---------------------------------------------------------------- запуск
 
@@ -171,6 +171,13 @@ class App:
 
     def sound(self, name):
         self.sounds.play(name)
+
+    def overlay_diag(self):
+        """Строка для журнала: работал ли «метроном» точного захвата."""
+        toast = self.toast
+        return "Метроном: %s, тиков %d, поток окон %s, ошибки %s" % (
+            "включён" if toast.tickle_on else "выключен", toast.ticks,
+            "жив" if toast.is_alive() else "не работает", toast.errors[-3:] or "нет")
 
     def monitor_rect(self):
         mons = winutil.monitors()

@@ -52,7 +52,7 @@ def safe_name(text, fallback="Клип"):
 
 
 class Recorder:
-    def __init__(self, cfg, ffmpeg, work_dir, log_path, on_event, monitors=None):
+    def __init__(self, cfg, ffmpeg, work_dir, log_path, on_event, monitors=None, diag=None):
         self.cfg = cfg
         self.ffmpeg = ffmpeg
         self.work_dir = work_dir
@@ -79,6 +79,8 @@ class Recorder:
         self._good = None                 # последний сработавший вариант захвата
         self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
         self._soft = False                # мягкий перезапуск: буфер не стирать
+        self._diag = diag or (lambda: "")  # доп. сведения для журнала (состояние «метронома»)
+        self._upgrades = 0                # сколько раз пробовали вернуться с запасного режима
         self._avoid_precise = False       # точный режим захвата здесь не работает
         self._stalls = []                 # когда запись «зависала» в точном режиме
         self.fps_real = None              # сколько кадров в секунду реально успевает записываться
@@ -118,6 +120,7 @@ class Recorder:
             else:
                 self._soft = False
                 self._good = None
+                self._upgrades = 0
             self._restart.set()
         else:
             self.start()
@@ -178,12 +181,14 @@ class Recorder:
 
     def _run(self):
         crashed = False
+        upgrading = False
         while not self._stop.is_set():
             self._restart.clear()
             self._set_state("starting", "Восстанавливаю захват…" if crashed else "Включаю захват…")
             if self._encoders is None:
                 self._encoders = self._detect_encoders()
-            session = self._launch_any(retry_last=crashed)
+            session = self._launch_any(retry_last=crashed and not upgrading)
+            upgrading = False
             if session is None:
                 if self._stop.is_set() or self._restart.is_set():
                     continue
@@ -207,11 +212,21 @@ class Recorder:
                 if time.time() - started > 20 * 3600 and self.recording_since is None:
                     reason = "плановый перезапуск"   # метки времени в .ts не бесконечны
                     break
+                # Запасной режим мог включиться из-за разовой заминки при старте (экран был
+                # заблокирован, шло окно UAC…). Через минуту и через десять пробуем вернуться.
+                wait = 60 if self._upgrades == 0 else 600
+                if (self._upgrades < 2 and self.recording_since is None and not TEST
+                        and time.time() - started > wait and self._on_fallback()):
+                    self._upgrades += 1
+                    upgrading = True
+                    self._good = None
+                    reason = "пробую вернуться с запасного режима захвата на основной"
+                    break
                 mark = self._newest_mark()
                 if mark != last_mark:
                     last_mark, last_change = mark, time.time()
                 elif time.time() - last_change > 12:
-                    reason = "запись зависла: 12 секунд нет новых данных"
+                    reason = "запись зависла: 12 секунд нет новых данных. " + self._diag()
                     if self.capture == "dda":
                         # Точный режим ждёт обновлений экрана. Если их нет раз за разом —
                         # значит, здесь он не работает; возвращаемся к старому режиму.
@@ -244,6 +259,11 @@ class Recorder:
                 crashed = True
                 self._log("%s — перезапускаю захват, буфер и запись сохранены" % reason)
         self._set_state("off", "")
+
+    def _on_fallback(self):
+        """Сейчас работает не лучший из доступных вариантов захвата?"""
+        best = self._candidates(prefer_good=False)
+        return bool(best) and self._good is not None and self._good != best[0]
 
     def _log(self, text):
         try:
@@ -290,7 +310,7 @@ class Recorder:
                 found.append(enc)
         return found + ["libx264"]
 
-    def _candidates(self):
+    def _candidates(self, prefer_good=True):
         """Варианты «способ захвата + кодировщик» от лучшего к самому надёжному."""
         if TEST:
             return [("test", "libx264", False)]
@@ -312,7 +332,7 @@ class Recorder:
                 if cap in ("dda", "ddal") and enc in ("h264_nvenc", "h264_amf") and not self.cfg["height"]:
                     result.append((cap, enc, True))   # кадры не покидают видеокарту
                 result.append((cap, enc, False))
-        if self._good in result:
+        if prefer_good and self._good in result:
             result.remove(self._good)
             result.insert(0, self._good)
         return result
@@ -402,6 +422,13 @@ class Recorder:
                 self._proc = proc
                 return proc, source, pump, time.time()
             time.sleep(0.2)
+        if proc.poll() is not None:
+            why = "ffmpeg вышел с кодом %s" % proc.returncode
+        elif self._stop.is_set():
+            why = "остановлено"
+        else:
+            why = "за 12 секунд не пришло ни одного кадра"
+        self._log("вариант %s + %s не запустился: %s. %s" % (capture, encoder, why, self._diag()))
         self._shutdown(proc, source, pump)
         for path in glob.glob(pattern):
             self._remove(path)

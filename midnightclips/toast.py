@@ -41,6 +41,7 @@ class Toast(threading.Thread):
         self._queue = queue.Queue()
         self.errors = []      # для проверки: что пошло не так
         self.ticks = 0        # сколько раз «тикнул» метроном
+        self.tickle_on = False
         self.ready = threading.Event()
 
     # ------------------------------------------------- вызывается из любых потоков
@@ -141,13 +142,14 @@ class Toast(threading.Thread):
             state["tick_key"] = key
             close("tick")
             state["tick_on"] = on
+            self.tickle_on = on
             if not on:
                 return
             rect = rect or {"x": 0, "y": 0}
             win = tk.Toplevel(root)
             win.overrideredirect(True)
             win.attributes("-topmost", True)
-            win.geometry("1x1+%d+%d" % (rect["x"], rect["y"]))
+            win.geometry("2x2+%d+%d" % (rect["x"], rect["y"]))
             win.configure(bg="#000000")
             _style(win)
             state["tick"] = win
@@ -156,7 +158,8 @@ class Toast(threading.Thread):
             if state["tick_on"] and state["tick"] is not None:
                 try:
                     state["flip"] = not state["flip"]
-                    state["tick"].configure(bg="#020202" if state["flip"] else "#000000")
+                    state["tick"].configure(bg="#0C0C0C" if state["flip"] else "#000000")
+                    state["tick"].update_idletasks()   # перерисовать сразу, а не «когда-нибудь»
                     self.ticks += 1
                 except Exception as exc:
                     self.errors.append("tick: %s" % exc)
