@@ -24,6 +24,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -279,6 +281,15 @@ struct Capturer {
 
 // ------------------------------------------------------------------ тестовая картинка
 
+static long long epochMicros() {
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return (long long)((u.QuadPart - 116444736000000000ULL) / 10ULL);
+}
+
 static void drawTest(std::vector<uint8_t>& f, int w, int h, double t) {
     static const uint32_t bars[7] = { 0xFFF4F4F4, 0xFFFFE100, 0xFF20D6E8, 0xFF2FCB4B, 0xFFE63BC8, 0xFFE4002B, 0xFF2743D8 };
     uint32_t* p = (uint32_t*)f.data();
@@ -288,6 +299,93 @@ static void drawTest(std::vector<uint8_t>& f, int w, int h, double t) {
     const int bx = (int)(t * w * 0.5) % (w - bw);   // полоса проходит экран за 2 секунды
     for (int y = h / 3; y < 2 * h / 3; y++)
         for (int x = bx; x < bx + bw; x++) p[(size_t)y * w + x] = 0xFF000000;
+}
+
+// ------------------------------------------------------------------ очередь кадров
+//
+// Кадры снимаются строго по своим часам и кладутся в очередь, а в канал их пишет
+// отдельный поток. ffmpeg читает видео не равномерно, а порциями — в такт звуку;
+// без очереди пришлось бы отдавать ему пачку одинаковых кадров.
+
+typedef std::shared_ptr<std::vector<uint8_t>> FramePtr;
+
+struct FrameQueue {
+    CRITICAL_SECTION cs;
+    CONDITION_VARIABLE cv;
+    std::deque<FramePtr> q;
+    std::vector<std::vector<uint8_t>*> pool;
+    size_t frameSize = 0, capacity = 8;
+    bool stop = false;
+    long long overflow = 0;
+
+    FrameQueue() { InitializeCriticalSection(&cs); InitializeConditionVariable(&cv); }
+
+    FramePtr acquire() {   // свободный буфер под новый кадр (буферы переиспользуются)
+        std::vector<uint8_t>* v = nullptr;
+        EnterCriticalSection(&cs);
+        if (!pool.empty()) { v = pool.back(); pool.pop_back(); }
+        LeaveCriticalSection(&cs);
+        if (!v) v = new std::vector<uint8_t>(frameSize);
+        return FramePtr(v, [this](std::vector<uint8_t>* p) {
+            EnterCriticalSection(&cs);
+            pool.push_back(p);
+            LeaveCriticalSection(&cs);
+        });
+    }
+    void push(const FramePtr& f) {
+        EnterCriticalSection(&cs);
+        if (q.size() >= capacity) { q.pop_front(); overflow++; }   // читатель совсем встал — старое не копим
+        q.push_back(f);
+        LeaveCriticalSection(&cs);
+        WakeConditionVariable(&cv);
+    }
+    size_t depth() {
+        EnterCriticalSection(&cs);
+        size_t d = q.size();
+        LeaveCriticalSection(&cs);
+        return d;
+    }
+    void trim(size_t count) {
+        EnterCriticalSection(&cs);
+        while (count-- && !q.empty()) q.pop_front();
+        LeaveCriticalSection(&cs);
+    }
+    bool pop(FramePtr& out) {
+        EnterCriticalSection(&cs);
+        while (q.empty() && !stop) SleepConditionVariableCS(&cv, &cs, 200);
+        bool ok = !q.empty();
+        if (ok) { out = q.front(); q.pop_front(); }
+        LeaveCriticalSection(&cs);
+        return ok;
+    }
+    void finish() {
+        EnterCriticalSection(&cs);
+        stop = true;
+        LeaveCriticalSection(&cs);
+        WakeAllConditionVariable(&cv);
+    }
+};
+
+static FrameQueue g_queue;
+static HANDLE g_pipe = INVALID_HANDLE_VALUE;
+static volatile LONG g_writerFailed = 0;
+static volatile LONG64 g_written = 0;
+static volatile LONG g_writeMaxMicros = 0, g_writeMaxTotalMicros = 0;
+
+static bool writeAll(HANDLE h, const uint8_t* data, size_t size);
+
+static DWORD WINAPI writerThread(LPVOID) {
+    FramePtr item;
+    while (g_queue.pop(item)) {
+        const double w0 = now();
+        if (!writeAll(g_pipe, item->data(), item->size())) { InterlockedExchange(&g_writerFailed, 1); break; }
+        const LONG us = (LONG)((now() - w0) * 1e6);
+        if (us > g_writeMaxMicros) InterlockedExchange(&g_writeMaxMicros, us);
+        if (us > g_writeMaxTotalMicros) InterlockedExchange(&g_writeMaxTotalMicros, us);
+        InterlockedIncrement64(&g_written);
+        item.reset();
+    }
+    return 0;
 }
 
 // ------------------------------------------------------------------ запуск
@@ -365,10 +463,12 @@ int wmain(int argc, wchar_t** argv) {
 
     if (a.pipe.empty()) { logf("error: --pipe required"); return 2; }
     const size_t frameSize = (size_t)w * h * 4;
-    std::vector<uint8_t> frame(frameSize, 0);
+    g_queue.frameSize = frameSize;
+    g_queue.capacity = (size_t)std::max(8, (int)(a.fps * 0.25));   // до четверти секунды кадров
     HANDLE pipe = CreateNamedPipeW(a.pipe.c_str(), PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1,
                                    (DWORD)std::min<size_t>(frameSize, 8u << 20), 0, 0, nullptr);
     if (pipe == INVALID_HANDLE_VALUE) { logf("error: CreateNamedPipe %lu", GetLastError()); return 2; }
+    g_pipe = pipe;
 
     printf("READY %d %d %d\n", w, h, a.fps);
     fflush(stdout);
@@ -377,55 +477,75 @@ int wmain(int argc, wchar_t** argv) {
         logf("error: ConnectNamedPipe %lu", GetLastError());
         return 2;
     }
+    HANDLE writer = CreateThread(nullptr, 0, writerThread, nullptr, 0, nullptr);
 
     const double t0 = now();
-    long long n = 0;
-    bool dirty = true;
-    double statT = t0, maxWrite = 0, maxLate = 0, totalMaxLate = 0, totalMaxWrite = 0;
-    long long lateOver2 = 0, skipped = 0, statSkipped = 0;
-    long long statN = 0;
+    long long n = 0, produced = 0, trimmed = 0, lateOver2 = 0;
+    FramePtr cur;
+    double statT = t0, maxLate = 0, totalMaxLate = 0;
+    long long statWritten = 0, statTrimmed = 0, statOverflow = 0;
     unsigned statImages = 0;
+    size_t minDepth = (size_t)-1, maxDepth = 0;
+    int windowCount = 0;
     int code = 0;
     for (;;) {
         const double due = t0 + (double)n / a.fps;
         timer.sleepUntil(due);
-        double late = now() - due;   // насколько опоздали к своей отметке
-        if (late > 0.1) {
-            // Читатель (кодировщик) не успевал забирать кадры. Не шлём пропущенное пачкой:
-            // время каждого кадра ffmpeg берёт по часам, поэтому пропуск он сам закроет
-            // повтором, а звук с картинкой не разойдутся.
-            const long long target = (long long)((now() - t0) * a.fps);
-            if (target > n) { skipped += target - n; n = target; }
-        }
+        const double late = now() - due;   // насколько опоздали к своей отметке
         if (late > maxLate) maxLate = late;
         if (late > totalMaxLate) totalMaxLate = late;
         if (late > 0.002) lateOver2++;
+        if (late > 0.25) n = (long long)((now() - t0) * a.fps);   // система подвисала — не догоняем пачкой
+
         if (a.test) {
-            drawTest(frame, w, h, now() - t0);
+            cur = g_queue.acquire();
+            drawTest(*cur, w, h, now() - t0);
+            const long long stamp[2] = { produced, epochMicros() };   // номер и время кадра — для проверок
+            memcpy(cur->data(), stamp, sizeof(stamp));
         } else {
             int r = cap.poll();
             if (r < 0) { code = 3; break; }
-            if (r > 0) dirty = true;
-            if (dirty) { cap.compose(frame, a.cursor); dirty = false; }
+            if (r > 0 || !cur) {
+                cur = g_queue.acquire();
+                cap.compose(*cur, a.cursor);
+            }
         }
-        const double w0 = now();
-        if (!writeAll(pipe, frame.data(), frameSize)) break;   // читатель (ffmpeg) закрылся
-        const double wd = now() - w0;
-        if (wd > maxWrite) maxWrite = wd;
-        if (wd > totalMaxWrite) totalMaxWrite = wd;
+
+        // Очередь должна быть почти пустой: кадр уходит к ffmpeg сразу, как тот готов его взять.
+        // Короткие всплески — норма (ffmpeg читает порциями). А если очередь не опускается целую
+        // секунду, значит, накопилось отставание картинки от звука — лишнее выбрасываем.
+        const size_t depth = g_queue.depth();
+        if (depth < minDepth) minDepth = depth;
+        if (depth > maxDepth) maxDepth = depth;
+        if (++windowCount >= a.fps) {
+            if (minDepth > 2) { g_queue.trim(minDepth - 1); trimmed += (long long)(minDepth - 1); }
+            minDepth = (size_t)-1;
+            windowCount = 0;
+        }
+        g_queue.push(cur);   // нового кадра нет — повторяется прошлый, без копирования
         n++;
+        produced++;
+        if (g_writerFailed) break;   // читатель (ffmpeg) закрылся
+
         const double t = now();
         if (t - statT >= a.stat) {
-            logf("stat out=%.1f new=%.1f late_max=%.2fms write_max=%.1fms skipped=%lld lost=%u",
-                 (double)(n - statN - (skipped - statSkipped)) / (t - statT),
-                 (double)(cap.images - statImages) / (t - statT),
-                 maxLate * 1000.0, maxWrite * 1000.0, skipped - statSkipped, cap.lost);
-            statT = t; statN = n; statImages = cap.images; statSkipped = skipped; maxWrite = 0; maxLate = 0;
+            const long long written = g_written;
+            const LONG wmax = InterlockedExchange(&g_writeMaxMicros, 0);
+            logf("stat out=%.1f new=%.1f late_max=%.2fms write_max=%.1fms queue_max=%u trimmed=%lld overflow=%lld lost=%u",
+                 (double)(written - statWritten) / (t - statT), (double)(cap.images - statImages) / (t - statT),
+                 maxLate * 1000.0, wmax / 1000.0, (unsigned)maxDepth, trimmed - statTrimmed,
+                 g_queue.overflow - statOverflow, cap.lost);
+            statT = t; statWritten = written; statImages = cap.images; statTrimmed = trimmed;
+            statOverflow = g_queue.overflow; maxLate = 0; maxDepth = 0;
         }
         if (a.seconds > 0 && t - t0 >= a.seconds) break;
     }
-    logf("done frames=%lld elapsed=%.3f late_max=%.2fms late_over_2ms=%lld write_max=%.1fms highres_timer=%d skipped=%lld",
-         n - skipped, now() - t0, totalMaxLate * 1000.0, lateOver2, totalMaxWrite * 1000.0, timer.highRes ? 1 : 0, skipped);
+    cur.reset();
+    g_queue.finish();   // писатель дописывает остаток очереди и выходит
+    if (writer) WaitForSingleObject(writer, 3000);
+    logf("done frames=%lld elapsed=%.3f late_max=%.2fms late_over_2ms=%lld write_max=%.1fms highres_timer=%d trimmed=%lld overflow=%lld",
+         (long long)g_written, now() - t0, totalMaxLate * 1000.0, lateOver2, g_writeMaxTotalMicros / 1000.0,
+         timer.highRes ? 1 : 0, trimmed, g_queue.overflow);
     FlushFileBuffers(pipe);
     CloseHandle(pipe);
     cap.close();

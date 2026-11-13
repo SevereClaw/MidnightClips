@@ -542,8 +542,9 @@ class Recorder:
                     except ValueError:
                         continue
                     count += 1
-                    try:
-                        trouble = int(values.get("skipped", "0")) > 0 or float(values.get("late_max", "0ms")[:-2]) > 100
+                    try:   # кодировщик не успевает: очередь переполняется или кадров уходит меньше нужного
+                        trouble = (int(values.get("overflow", "0")) > 0
+                                   or float(values.get("out", "0")) < fps * 0.9)
                     except ValueError:
                         trouble = False
                     self.engine_trouble = trouble and count > 2   # первые секунды — разгон, не считаются
@@ -588,9 +589,8 @@ class Recorder:
             cmd += ["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=%d" % fps]
         elif capture == "own":
             # Кадры уже идут ровно с нужной частотой — ffmpeg только кодирует и пишет.
-            # Время кадра — по часам в момент прихода: если кодировщик где-то не успеет, картинка
-            # не «уедет» относительно звука, а пропуск закроется повтором кадра.
-            cmd += ["-use_wallclock_as_timestamps", "1", "-f", "rawvideo", "-pixel_format", "bgra",
+            # Кадры приходят ровно с нужной частотой, по порядку — время кадра считается по номеру.
+            cmd += ["-f", "rawvideo", "-pixel_format", "bgra",
                     "-video_size", "%dx%d" % (own[1], own[2]), "-framerate", str(fps), "-i", own[0]]
         elif capture == "dda":
             # Частота с большим запасом и без повторов кадров: ddagrab тогда не «спит» между
@@ -628,7 +628,9 @@ class Recorder:
             cmd += ["-i", "pipe:0"]
             audio_inputs.append(1)
         if cfg["mic"] and not TEST and self._degrade < 1:
-            cmd += ["-f", "dshow", "-i", "audio=" + cfg["mic"]]
+            # Маленький буфер: иначе микрофон приходит крупными порциями, и ffmpeg в такт ему
+            # читает порциями и видео.
+            cmd += ["-f", "dshow", "-audio_buffer_size", "30", "-i", "audio=" + cfg["mic"]]
             audio_inputs.append(len(audio_inputs) + 1)
 
         # --- видео
