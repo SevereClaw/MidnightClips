@@ -77,6 +77,7 @@ class Recorder:
         self._encoders = None
         self._good = None                 # последний сработавший вариант захвата
         self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
+        self._soft = False                # мягкий перезапуск: буфер не стирать
         self.fps_real = None              # сколько кадров в секунду реально успевает записываться
         self.fps_target = 0
         self.slow = False                 # захват не успевает за выбранной частотой
@@ -102,10 +103,18 @@ class Recorder:
             thread.join(timeout=15)
         self._set_state("off", "")
 
-    def restart(self):
-        """Перезапустить захват с новыми настройками."""
+    def restart(self, soft=False):
+        """Перезапустить захват с новыми настройками.
+
+        soft=True — поменялось только то, что не влияет на формат видео (громкость в записи):
+        буфер и идущая запись сохраняются, как при восстановлении после сбоя.
+        """
         if self._thread and self._thread.is_alive():
-            self._good = None
+            if soft and not self._restart.is_set():
+                self._soft = True
+            else:
+                self._soft = False
+                self._good = None
             self._restart.set()
         else:
             self.start()
@@ -202,7 +211,11 @@ class Recorder:
                     break
                 self._prune()
                 self._wait(1)
-            deliberate = self._stop.is_set() or self._restart.is_set()
+            soft = self._soft and self._restart.is_set() and not self._stop.is_set()
+            self._soft = False
+            deliberate = (self._stop.is_set() or self._restart.is_set()) and not soft
+            if soft:
+                reason = "изменена громкость записи"
             if deliberate and self.recording_since is not None:
                 self._finish_recording(wait_next=False)
             self._shutdown(proc, source, pump)
@@ -438,13 +451,19 @@ class Recorder:
             cmd += ["-keyint_min", str(fps), "-sc_threshold", "0"]
 
         # --- звук
+        # Громкость меняется только в записи: то, что слышит сам пользователь, не трогаем.
+        vol_sys = max(0, min(200, int(cfg["rec_volume_system"]))) / 100.0
+        vol_mic = max(0, min(200, int(cfg["rec_volume_mic"]))) / 100.0
         if len(audio_inputs) == 2:
             cmd += ["-filter_complex",
-                    "[1:a]aresample=48000[sys];[2:a]aresample=48000:async=1[mic];"
-                    "[sys][mic]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
+                    "[1:a]aresample=48000,volume=%.2f[sys];[2:a]aresample=48000:async=1,volume=%.2f[mic];"
+                    "[sys][mic]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]" % (vol_sys, vol_mic),
                     "-map", "0:v", "-map", "[a]"]
         elif audio_inputs:
             cmd += ["-map", "0:v", "-map", "1:a"]
+            volume = vol_sys if source else vol_mic
+            if abs(volume - 1.0) > 0.001:
+                cmd += ["-af", "volume=%.2f" % volume]
         else:
             cmd += ["-map", "0:v", "-an"]
         if audio_inputs:

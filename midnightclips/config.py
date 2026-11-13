@@ -44,6 +44,8 @@ DEFAULTS = {
     "capture": "auto",          # auto / dda / gdi
     "audio": True,              # звук системы
     "mic": "",                  # имя микрофона (dshow), пусто = выключен
+    "rec_volume_system": 100,   # громкость звука компьютера в записи, 0–200 %
+    "rec_volume_mic": 100,      # громкость микрофона в записи, 0–200 %
     "audio_offset_ms": 0,       # сдвиг звука, если он отстаёт или спешит
     "hotkey_clip": "Alt+F10",
     "hotkey_record": "Alt+F9",
@@ -66,7 +68,7 @@ DEFAULTS = {
 # Изменение этих ключей требует перезапуска захвата.
 CAPTURE_KEYS = {
     "buffer_enabled", "buffer_seconds", "fps", "height", "bitrate_mbps", "monitor",
-    "encoder", "capture", "audio", "mic", "audio_offset_ms",
+    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic",
 }
 
 

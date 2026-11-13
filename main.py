@@ -234,8 +234,10 @@ class Api:
         if "autostart" in changed:
             winutil.set_autostart(app.cfg["autostart"])
         if changed & CAPTURE_KEYS and app.ffmpeg:
-            if changed - {"buffer_seconds", "buffer_enabled"}:
-                app.recorder.restart()   # длину буфера можно менять на лету
+            capture_changed = (changed & CAPTURE_KEYS) - {"buffer_seconds", "buffer_enabled"}   # длина буфера меняется на лету
+            if capture_changed:
+                # громкость в записи применяется без потери буфера и идущей записи
+                app.recorder.restart(soft=capture_changed <= {"rec_volume_system", "rec_volume_mic"})
         return self.get_settings()
 
     def get_options(self):

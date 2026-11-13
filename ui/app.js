@@ -9,7 +9,7 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9",
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, rec_volume_system: 60, rec_volume_mic: 100, sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -459,6 +459,10 @@ function applySettings(s) {
   $("clipsDir").textContent = s.clips_dir_resolved || "";
   $("edCompress").textContent = "Сжать до " + s.discord_limit_mb + " МБ";
   $("volText").textContent = s.sound_volume + "%" + (s.sound_volume > 100 ? " — громче исходного файла" : "");
+  const recVol = (v) => v + "% — " + (v === 100 ? "как есть" : v === 0 ? "в записи не слышно" : v < 100 ? "в записи тише" : "в записи громче")
+    + ". Меняет только запись: в наушниках всё звучит как раньше";
+  $("volSysText").textContent = recVol(s.rec_volume_system);
+  $("volMicText").textContent = recVol(s.rec_volume_mic);
   renderSounds();
   renderPresets();
 }
@@ -551,7 +555,7 @@ function renderSounds() {
     box.appendChild(row);
   });
 }
-document.querySelector(".vol").addEventListener("change", () => setTimeout(() => api.test_sound("saved"), 250));
+document.querySelector('[data-key="sound_volume"]').addEventListener("change", () => setTimeout(() => api.test_sound("saved"), 250));
 
 // Назначение горячей клавиши: нажали кнопку — ждём сочетание.
 const KEY_NAMES = { Space: "Space", Enter: "Enter", Tab: "Tab", Insert: "Insert", Delete: "Delete", Home: "Home", End: "End",
