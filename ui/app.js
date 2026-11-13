@@ -720,6 +720,50 @@ document.querySelectorAll("[data-hotkey]").forEach((btn) => {
   });
 });
 
+// Правая кнопка мыши по «Сохранить клип» и «Начать запись» — сменить клавишу прямо на месте.
+let rebinding = false;
+function rebindHere(settingKey, label) {
+  if (rebinding) return;
+  rebinding = true;
+  const old = label.textContent;
+  label.textContent = "Нажмите сочетание…";
+  label.classList.add("is-listening");
+  const onKey = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") return finish(null);
+    if (e.key === "Backspace") return finish("");
+    const key = keyName(e.code);
+    if (!key) return;   // пока нажаты только Ctrl/Alt/Shift — ждём дальше
+    const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift"].filter(Boolean);
+    if (!mods.length && !/^F\d+$/.test(key)) { flash("Добавьте Ctrl, Alt или Shift — иначе клавиша перестанет печатать", true); return; }
+    finish([...mods, key].join("+"));
+  };
+  const swallow = (e) => { e.preventDefault(); e.stopPropagation(); };
+  const onMouse = (e) => {   // щелчок мышью отменяет и не должен нажать саму кнопку
+    swallow(e);
+    window.addEventListener("click", swallow, { capture: true, once: true });
+    setTimeout(() => window.removeEventListener("click", swallow, true), 300);
+    finish(null);
+  };
+  let done = false;
+  function finish(combo) {
+    done = true;
+    window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("mousedown", onMouse, true);
+    label.classList.remove("is-listening");
+    rebinding = false;
+    if (combo == null) label.textContent = old;
+    else saveSetting(settingKey, combo).then(() => flash(combo ? "Клавиша изменена: " + combo : "Клавиша снята"));
+  }
+  window.addEventListener("keydown", onKey, true);
+  setTimeout(() => { if (!done) window.addEventListener("mousedown", onMouse, true); }, 0);
+}
+[["btnClip", "hotkey_clip", "kbdClip"], ["btnRec", "hotkey_record", "kbdRec"]].forEach(([btn, key, kbd]) => {
+  $(btn).title = "Правая кнопка мыши — сменить клавишу";
+  $(btn).addEventListener("contextmenu", (e) => { e.preventDefault(); rebindHere(key, $(kbd)); });
+});
+
 // ---------------------------------------------------------------- кнопки
 
 $("btnClip").onclick = () => api.save_clip();

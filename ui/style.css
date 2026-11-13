@@ -37,6 +37,8 @@ kbd {
   white-space: nowrap;
 }
 
+kbd.is-listening { background: var(--orange) !important; color: var(--black) !important; }
+
 .app { display: flex; height: 100%; }
 
 /* ---------------------------------------------------------- левая колонка */
