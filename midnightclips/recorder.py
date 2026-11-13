@@ -95,6 +95,7 @@ class Recorder:
         self._soft = False                # мягкий перезапуск: буфер не стирать
         self.engine = engine              # путь к mccap.exe или None
         self.engine_test = bool(os.environ.get("MC_ENGINE_TEST"))   # тестовая картинка вместо экрана
+        self.engine_trouble = False       # кодировщик не успевает за движком
         self.screen_fps = None            # сколько раз в секунду реально обновляется экран (от движка)
         self._format = None               # (кодировщик, размер, частота) прошлого запуска
         self._diag = diag or (lambda: "")  # доп. сведения для журнала (состояние «метронома»)
@@ -156,7 +157,7 @@ class Recorder:
             "fps_real": self.fps_real,
             "screen_fps": self.screen_fps,
             "fps_target": self.fps_target,
-            "slow": self.slow,
+            "slow": self.slow or (self.capture == "own" and self.engine_trouble),
             "fallback": self.state == "on" and (
                 self.capture in ("gdi", "ddal") or self.encoder == "libx264"
                 or (self.capture != "own" and self.engine is not None and self.cfg["capture"] == "auto")),
@@ -361,7 +362,7 @@ class Recorder:
         for enc in encoders:
             for cap in captures:
                 if cap == "own":
-                    if enc == "h264_nvenc" and not self.cfg["height"]:
+                    if enc == "h264_nvenc" and not self._needs_scaling():
                         result.append((cap, enc, True))   # кадр BGRA сразу в кодировщик видеокарты
                     result.append((cap, enc, False))
                     continue
@@ -372,6 +373,17 @@ class Recorder:
             result.remove(self._good)
             result.insert(0, self._good)
         return result
+
+    def _needs_scaling(self):
+        """Нужно ли уменьшать картинку (выбранная высота меньше высоты экрана)."""
+        height = int(self.cfg["height"])
+        if not height:
+            return False
+        mons = self.monitors()
+        idx = int(self.cfg["monitor"])
+        if 0 <= idx < len(mons):
+            return height < mons[idx]["h"]
+        return True
 
     def _launch_any(self, retry_last=False):
         if retry_last and self._good:
@@ -530,8 +542,13 @@ class Recorder:
                     except ValueError:
                         continue
                     count += 1
-                    if count % 12 != 1:   # в журнал — примерно раз в минуту
-                        continue
+                    try:
+                        trouble = int(values.get("skipped", "0")) > 0 or float(values.get("late_max", "0ms")[:-2]) > 100
+                    except ValueError:
+                        trouble = False
+                    self.engine_trouble = trouble and count > 2   # первые секунды — разгон, не считаются
+                    if count % 12 != 1 and not (self.engine_trouble and count % 2 == 0):
+                        continue   # в журнал — раз в минуту; при проблемах — каждые 10 секунд
                 if text:
                     self._log("движок: " + text)
         except (OSError, ValueError):
@@ -571,8 +588,10 @@ class Recorder:
             cmd += ["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=%d" % fps]
         elif capture == "own":
             # Кадры уже идут ровно с нужной частотой — ffmpeg только кодирует и пишет.
-            cmd += ["-f", "rawvideo", "-pixel_format", "bgra", "-video_size", "%dx%d" % (own[1], own[2]),
-                    "-framerate", str(fps), "-i", own[0]]
+            # Время кадра — по часам в момент прихода: если кодировщик где-то не успеет, картинка
+            # не «уедет» относительно звука, а пропуск закроется повтором кадра.
+            cmd += ["-use_wallclock_as_timestamps", "1", "-f", "rawvideo", "-pixel_format", "bgra",
+                    "-video_size", "%dx%d" % (own[1], own[2]), "-framerate", str(fps), "-i", own[0]]
         elif capture == "dda":
             # Частота с большим запасом и без повторов кадров: ddagrab тогда не «спит» между
             # кадрами (Sleep в Windows ошибается на 10–15 мс), а ждёт настоящего обновления

@@ -382,14 +382,21 @@ int wmain(int argc, wchar_t** argv) {
     long long n = 0;
     bool dirty = true;
     double statT = t0, maxWrite = 0, maxLate = 0, totalMaxLate = 0, totalMaxWrite = 0;
-    long long lateOver2 = 0;
+    long long lateOver2 = 0, skipped = 0, statSkipped = 0;
     long long statN = 0;
     unsigned statImages = 0;
     int code = 0;
     for (;;) {
         const double due = t0 + (double)n / a.fps;
         timer.sleepUntil(due);
-        const double late = now() - due;   // насколько опоздали к своей отметке
+        double late = now() - due;   // насколько опоздали к своей отметке
+        if (late > 0.1) {
+            // Читатель (кодировщик) не успевал забирать кадры. Не шлём пропущенное пачкой:
+            // время каждого кадра ffmpeg берёт по часам, поэтому пропуск он сам закроет
+            // повтором, а звук с картинкой не разойдутся.
+            const long long target = (long long)((now() - t0) * a.fps);
+            if (target > n) { skipped += target - n; n = target; }
+        }
         if (late > maxLate) maxLate = late;
         if (late > totalMaxLate) totalMaxLate = late;
         if (late > 0.002) lateOver2++;
@@ -409,15 +416,16 @@ int wmain(int argc, wchar_t** argv) {
         n++;
         const double t = now();
         if (t - statT >= a.stat) {
-            logf("stat out=%.1f new=%.1f late_max=%.2fms write_max=%.1fms lost=%u",
-                 (double)(n - statN) / (t - statT), (double)(cap.images - statImages) / (t - statT),
-                 maxLate * 1000.0, maxWrite * 1000.0, cap.lost);
-            statT = t; statN = n; statImages = cap.images; maxWrite = 0; maxLate = 0;
+            logf("stat out=%.1f new=%.1f late_max=%.2fms write_max=%.1fms skipped=%lld lost=%u",
+                 (double)(n - statN - (skipped - statSkipped)) / (t - statT),
+                 (double)(cap.images - statImages) / (t - statT),
+                 maxLate * 1000.0, maxWrite * 1000.0, skipped - statSkipped, cap.lost);
+            statT = t; statN = n; statImages = cap.images; statSkipped = skipped; maxWrite = 0; maxLate = 0;
         }
         if (a.seconds > 0 && t - t0 >= a.seconds) break;
     }
-    logf("done frames=%lld elapsed=%.3f late_max=%.2fms late_over_2ms=%lld write_max=%.1fms highres_timer=%d",
-         n, now() - t0, totalMaxLate * 1000.0, lateOver2, totalMaxWrite * 1000.0, timer.highRes ? 1 : 0);
+    logf("done frames=%lld elapsed=%.3f late_max=%.2fms late_over_2ms=%lld write_max=%.1fms highres_timer=%d skipped=%lld",
+         n - skipped, now() - t0, totalMaxLate * 1000.0, lateOver2, totalMaxWrite * 1000.0, timer.highRes ? 1 : 0, skipped);
     FlushFileBuffers(pipe);
     CloseHandle(pipe);
     cap.close();
