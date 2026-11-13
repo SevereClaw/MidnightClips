@@ -30,7 +30,7 @@ ENCODER_TITLES = {
     "h264_qsv": "Intel Quick Sync",
     "libx264": "процессор (x264)",
 }
-CAPTURE_TITLES = {"dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
+CAPTURE_TITLES = {"own": "движок MidnightClips", "dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
                   "gdi": "GDI", "test": "тест"}
 
 
@@ -46,13 +46,27 @@ def find_ffmpeg(resource_dir):
     return shutil.which("ffmpeg")
 
 
+def find_engine(resource_dir):
+    """Свой движок захвата (mccap.exe). Его может не быть — тогда записываем через ffmpeg."""
+    if sys.platform != "win32":
+        return None
+    places = [resource_dir]
+    if getattr(sys, "frozen", False):
+        places.insert(0, os.path.dirname(sys.executable))
+    for place in places:
+        path = os.path.join(place, "mccap.exe")
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def safe_name(text, fallback="Клип"):
     cleaned = "".join(c for c in text if c not in '<>:"/\\|?*' and ord(c) >= 32).strip(" .")
     return cleaned[:60] or fallback
 
 
 class Recorder:
-    def __init__(self, cfg, ffmpeg, work_dir, log_path, on_event, monitors=None, diag=None):
+    def __init__(self, cfg, ffmpeg, work_dir, log_path, on_event, monitors=None, diag=None, engine=None):
         self.cfg = cfg
         self.ffmpeg = ffmpeg
         self.work_dir = work_dir
@@ -79,6 +93,10 @@ class Recorder:
         self._good = None                 # последний сработавший вариант захвата
         self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
         self._soft = False                # мягкий перезапуск: буфер не стирать
+        self.engine = engine              # путь к mccap.exe или None
+        self.engine_test = bool(os.environ.get("MC_ENGINE_TEST"))   # тестовая картинка вместо экрана
+        self.screen_fps = None            # сколько раз в секунду реально обновляется экран (от движка)
+        self._format = None               # (кодировщик, размер, частота) прошлого запуска
         self._diag = diag or (lambda: "")  # доп. сведения для журнала (состояние «метронома»)
         self._upgrades = 0                # сколько раз пробовали вернуться с запасного режима
         self._avoid_precise = False       # точный режим захвата здесь не работает
@@ -136,9 +154,12 @@ class Recorder:
             "capture": CAPTURE_TITLES.get(self.capture, self.capture),
             "audio_note": self.audio_note,
             "fps_real": self.fps_real,
+            "screen_fps": self.screen_fps,
             "fps_target": self.fps_target,
             "slow": self.slow,
-            "fallback": self.state == "on" and (self.capture in ("gdi", "ddal") or self.encoder == "libx264"),
+            "fallback": self.state == "on" and (
+                self.capture in ("gdi", "ddal") or self.encoder == "libx264"
+                or (self.capture != "own" and self.engine is not None and self.cfg["capture"] == "auto")),
             "capture_kind": self.capture,
             "recording": self.recording_since is not None,
             "recording_since": self.recording_since,
@@ -203,6 +224,12 @@ class Recorder:
             reason = ""
             last_mark, last_change = None, time.time()
             while not self._stop.is_set() and not self._restart.is_set():
+                helper = getattr(proc, "mc_helper", None)
+                if helper is not None and helper.poll() is not None:
+                    reason = "движок захвата остановился (код %s)" % helper.returncode
+                    if helper.returncode == 3:
+                        reason = "изменилось разрешение экрана"
+                    break
                 if proc.poll() is not None:
                     reason = "ffmpeg остановился (код %s)" % proc.returncode
                     break
@@ -323,12 +350,21 @@ class Recorder:
         # dda  — точный режим: кадр берётся в момент обновления экрана, без неточного Sleep;
         # ddal — старый режим: ffmpeg сам отмеряет кадры (на Windows получается с рывками);
         # gdi  — самый медленный запасной.
-        captures = {"dda": ["dda", "ddal"], "ddal": ["ddal"], "gdi": ["gdi"]}.get(capture, ["dda", "ddal", "gdi"])
+        # own  — свой движок: сам отмеряет кадры точным таймером и сам переживает потерю экрана;
+        captures = {"own": ["own", "dda"], "dda": ["dda", "ddal"], "ddal": ["ddal"],
+                    "gdi": ["gdi"]}.get(capture, ["own", "dda", "ddal", "gdi"])
+        if not self.engine and "own" in captures:
+            captures.remove("own")
         if self._avoid_precise and "dda" in captures and len(captures) > 1:
             captures.remove("dda")
         result = []
         for enc in encoders:
             for cap in captures:
+                if cap == "own":
+                    if enc == "h264_nvenc" and not self.cfg["height"]:
+                        result.append((cap, enc, True))   # кадр BGRA сразу в кодировщик видеокарты
+                    result.append((cap, enc, False))
+                    continue
                 if cap in ("dda", "ddal") and enc in ("h264_nvenc", "h264_amf") and not self.cfg["height"]:
                     result.append((cap, enc, True))   # кадры не покидают видеокарту
                 result.append((cap, enc, False))
@@ -384,7 +420,14 @@ class Recorder:
                 self.audio_note = "Звук системы не записывается: %s" % exc
                 source.close()
                 source = None
-        cmd = self._build_cmd(capture, encoder, zero_copy, source, prefix)
+        helper, own = None, None
+        if capture == "own":
+            helper, own = self._start_engine()
+            if helper is None:
+                if source:
+                    source.close()
+                return None
+        cmd = self._build_cmd(capture, encoder, zero_copy, source, prefix, own)
         try:
             log = open(self.log_path, "a", encoding="utf-8", errors="replace")
             log.write("\n=== %s | %s + %s%s ===\n%s\n" % (
@@ -399,6 +442,7 @@ class Recorder:
                 stdin=subprocess.PIPE if source else subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=log, creationflags=NO_WINDOW | priority,
             )
+            proc.mc_helper = helper
             self.fps_real, self.slow = None, False
             self.fps_target = max(15, min(240, int(self.cfg["fps"])))
             threading.Thread(target=self._watch_progress, args=(proc, self.fps_target),
@@ -408,6 +452,7 @@ class Recorder:
             self.message = str(exc)
             if source:
                 source.close()
+            self._kill(helper)
             return None
         pump = None
         if source:
@@ -420,9 +465,15 @@ class Recorder:
             files = glob.glob(pattern)
             if files and max(os.path.getsize(f) for f in files) > 0:
                 self._proc = proc
+                self._format_changed((encoder, own[1:] if own else None, self.fps_target,
+                                      int(self.cfg["height"])), prefix)
                 return proc, source, pump, time.time()
+            if helper is not None and helper.poll() is not None:
+                break
             time.sleep(0.2)
-        if proc.poll() is not None:
+        if helper is not None and helper.poll() is not None:
+            why = "движок захвата вышел с кодом %s" % helper.returncode
+        elif proc.poll() is not None:
             why = "ffmpeg вышел с кодом %s" % proc.returncode
         elif self._stop.is_set():
             why = "остановлено"
@@ -434,7 +485,80 @@ class Recorder:
             self._remove(path)
         return None
 
-    def _build_cmd(self, capture, encoder, zero_copy, source, prefix):
+    def _start_engine(self):
+        """Запустить mccap и дождаться строки «READY ширина высота fps»."""
+        fps = max(15, min(240, int(self.cfg["fps"])))
+        pipe = r"\\.\pipe\mccap_%d_%d" % (os.getpid(), self._session)
+        args = [self.engine, "--pipe", pipe, "--fps", str(fps), "--parent", str(os.getpid())]
+        if self.engine_test:
+            args += ["--test", "--size", "1280x720"]
+        else:
+            mons = self.monitors()
+            idx = int(self.cfg["monitor"])
+            if 0 <= idx < len(mons):
+                args += ["--x", str(mons[idx]["x"]), "--y", str(mons[idx]["y"])]
+        try:
+            helper = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+        except OSError as exc:
+            self._log("движок захвата не запустился: %s" % exc)
+            return None, None
+        threading.Thread(target=self._watch_engine, args=(helper, fps), daemon=True, name="engine-log").start()
+        line = []
+        reader = threading.Thread(target=lambda: line.append(helper.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(8)
+        text = line[0].decode("ascii", "replace").strip() if line else ""
+        parts = text.split()
+        if len(parts) != 4 or parts[0] != "READY":
+            self._log("движок захвата не готов (ответ: %r, код %s)" % (text, helper.poll()))
+            self._kill(helper)
+            return None, None
+        return helper, (pipe, int(parts[1]), int(parts[2]))
+
+    def _watch_engine(self, helper, fps):
+        """Сообщения движка — в журнал; из статистики берём реальную частоту обновления экрана."""
+        count = 0
+        self.screen_fps = None
+        try:
+            for raw in helper.stderr:
+                text = raw.decode("utf-8", "replace").strip()
+                if text.startswith("stat "):
+                    values = dict(p.split("=", 1) for p in text[5:].split() if "=" in p)
+                    try:
+                        self.screen_fps = float(values.get("new", "0"))
+                    except ValueError:
+                        continue
+                    count += 1
+                    if count % 12 != 1:   # в журнал — примерно раз в минуту
+                        continue
+                if text:
+                    self._log("движок: " + text)
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _kill(process):
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def _format_changed(self, key, keep_prefix):
+        """Новый запуск пишет в другом формате (другой размер экрана, кодировщик) —
+        старые кусочки с новыми в один клип не склеить, убираем их."""
+        if self._format is not None and key != self._format:
+            if self.recording_since is not None:
+                self._finish_recording(wait_next=False, exclude_prefix=keep_prefix)
+            with self._save_lock:
+                for path in self._segments():
+                    if not os.path.basename(path).startswith(keep_prefix):
+                        self._remove(path)
+            self._log("формат записи изменился — буфер начат заново")
+        self._format = key
+
+    def _build_cmd(self, capture, encoder, zero_copy, source, prefix, own=None):
         cfg = self.cfg
         fps = max(15, min(240, int(cfg["fps"])))
         height = int(cfg["height"])
@@ -445,6 +569,10 @@ class Recorder:
         # --- вход 0: экран
         if capture == "test":
             cmd += ["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=%d" % fps]
+        elif capture == "own":
+            # Кадры уже идут ровно с нужной частотой — ffmpeg только кодирует и пишет.
+            cmd += ["-f", "rawvideo", "-pixel_format", "bgra", "-video_size", "%dx%d" % (own[1], own[2]),
+                    "-framerate", str(fps), "-i", own[0]]
         elif capture == "dda":
             # Частота с большим запасом и без повторов кадров: ddagrab тогда не «спит» между
             # кадрами (Sleep в Windows ошибается на 10–15 мс), а ждёт настоящего обновления
@@ -564,6 +692,7 @@ class Recorder:
     def _shutdown(self, proc, source, pump):
         if pump:
             pump.stop()
+        self._kill(getattr(proc, "mc_helper", None))
         try:
             if proc.stdin:
                 proc.stdin.close()
@@ -755,7 +884,7 @@ class Recorder:
             self._remove(out_path)
             self.on_event("error", {"text": "Не получилось сохранить клип. Подробности — в журнале."})
 
-    def _finish_recording(self, wait_next=True):
+    def _finish_recording(self, wait_next=True, exclude_prefix=None):
         first, title = self._rec_first, self._rec_title
         if first is None:
             return
@@ -763,7 +892,8 @@ class Recorder:
             if self._rec_first is None:
                 return
             closed = self._closed_segments(wait_next)
-            chosen = [p for p in closed if os.path.basename(p) >= first]
+            chosen = [p for p in closed if os.path.basename(p) >= first
+                      and not (exclude_prefix and os.path.basename(p).startswith(exclude_prefix))]
             self._rec_first = None
             self.recording_since = None
             ok = False

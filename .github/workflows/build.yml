@@ -39,6 +39,12 @@ jobs:
         run: python tests/test_engine_win.py
         env:
           PYTHONUTF8: "1"
+      - name: Установить зависимости
+        run: python -m pip install -r requirements.txt
+      - name: Проверить запись целиком (движок + ffmpeg)
+        run: python tests/test_recorder_win.py
+        env:
+          PYTHONUTF8: "1"
       - name: Проверить установщик обновлений
         run: python tests/test_updater_win.py
         env:

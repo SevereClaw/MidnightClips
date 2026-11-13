@@ -148,7 +148,8 @@ function applyState(st) {
   $("statusSub").textContent = sub;
   $("statusSub").classList.toggle("is-warn", warn);
   $("captureInfo").textContent = st.state === "on"
-    ? [st.encoder, st.capture, st.fps_real != null ? "пишется " + Math.round(st.fps_real) + " из " + st.fps_target + " кадров в секунду" : ""].filter(Boolean).join(", ")
+    ? [st.encoder, st.capture, st.fps_real != null ? "пишется " + Math.round(st.fps_real) + " из " + st.fps_target + " кадров в секунду" : "",
+       st.capture_kind === "own" && st.screen_fps != null ? "экран обновляется " + Math.round(st.screen_fps) + " раз в секунду" : ""].filter(Boolean).join(", ")
     : (st.message || "");
   $("btnRec").classList.toggle("is-on", !!st.recording);
   $("recTitle").textContent = st.recording ? "Остановить" : "Начать запись";

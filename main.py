@@ -9,7 +9,7 @@ from midnightclips import APP_NAME, __version__, winutil
 from midnightclips.config import CAPTURE_KEYS, Config, cache_dir, data_dir, resource_dir
 from midnightclips.hotkeys import Hotkeys
 from midnightclips.library import Library
-from midnightclips.recorder import Recorder, find_ffmpeg
+from midnightclips.recorder import Recorder, find_engine, find_ffmpeg
 from midnightclips.media import MediaServer
 from midnightclips.sounds import EVENTS as SOUND_EVENTS, SoundBank
 from midnightclips.toast import Toast
@@ -41,7 +41,7 @@ class App:
         self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event)
         self.recorder = Recorder(
             self.cfg, self.ffmpeg, os.path.join(cache_dir(), "buffer"), self.log_path,
-            self.on_event, winutil.monitors, self.overlay_diag)
+            self.on_event, winutil.monitors, self.overlay_diag, find_engine(self.res))
 
     # ---------------------------------------------------------------- запуск
 

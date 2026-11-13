@@ -59,6 +59,7 @@ struct Args {
     int tw = 1280, th = 720;
     double seconds = 0;
     DWORD parent = 0;
+    double stat = 5.0;   // как часто писать статистику, секунд
 };
 
 // ------------------------------------------------------------------ точный таймер
@@ -319,6 +320,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--y") { a.y = _wtoi(next()); a.hasPos = true; }
         else if (k == L"--parent") a.parent = (DWORD)_wtoi(next());
         else if (k == L"--seconds") a.seconds = _wtof(next());
+        else if (k == L"--stat") a.stat = std::max(0.5, _wtof(next()));
         else if (k == L"--size") swscanf_s(next(), L"%dx%d", &a.tw, &a.th);
         else if (k == L"--test") a.test = true;
         else if (k == L"--probe") a.probe = true;
@@ -406,7 +408,7 @@ int wmain(int argc, wchar_t** argv) {
         if (wd > totalMaxWrite) totalMaxWrite = wd;
         n++;
         const double t = now();
-        if (t - statT >= 5.0) {
+        if (t - statT >= a.stat) {
             logf("stat out=%.1f new=%.1f late_max=%.2fms write_max=%.1fms lost=%u",
                  (double)(n - statN) / (t - statT), (double)(cap.images - statImages) / (t - statT),
                  maxLate * 1000.0, maxWrite * 1000.0, cap.lost);
