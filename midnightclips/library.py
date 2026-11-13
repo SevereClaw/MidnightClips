@@ -7,9 +7,11 @@ import re
 import subprocess
 import sys
 import threading
+import time
 
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 VIDEO_EXT = (".mp4", ".mkv", ".mov", ".webm")
+MARKS_FILE = ".midnightclips.json"   # избранное и теги, лежит в папке клипов
 
 
 class Library:
@@ -25,6 +27,116 @@ class Library:
                 self._meta = json.load(f)
         except (OSError, ValueError):
             self._meta = {}
+        self._marks = {}
+        self._marks_dir = None
+
+    # ------------------------------------------------- избранное и теги
+
+    def _load_marks(self):
+        """Пометки хранятся рядом с клипами: {относительный путь: {"fav": bool, "tags": [...]}}."""
+        root = self.cfg.clips_dir()
+        if self._marks_dir != root:
+            self._marks_dir = root
+            try:
+                with open(os.path.join(root, MARKS_FILE), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._marks = data if isinstance(data, dict) else {}
+            except (OSError, ValueError):
+                self._marks = {}
+        return self._marks
+
+    def _save_marks(self):
+        path = os.path.join(self._marks_dir, MARKS_FILE)
+        try:
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(self._marks, f, ensure_ascii=False, indent=1)
+            os.replace(path + ".tmp", path)
+        except OSError:
+            pass
+
+    def _rel(self, path):
+        return os.path.relpath(os.path.realpath(path), os.path.realpath(self.cfg.clips_dir())).replace(os.sep, "/")
+
+    def _set_mark(self, path, **values):
+        if not self.inside(path):
+            return False
+        with self._lock:
+            marks = self._load_marks()
+            entry = dict(marks.get(self._rel(path), {}))
+            entry.update(values)
+            if entry.get("fav") or entry.get("tags"):
+                marks[self._rel(path)] = {"fav": bool(entry.get("fav")), "tags": entry.get("tags") or []}
+            else:
+                marks.pop(self._rel(path), None)
+            self._save_marks()
+        return True
+
+    def set_favorite(self, path, value):
+        return self._set_mark(path, fav=bool(value))
+
+    def set_tags(self, path, tags):
+        clean, seen = [], set()
+        for tag in tags or []:
+            tag = " ".join(str(tag).replace("#", " ").replace(",", " ").split())[:24]
+            if tag and tag.lower() not in seen:
+                seen.add(tag.lower())
+                clean.append(tag)
+        return self._set_mark(path, tags=clean[:8])
+
+    def forget(self, path):
+        """Клип удалён — убрать его пометки."""
+        with self._lock:
+            if self._load_marks().pop(self._rel(path), None) is not None:
+                self._save_marks()
+
+    def _move_mark(self, old, new):
+        with self._lock:
+            marks = self._load_marks()
+            entry = marks.pop(self._rel(old), None)
+            if entry is not None:
+                marks[self._rel(new)] = entry
+                self._save_marks()
+
+    # -------------------------------------------------------- автоочистка
+
+    def cleanup_plan(self, days, gigabytes, now=None):
+        """Какие клипы уйдут при таких настройках. Избранное и только что записанное не трогаем."""
+        now = now or time.time()
+        clips = self.list()
+        doomed = []
+        candidates = [c for c in clips if not c["favorite"] and now - c["mtime"] > 600]
+        if days > 0:
+            doomed = [c for c in candidates if now - c["mtime"] > days * 86400]
+        if gigabytes > 0:
+            total = sum(c["size"] for c in clips) - sum(c["size"] for c in doomed)
+            limit = gigabytes * 1024 ** 3
+            gone = {c["path"] for c in doomed}
+            for clip in sorted(candidates, key=lambda c: c["mtime"]):   # от самых старых
+                if total <= limit:
+                    break
+                if clip["path"] not in gone:
+                    doomed.append(clip)
+                    total -= clip["size"]
+        return doomed
+
+    def cleanup(self, delete):
+        """Выполнить автоочистку по настройкам. delete(path) -> bool. Возвращает (сколько, байт)."""
+        days, gigabytes = int(self.cfg["cleanup_days"]), int(self.cfg["cleanup_gb"])
+        if days <= 0 and gigabytes <= 0:
+            return 0, 0
+        count = freed = 0
+        for clip in self.cleanup_plan(days, gigabytes):
+            if self.inside(clip["path"]) and delete(clip["path"]):
+                count += 1
+                freed += clip["size"]
+                self.forget(clip["path"])
+                folder = os.path.dirname(clip["path"])
+                try:
+                    if self.inside(folder) and not os.listdir(folder):
+                        os.rmdir(folder)
+                except OSError:
+                    pass
+        return count, freed
 
     def inside(self, path):
         """Путь должен лежать внутри папки клипов — интерфейсу нельзя трогать чужие файлы."""
@@ -42,6 +154,9 @@ class Library:
     def list(self):
         root = self.cfg.clips_dir()
         clips = []
+        with self._lock:
+            marks = dict(self._load_marks())
+        real_root = os.path.realpath(root)
         for folder, _dirs, files in os.walk(root):
             for name in files:
                 if not name.lower().endswith(VIDEO_EXT):
@@ -53,7 +168,10 @@ class Library:
                     continue
                 rel = os.path.relpath(folder, root)
                 key = self._key(path, stat)
+                mark = marks.get(os.path.relpath(os.path.realpath(path), real_root).replace(os.sep, "/"), {})
                 clips.append({
+                    "favorite": bool(mark.get("fav")),
+                    "tags": list(mark.get("tags") or []),
                     "path": path,
                     "name": os.path.splitext(name)[0],
                     "game": "" if rel == "." else rel.split(os.sep)[0],
@@ -120,6 +238,7 @@ class Library:
             os.rename(path, target)
         except OSError:
             return None
+        self._move_mark(path, target)
         return target
 
     def list_mics(self):

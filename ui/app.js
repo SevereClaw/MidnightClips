@@ -9,13 +9,14 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9",
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
     ["hl2 запись 2026-11-11 19-05-10", "hl2", 754, 1.1e9, 1], ["Тройное убийство", "cs2", 30, 44e6, 0],
     ["cs2 2026-11-10 23-58-31", "cs2", 30, 46e6, 0], ["Рабочий стол 2026-11-09 14-02-00", "Рабочий стол", 15, 9e6, 0],
-  ].map((c, i) => ({ path: "demo" + i, name: c[0], game: c[1], duration: c[2], size: c[3], recording: !!c[4], mtime: Date.now() / 1000 - i * 5400 })),
+  ].map((c, i) => ({ path: "demo" + i, name: c[0], game: c[1], duration: c[2], size: c[3], recording: !!c[4], mtime: Date.now() / 1000 - i * 5400,
+    favorite: i === 0 || i === 3, tags: [["босс"], [], [], ["эйс", "смешное"], ["эйс"], []][i] })),
 };
 const demoApi = {
   get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", recording: false, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
@@ -34,6 +35,8 @@ const demoApi = {
   delete_clip: async (p) => { demo.clips = demo.clips.filter((c) => c.path !== p); return true; },
   copy_clip: async () => true,
   pick_sound: async () => demo.settings,
+  set_tags: async (p, tags) => { demo.clips.find((c) => c.path === p).tags = tags; return true; },
+  cleanup_preview: async (days, gb) => ({ count: days || gb ? 3 : 0, bytes: 1.25e9 }),
   media_url: async () => window.DEMO_VIDEO || "",
   clip_action: async (p, action) => {
     let n = 0;
@@ -59,6 +62,8 @@ const $ = (id) => document.getElementById(id);
 let settings = {};
 let clips = [];
 let gameFilter = "";
+let favOnly = false;
+let tagFilter = "";
 let recSince = null;
 
 function flash(text, isError) {
@@ -161,6 +166,10 @@ window.onBackendEvent = (kind, data) => {
   else if (kind === "hotkeys") applyHotkeyStatus(data);
   else if (kind === "update") applyUpdate(data);
   else if (kind === "job") showJob(data);
+  else if (kind === "cleaned") {
+    flash("Автоочистка: в корзину ушло клипов — " + data.count + " (" + fmtSize(data.bytes) + ")");
+    loadClips();
+  }
   else if (kind === "job_done") finishJob(data);
   else if (kind === "saving") $("btnClip").classList.add("is-busy");
   else if (kind === "saved") {
@@ -191,24 +200,35 @@ const thumbObserver = new IntersectionObserver((entries) => {
 
 function renderChips() {
   const games = [...new Set(clips.map((c) => c.game).filter(Boolean))];
+  const tags = [...new Set(clips.flatMap((c) => c.tags || []))].sort((a, b) => a.localeCompare(b, "ru"));
+  const hasFav = clips.some((c) => c.favorite);
   const box = $("chips");
   box.innerHTML = "";
-  if (games.length < 2) { gameFilter = ""; return; }
+  if (games.length < 2) gameFilter = "";
   if (gameFilter && !games.includes(gameFilter)) gameFilter = "";
-  [["", "Все"], ...games.map((g) => [g, g])].forEach(([value, label]) => {
+  if (tagFilter && !tags.includes(tagFilter)) tagFilter = "";
+  if (!hasFav) favOnly = false;
+  if (games.length < 2 && !tags.length && !hasFav) return;
+  const chip = (label, active, cls, fn) => {
     const b = document.createElement("button");
-    b.className = "chip" + (value === gameFilter ? " is-active" : "");
+    b.className = "chip" + (cls ? " " + cls : "") + (active ? " is-active" : "");
     b.textContent = label;
-    b.onclick = () => { gameFilter = value; renderChips(); renderClips(); };
+    b.onclick = () => { fn(); renderChips(); renderClips(); };
     box.appendChild(b);
-  });
+  };
+  chip("Все", !gameFilter && !favOnly && !tagFilter, "", () => { gameFilter = ""; favOnly = false; tagFilter = ""; });
+  if (hasFav) chip("★ Избранное", favOnly, "chip-fav", () => { favOnly = !favOnly; });
+  if (games.length >= 2) games.forEach((g) => chip(g, g === gameFilter, "", () => { gameFilter = g === gameFilter ? "" : g; }));
+  tags.forEach((t) => chip("#" + t, t === tagFilter, "chip-tag", () => { tagFilter = t === tagFilter ? "" : t; }));
 }
 
 function renderClips() {
   const query = $("search").value.trim().toLowerCase();
   const grid = $("grid");
   grid.innerHTML = "";
-  const shown = clips.filter((c) => (!gameFilter || c.game === gameFilter) && (!query || c.name.toLowerCase().includes(query)));
+  const shown = clips.filter((c) => (!gameFilter || c.game === gameFilter)
+    && (!favOnly || c.favorite) && (!tagFilter || (c.tags || []).includes(tagFilter))
+    && (!query || c.name.toLowerCase().includes(query) || (c.tags || []).some((t) => t.toLowerCase().includes(query))));
   $("empty").hidden = clips.length > 0;
   shown.forEach((clip) => {
     const card = document.createElement("article");
@@ -222,6 +242,29 @@ function renderClips() {
     if (clip.duration != null) { const b = thumb.querySelector(".badge-time"); b.textContent = fmtDuration(clip.duration); b.hidden = false; }
     thumb.onclick = () => openEditor(clip);
     thumbObserver.observe(thumb);
+
+    const star = document.createElement("button");
+    star.className = "star" + (clip.favorite ? " is-on" : "");
+    star.textContent = "★";
+    star.title = clip.favorite ? "Убрать из избранного" : "В избранное — автоочистка такие клипы не трогает";
+    star.setAttribute("aria-pressed", clip.favorite ? "true" : "false");
+    star.onclick = async () => {
+      clip.favorite = !clip.favorite;
+      await api.set_favorite(clip.path, clip.favorite);
+      renderChips();
+      renderClips();
+    };
+
+    const tagBox = document.createElement("div");
+    tagBox.className = "card-tags";
+    (clip.tags || []).forEach((t) => {
+      const b = document.createElement("button");
+      b.className = "tag";
+      b.textContent = "#" + t;
+      b.title = "Показать клипы с этим тегом";
+      b.onclick = () => { tagFilter = t; renderChips(); renderClips(); };
+      tagBox.appendChild(b);
+    });
 
     const name = document.createElement("div");
     name.className = "card-name";
@@ -243,6 +286,12 @@ function renderClips() {
       flash((await api.copy_clip(clip.path)) ? "Скопировано — вставьте через Ctrl+V" : "Не удалось скопировать", false);
     });
     action("Показать в папке", () => api.reveal_clip(clip.path));
+    action("Теги", async () => {
+      const value = await ask({ title: "Теги клипа", text: "Через запятую, например: эйс, смешное, босс", input: (clip.tags || []).join(", "), okLabel: "Сохранить" });
+      if (value == null) return;
+      await api.set_tags(clip.path, value.split(",").map((t) => t.trim()).filter(Boolean));
+      loadClips();
+    });
     action("Переименовать", async () => {
       const value = await ask({ title: "Переименовать клип", input: clip.name, okLabel: "Переименовать" });
       if (!value || value === clip.name) return;
@@ -254,7 +303,7 @@ function renderClips() {
       if (ok && (await api.delete_clip(clip.path))) loadClips();
     }, "link-danger");
 
-    card.append(thumb, name, meta, actions);
+    card.append(thumb, star, name, meta, tagBox, actions);
     grid.appendChild(card);
   });
 }
@@ -391,6 +440,7 @@ function applySettings(s) {
       el.value = value;
     }
   });
+  document.querySelectorAll("[data-cleanup]").forEach((el) => { el.value = String(s[el.dataset.cleanup] || 0); });
   document.querySelectorAll("[data-hotkey]").forEach((el) => { el.textContent = s[el.dataset.hotkey] || "Не задано"; });
   $("kbdClip").textContent = $("kbdEmpty").textContent = s.hotkey_clip || "кнопкой";
   $("kbdRec").textContent = s.hotkey_record || "кнопкой";
@@ -409,6 +459,28 @@ document.querySelectorAll("[data-key]").forEach((el) => {
     let value = el.type === "checkbox" ? el.checked : el.value;
     if (el.dataset.type === "int") value = parseInt(value, 10) || 0;
     saveSetting(el.dataset.key, value);
+  });
+});
+
+// Автоочистка: перед включением показываем, сколько клипов уйдёт прямо сейчас.
+document.querySelectorAll("[data-cleanup]").forEach((el) => {
+  el.addEventListener("change", async () => {
+    const key = el.dataset.cleanup;
+    const value = parseInt(el.value, 10) || 0;
+    const days = key === "cleanup_days" ? value : settings.cleanup_days || 0;
+    const gb = key === "cleanup_gb" ? value : settings.cleanup_gb || 0;
+    if (value > 0) {
+      const plan = await api.cleanup_preview(days, gb);
+      if (plan && plan.count > 0) {
+        const ok = await ask({
+          title: "Включить автоочистку?",
+          text: "Сразу после включения в корзину уйдёт клипов: " + plan.count + " (" + fmtSize(plan.bytes) + "). Избранное останется.",
+          okLabel: "Включить",
+        });
+        if (!ok) { el.value = String(settings[key] || 0); return; }
+      }
+    }
+    saveSetting(key, value);
   });
 });
 

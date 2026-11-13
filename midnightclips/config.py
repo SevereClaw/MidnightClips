@@ -57,6 +57,8 @@ DEFAULTS = {
     "sound_rec_on": "",
     "sound_rec_off": "",
     "sound_error": "",
+    "cleanup_days": 0,          # удалять клипы старше N дней; 0 = не удалять
+    "cleanup_gb": 0,            # держать папку клипов в пределах N ГБ; 0 = без предела
     "discord_webhook": "",      # ссылка вебхука канала
     "discord_limit_mb": 10,     # предел размера файла при сжатии и отправке
 }

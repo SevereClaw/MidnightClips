@@ -155,6 +155,18 @@
         <div class="row"><span>Папка клипов<small id="clipsDir"></small></span>
           <button class="mini" id="btnPick">Выбрать папку</button></div>
         <label class="row"><span>Отдельная папка для каждой игры</span><input type="checkbox" data-key="folder_per_game"></label>
+        <label class="row"><span>Удалять старые клипы
+          <small>Избранное не удаляется. Клипы уходят в корзину</small></span>
+          <select data-cleanup="cleanup_days">
+            <option value="0">Не удалять</option><option value="7">Старше 7 дней</option><option value="14">Старше 14 дней</option>
+            <option value="30">Старше 30 дней</option><option value="60">Старше 60 дней</option><option value="90">Старше 90 дней</option>
+          </select></label>
+        <label class="row"><span>Предел размера папки
+          <small>Когда клипов становится больше — самые старые уходят в корзину, кроме избранного</small></span>
+          <select data-cleanup="cleanup_gb">
+            <option value="0">Без предела</option><option value="5">5 ГБ</option><option value="10">10 ГБ</option><option value="20">20 ГБ</option>
+            <option value="50">50 ГБ</option><option value="100">100 ГБ</option><option value="200">200 ГБ</option>
+          </select></label>
       </div>
 
       <div class="panel">

@@ -57,6 +57,22 @@ class App:
         else:
             self.recorder.start()
         threading.Thread(target=self.update_loop, daemon=True, name="updater").start()
+        threading.Thread(target=self.cleanup_loop, daemon=True, name="cleanup").start()
+
+    def cleanup_loop(self):
+        """Автоочистка: вскоре после запуска и дальше раз в полчаса."""
+        time.sleep(20)
+        while not self.quitting:
+            self.run_cleanup()
+            time.sleep(1800)
+
+    def run_cleanup(self):
+        try:
+            count, freed = self.library.cleanup(winutil.recycle)
+        except Exception:
+            return
+        if count:
+            self.push("cleaned", {"count": count, "bytes": freed})
 
     def update_loop(self):
         """При запуске — проверить и сразу обновиться; дальше проверять раз в 6 часов."""
@@ -158,6 +174,7 @@ class App:
 
     def on_event(self, kind, payload):
         if kind == "saved":
+            threading.Thread(target=self.run_cleanup, daemon=True).start()
             self.sound("saved")
             if self.cfg["toast"]:
                 title = "Клип сохранён" if payload.get("kind") == "clip" else "Запись сохранена"
@@ -212,6 +229,8 @@ class Api:
         changed = app.cfg.update(values or {})
         if changed & {"hotkey_clip", "hotkey_record"}:
             app.bind_hotkeys()
+        if changed & {"cleanup_days", "cleanup_gb", "clips_dir"}:
+            threading.Thread(target=app.run_cleanup, daemon=True).start()
         if "autostart" in changed:
             winutil.set_autostart(app.cfg["autostart"])
         if changed & CAPTURE_KEYS and app.ffmpeg:
@@ -289,6 +308,8 @@ class Api:
     def delete_clip(self, path):
         if self._app.library.inside(path) and os.path.isfile(path):
             ok = winutil.recycle(path)
+            if ok:
+                self._app.library.forget(path)
             folder = os.path.dirname(path)
             try:  # убрать опустевшую папку игры
                 if ok and self._app.library.inside(folder) and not os.listdir(folder):
@@ -297,6 +318,20 @@ class Api:
                 pass
             return ok
         return False
+
+    def set_favorite(self, path, value):
+        return self._app.library.set_favorite(path, value)
+
+    def set_tags(self, path, tags):
+        return self._app.library.set_tags(path, tags)
+
+    def cleanup_preview(self, days, gigabytes):
+        """Сколько клипов уйдёт в корзину при таких настройках автоочистки."""
+        try:
+            plan = self._app.library.cleanup_plan(int(days), int(gigabytes))
+        except Exception:
+            plan = []
+        return {"count": len(plan), "bytes": sum(c["size"] for c in plan)}
 
     def rename_clip(self, path, new_name):
         return self._app.library.rename(path, new_name or "")
