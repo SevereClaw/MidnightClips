@@ -423,6 +423,9 @@ class Recorder:
             # кадрами (Sleep в Windows ошибается на 10–15 мс), а ждёт настоящего обновления
             # экрана. До нужной частоты поток выравнивает уже сам ffmpeg (-r ниже).
             graph = "ddagrab=output_idx=%d:framerate=1000:dup_frames=0:draw_mouse=1" % int(cfg["monitor"])
+            # Лишние кадры (монитор 144 Гц, запись 30) отбрасываем сразу, пока они ещё в памяти
+            # видеокарты, — иначе каждый пришлось бы копировать и уменьшать процессором.
+            graph += ",fps=%d" % fps
             if not zero_copy:
                 graph += ",hwdownload,format=bgra"
             cmd += ["-f", "lavfi", "-i", graph]
