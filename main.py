@@ -354,6 +354,13 @@ class Api:
             plan = []
         return {"count": len(plan), "bytes": sum(c["size"] for c in plan)}
 
+    def delete_clips(self, paths):
+        """Удалить сразу несколько клипов. Возвращает, сколько удалено."""
+        return sum(1 for path in list(paths or [])[:5000] if self.delete_clip(path))
+
+    def set_favorites(self, paths, value):
+        return sum(1 for path in list(paths or [])[:5000] if self._app.library.set_favorite(path, value))
+
     def rename_clip(self, path, new_name):
         return self._app.library.rename(path, new_name or "")
 

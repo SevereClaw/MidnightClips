@@ -35,6 +35,8 @@ const demoApi = {
   delete_clip: async (p) => { demo.clips = demo.clips.filter((c) => c.path !== p); return true; },
   copy_clip: async () => true,
   pick_sound: async () => demo.settings,
+  delete_clips: async (paths) => { demo.clips = demo.clips.filter((c) => !paths.includes(c.path)); return paths.length; },
+  set_favorites: async (paths, v) => { demo.clips.forEach((c) => { if (paths.includes(c.path)) c.favorite = v; }); return paths.length; },
   set_tags: async (p, tags) => { demo.clips.find((c) => c.path === p).tags = tags; return true; },
   cleanup_preview: async (days, gb) => ({ count: days || gb ? 3 : 0, bytes: 1.25e9 }),
   media_url: async () => window.DEMO_VIDEO || "",
@@ -64,6 +66,8 @@ let clips = [];
 let gameFilter = "";
 let favOnly = false;
 let tagFilter = "";
+let shownClips = [];
+const picked = new Set();   // пути выбранных клипов
 let recSince = null;
 
 function flash(text, isError) {
@@ -241,9 +245,18 @@ function renderClips() {
     && (!favOnly || c.favorite) && (!tagFilter || (c.tags || []).includes(tagFilter))
     && (!query || c.name.toLowerCase().includes(query) || (c.tags || []).some((t) => t.toLowerCase().includes(query))));
   $("empty").hidden = clips.length > 0;
+  shownClips = shown;
   shown.forEach((clip) => {
     const card = document.createElement("article");
     card.className = "card";
+    card.dataset.path = clip.path;
+
+    const pick = document.createElement("button");
+    pick.className = "pick";
+    pick.textContent = "✓";
+    pick.title = "Выбрать";
+    pick.setAttribute("aria-label", "Выбрать клип " + clip.name);
+    pick.onclick = (e) => togglePick(clip.path, e.shiftKey);
 
     const thumb = document.createElement("button");
     thumb.className = "thumb";
@@ -251,7 +264,10 @@ function renderClips() {
     thumb.title = "Смотреть и обрезать";
     thumb.innerHTML = '<span class="play"></span><span class="badge badge-time" hidden></span>' + (clip.recording ? '<span class="badge badge-rec">запись</span>' : "");
     if (clip.duration != null) { const b = thumb.querySelector(".badge-time"); b.textContent = fmtDuration(clip.duration); b.hidden = false; }
-    thumb.onclick = () => openEditor(clip);
+    thumb.onclick = (e) => {   // пока что-то выбрано, нажатие отмечает клип — как в галерее телефона
+      if (picked.size || e.ctrlKey || e.shiftKey) togglePick(clip.path, e.shiftKey);
+      else openEditor(clip);
+    };
     thumbObserver.observe(thumb);
 
     const star = document.createElement("button");
@@ -314,10 +330,120 @@ function renderClips() {
       if (ok && (await api.delete_clip(clip.path))) loadClips();
     }, "link-danger");
 
-    card.append(thumb, star, name, meta, tagBox, actions);
+    card.append(thumb, pick, star, name, meta, tagBox, actions);
     grid.appendChild(card);
   });
+  syncPicked();
 }
+
+// ---------------------------------------------------------------- выбор нескольких клипов
+
+let lastPicked = null;
+function syncPicked() {
+  const existing = new Set(clips.map((c) => c.path));
+  [...picked].forEach((p) => { if (!existing.has(p)) picked.delete(p); });
+  document.querySelectorAll("#grid .card").forEach((card) => {
+    const on = picked.has(card.dataset.path);
+    card.classList.toggle("is-picked", on);
+    card.querySelector(".pick").setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  $("grid").classList.toggle("is-selecting", picked.size > 0);
+  $("selectBar").hidden = picked.size === 0 || !$("view-clips").classList.contains("is-active");
+  if (picked.size) {
+    const size = clips.filter((c) => picked.has(c.path)).reduce((sum, c) => sum + c.size, 0);
+    $("selectText").textContent = "Выбрано: " + picked.size + ", " + fmtSize(size);
+    const allFav = clips.filter((c) => picked.has(c.path)).every((c) => c.favorite);
+    $("selFav").textContent = allFav ? "Убрать из избранного" : "В избранное";
+  }
+}
+function togglePick(path, range) {
+  if (range && lastPicked && lastPicked !== path) {   // с Shift — весь промежуток
+    const order = shownClips.map((c) => c.path);
+    const a = order.indexOf(lastPicked), b = order.indexOf(path);
+    if (a >= 0 && b >= 0) order.slice(Math.min(a, b), Math.max(a, b) + 1).forEach((p) => picked.add(p));
+  } else if (picked.has(path)) picked.delete(path);
+  else picked.add(path);
+  lastPicked = path;
+  syncPicked();
+}
+function clearPicked() { picked.clear(); lastPicked = null; syncPicked(); }
+
+$("selCancel").onclick = clearPicked;
+$("selAll").onclick = () => { shownClips.forEach((c) => picked.add(c.path)); syncPicked(); };
+$("selFav").onclick = async () => {
+  const chosen = clips.filter((c) => picked.has(c.path));
+  const value = !chosen.every((c) => c.favorite);
+  await api.set_favorites(chosen.map((c) => c.path), value);
+  chosen.forEach((c) => { c.favorite = value; });
+  flash(value ? "Добавлено в избранное: " + chosen.length : "Убрано из избранного: " + chosen.length);
+  clearPicked();
+  loadClips();
+};
+async function deletePicked() {
+  const paths = [...picked];
+  if (!paths.length) return;
+  const size = clips.filter((c) => picked.has(c.path)).reduce((sum, c) => sum + c.size, 0);
+  const ok = await ask({ title: "Удалить выбранные клипы?", text: "В корзину отправится клипов: " + paths.length + " (" + fmtSize(size) + ").", okLabel: "Удалить" });
+  if (!ok) return;
+  const count = await api.delete_clips(paths);
+  flash("Удалено клипов: " + count, count !== paths.length);
+  clearPicked();
+  loadClips();
+}
+$("selDelete").onclick = deletePicked;
+
+document.addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if (!$("view-clips").classList.contains("is-active") || !$("editor").hidden || !$("modal").hidden || typing) return;
+  if (e.key === "Escape" && picked.size) clearPicked();
+  else if (e.key === "Delete" && picked.size) deletePicked();
+  else if ((e.ctrlKey || e.metaKey) && e.code === "KeyA" && shownClips.length) {
+    e.preventDefault();
+    shownClips.forEach((c) => picked.add(c.path));
+    syncPicked();
+  }
+});
+
+// Обводка рамкой: зажать мышь на свободном месте и протянуть по клипам.
+(() => {
+  const view = $("view-clips"), box = $("lasso");
+  let start = null, base = null, active = false;
+  const hit = (r, x1, y1, x2, y2) => r.left < x2 && r.right > x1 && r.top < y2 && r.bottom > y1;
+  function update(e) {
+    const x1 = Math.min(start.x, e.clientX), y1 = Math.min(start.y, e.clientY);
+    const x2 = Math.max(start.x, e.clientX), y2 = Math.max(start.y, e.clientY);
+    Object.assign(box.style, { left: x1 + "px", top: y1 + "px", width: (x2 - x1) + "px", height: (y2 - y1) + "px" });
+    picked.clear();
+    base.forEach((p) => picked.add(p));
+    document.querySelectorAll("#grid .card").forEach((card) => {
+      if (hit(card.querySelector(".thumb").getBoundingClientRect(), x1, y1, x2, y2)) picked.add(card.dataset.path);
+    });
+    syncPicked();
+  }
+  view.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || e.target.closest("button, input, select, a, .view-head")) return;
+    if (e.clientX > view.getBoundingClientRect().right - 14) return;   // полоса прокрутки
+    start = { x: e.clientX, y: e.clientY };
+    base = e.ctrlKey || e.shiftKey ? new Set(picked) : new Set();
+    active = false;
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!start) return;
+    if (!active && Math.hypot(e.clientX - start.x, e.clientY - start.y) < 6) return;
+    active = true;
+    box.hidden = false;
+    const r = view.getBoundingClientRect();   // у края списка — прокручиваем
+    if (e.clientY > r.bottom - 30) view.scrollBy(0, 18);
+    else if (e.clientY < r.top + 30) view.scrollBy(0, -18);
+    update(e);
+  });
+  window.addEventListener("mouseup", () => {
+    if (start && !active && picked.size && !base.size) clearPicked();   // клик по пустому месту снимает выбор
+    start = null;
+    active = false;
+    box.hidden = true;
+  });
+})();
 
 async function loadClips() {
   clips = (await api.list_clips()) || [];
@@ -609,6 +735,7 @@ document.querySelectorAll(".nav-item").forEach((item) => {
     document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("is-active", n === item));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("is-active", v.id === "view-" + item.dataset.view));
     if (item.dataset.view === "clips") loadClips();
+    syncPicked();
   };
 });
 
