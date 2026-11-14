@@ -33,6 +33,14 @@
 #include <audiopolicy.h>
 #include <audioclientactivationparams.h>
 #include <tlhelp32.h>
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
 
 #include <algorithm>
 #include <atomic>
@@ -56,6 +64,10 @@
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "mmdevapi.lib")
+#pragma comment(lib, "windowsapp.lib")
+
+namespace wgc = winrt::Windows::Graphics::Capture;
+namespace wgd = winrt::Windows::Graphics::DirectX;
 
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
@@ -96,6 +108,7 @@ struct Args {
     std::wstring mic;          // название микрофона; "default" — основной; пусто — без микрофона
     std::map<std::wstring, float> appVol;   // своя громкость программ: имя exe (строчными) -> громкость
     bool listApps = false;     // вывести программы, у которых сейчас есть звук, и выйти
+    HWND window = nullptr;     // записывать одно окно (а не весь монитор)
 };
 
 static const char* kShaders = R"(
@@ -171,6 +184,15 @@ struct Capturer {
     unsigned lost = 0, images = 0, pointerMoves = 0;
     double nextRetry = 0;
     HRESULT lastError = S_OK;
+
+    // ---- захват одного окна (Windows Graphics Capture)
+    bool windowMode = false;
+    std::atomic<bool> windowClosed{false};
+    int srcW = 0, srcH = 0;   // текущий размер окна (может меняться; размер кадра на выходе остаётся прежним)
+    wgc::GraphicsCaptureItem item{nullptr};
+    wgc::Direct3D11CaptureFramePool pool{nullptr};
+    wgc::GraphicsCaptureSession session{nullptr};
+    wgd::Direct3D11::IDirect3DDevice rtDevice{nullptr};
 
     // ---- обработка на видеокарте
     bool gpu = false, scaled = false, shapeDirty = false, fakePtr = false;
@@ -264,6 +286,91 @@ struct Capturer {
         return ok;
     }
 
+    // Окно изменило размер: пересоздаём текстуры источника. Размер кадра на выходе не меняется —
+    // картинка вписывается в него с полями.
+    bool resizeSource(int w, int h) {
+        SafeRelease(deskSrv); SafeRelease(stageSrv); SafeRelease(stageRtv); SafeRelease(desk); SafeRelease(stage);
+        const UINT both = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        bool ok = makeTex(w, h, deskFormat, both, false, &desk) && makeTex(w, h, deskFormat, both, false, &stage)
+               && SUCCEEDED(dev->CreateShaderResourceView(desk, nullptr, &deskSrv))
+               && SUCCEEDED(dev->CreateShaderResourceView(stage, nullptr, &stageSrv))
+               && SUCCEEDED(dev->CreateRenderTargetView(stage, nullptr, &stageRtv));
+        srcW = w; srcH = h;
+        return ok;
+    }
+
+    // Захват одного окна. Курсор и рамку рисует сама Windows.
+    bool initWindow(HWND hwnd, int targetHeight, bool withCursor) {
+        try {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            if (!wgc::GraphicsCaptureSession::IsSupported()) { logf("error: window capture is not supported here"); return false; }
+            static const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+            D3D_FEATURE_LEVEL got;
+            HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                           levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &dev, &got, &ctx);
+            if (FAILED(hr))
+                hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                       levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &dev, &got, &ctx);
+            if (FAILED(hr)) { logf("error: D3D11CreateDevice 0x%08lx", hr); return false; }
+            winrt::com_ptr<IDXGIDevice> dxgi;
+            winrt::check_hresult(dev->QueryInterface(__uuidof(IDXGIDevice), dxgi.put_void()));
+            winrt::com_ptr<::IInspectable> inspectable;
+            winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.get(), inspectable.put()));
+            rtDevice = inspectable.as<wgd::Direct3D11::IDirect3DDevice>();
+            auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+            winrt::check_hresult(interop->CreateForWindow(hwnd, winrt::guid_of<wgc::IGraphicsCaptureItem>(), winrt::put_abi(item)));
+            const auto size = item.Size();
+            width = srcW = std::max(2, (int)size.Width);
+            height = srcH = std::max(2, (int)size.Height);
+            pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
+                rtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+            session = pool.CreateCaptureSession(item);
+            try { session.IsBorderRequired(false); } catch (...) {}          // убрать жёлтую рамку умеет только Windows 11
+            try { session.IsCursorCaptureEnabled(withCursor); } catch (...) {}
+            item.Closed([this](auto&&, auto&&) { windowClosed = true; });
+            session.StartCapture();
+            windowMode = true;
+            deskFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            return initGpu(targetHeight);
+        } catch (winrt::hresult_error const& e) {
+            logf("error: window capture 0x%08lx", (unsigned long)e.code().value);
+            return false;
+        }
+    }
+
+    // 1 — новая картинка окна, 0 — ничего нового, -2 — окно закрыто
+    int pollWindow() {
+        if (windowClosed) return -2;
+        try {
+            wgc::Direct3D11CaptureFrame frame{nullptr}, latest{nullptr};
+            while ((frame = pool.TryGetNextFrame())) latest = frame;   // берём самый свежий кадр
+            if (!latest) return 0;
+            const auto content = latest.ContentSize();
+            auto access = latest.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+            winrt::com_ptr<ID3D11Texture2D> tex;
+            winrt::check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), tex.put_void()));
+            D3D11_TEXTURE2D_DESC td;
+            tex->GetDesc(&td);
+            const int cw = std::max(2, std::min((int)content.Width, (int)td.Width));
+            const int chh = std::max(2, std::min((int)content.Height, (int)td.Height));
+            if (cw != srcW || chh != srcH) {
+                if (!resizeSource(cw, chh)) return -2;
+                logf("info: window resized to %dx%d", cw, chh);
+            }
+            D3D11_BOX box{};
+            box.right = (UINT)cw; box.bottom = (UINT)chh; box.back = 1;
+            ctx->CopySubresourceRegion(desk, 0, 0, 0, 0, tex.get(), 0, &box);
+            if ((int)content.Width != (int)td.Width || (int)content.Height != (int)td.Height)
+                pool.Recreate(rtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, content);
+            haveImage = true;
+            images++;
+            return 1;
+        } catch (winrt::hresult_error const& e) {
+            logf("info: window capture error 0x%08lx", (unsigned long)e.code().value);
+            return -2;
+        }
+    }
+
     // Курсор -> две текстурки: обычная (с прозрачностью) и «инвертирующая» (как у текстового курсора).
     void buildCursor() {
         shapeDirty = false;
@@ -349,13 +456,24 @@ struct Capturer {
         }
         ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
         ctx->PSSetSamplers(0, 1, &smpLinear);
+        float vx = 0, vy = 0, vw = (float)outW, vh = (float)outH;
+        if (windowMode && srcW > 0 && srcH > 0) {   // окно вписывается в кадр целиком, по краям — чёрные поля
+            const float k = std::min((float)outW / srcW, (float)outH / srcH);
+            vw = srcW * k; vh = srcH * k;
+            vx = (outW - vw) / 2; vy = (outH - vh) / 2;
+            if (vw < outW - 0.5f || vh < outH - 0.5f) {
+                const float blackY[4] = { 0.0627f, 0, 0, 1 }, blackUV[4] = { 0.502f, 0.502f, 0, 1 };
+                ctx->ClearRenderTargetView(yRtv, blackY);
+                ctx->ClearRenderTargetView(uvRtv, blackUV);
+            }
+        }
         ctx->OMSetRenderTargets(1, &yRtv, nullptr);      // яркость
-        viewport(0, 0, (float)outW, (float)outH);
+        viewport(vx, vy, vw, vh);
         ctx->PSSetShader(psY, nullptr, 0);
         ctx->PSSetShaderResources(0, 1, &src);
         ctx->Draw(3, 0);
         ctx->OMSetRenderTargets(1, &uvRtv, nullptr);     // цвет, вдвое меньше
-        viewport(0, 0, (float)(outW / 2), (float)(outH / 2));
+        viewport(vx / 2, vy / 2, vw / 2, vh / 2);
         ctx->PSSetShader(psUV, nullptr, 0);
         ctx->Draw(3, 0);
         ctx->PSSetShaderResources(0, 1, &nullSrv);
@@ -580,6 +698,11 @@ struct Capturer {
     }
 
     void close() {
+        try {
+            if (session) session.Close();
+            if (pool) pool.Close();
+        } catch (...) {}
+        session = nullptr; pool = nullptr; item = nullptr; rtDevice = nullptr;
         SafeRelease(curColorSrv); SafeRelease(curInvertSrv); SafeRelease(curColor); SafeRelease(curInvert);
         SafeRelease(deskSrv); SafeRelease(stageSrv); SafeRelease(stageRtv); SafeRelease(yRtv); SafeRelease(uvRtv);
         SafeRelease(desk); SafeRelease(stage); SafeRelease(yTex); SafeRelease(uvTex); SafeRelease(yRead); SafeRelease(uvRead);
@@ -1199,6 +1322,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--vol-mic") a.volMic = (float)_wtof(next());
         else if (k == L"--mic") a.mic = next();
         else if (k == L"--list-audio-apps") a.listApps = true;
+        else if (k == L"--window") a.window = (HWND)(INT_PTR)_wtoi64(next());
         else if (k == L"--app-vol") {   // имя.exe=громкость
             std::wstring spec = next();
             const size_t eq = spec.rfind(L'=');
@@ -1227,7 +1351,20 @@ int wmain(int argc, wchar_t** argv) {
     Capturer cap;
     int w = a.tw, h = a.th;
 
-    if (!a.test) {
+    if (!a.test && a.window) {
+        // Одно окно: Windows сама отдаёт его картинку, даже если поверх что-то всплыло.
+        if (a.cpu || !IsWindow(a.window) || !cap.initWindow(a.window, a.height, a.cursor)) {
+            logf("error: window capture unavailable");
+            return 7;   // программа перейдёт на запись монитора
+        }
+        const double until = now() + 2.0;
+        while (!cap.haveImage && now() < until) {
+            if (cap.pollWindow() == -2) return 6;
+            if (!cap.haveImage) Sleep(5);
+        }
+        w = cap.outW;
+        h = cap.outH;
+    } else if (!a.test) {
         if (!cap.initDevice(a)) return 2;
         double until = now() + 3.0;
         int r = 0;
@@ -1255,13 +1392,13 @@ int wmain(int argc, wchar_t** argv) {
         long n = 0;
         while (now() - t0 < (a.seconds > 0 ? a.seconds : 3.0)) {
             timer.sleepUntil(t0 + (double)n / a.fps);
-            if (cap.poll() < 0) break;
+            if ((cap.windowMode ? cap.pollWindow() : cap.poll()) < 0) break;
             n++;
         }
         bool dumped = false;
         if (!a.dump.empty()) {   // один готовый кадр в файл — сверить картинку в проверках
             std::vector<uint8_t> frame(frameSize, 0);
-            const bool ok = nv12 ? cap.composeGpu(frame, a.cursor) : (cap.compose(frame, a.cursor), true);
+            const bool ok = nv12 ? cap.composeGpu(frame, a.cursor && !cap.windowMode) : (cap.compose(frame, a.cursor), true);
             FILE* f = nullptr;
             if (ok && _wfopen_s(&f, a.dump.c_str(), L"wb") == 0 && f) {
                 dumped = fwrite(frame.data(), 1, frame.size(), f) == frame.size();
@@ -1336,12 +1473,13 @@ int wmain(int argc, wchar_t** argv) {
             const long long stamp[2] = { produced, epochMicros() };   // номер и время кадра — для проверок
             memcpy(cur->data(), stamp, sizeof(stamp));
         } else {
-            int r = cap.poll();
+            int r = cap.windowMode ? cap.pollWindow() : cap.poll();
+            if (r == -2) { logf("info: window closed"); code = 6; break; }   // окно закрыли
             if (r < 0) { code = 3; break; }
             if (r > 0 || !cur) {
                 cur = g_queue.acquire();
                 if (nv12) {
-                    if (!cap.composeGpu(*cur, a.cursor)) { logf("error: gpu readback failed"); code = 5; break; }
+                    if (!cap.composeGpu(*cur, a.cursor && !cap.windowMode)) { logf("error: gpu readback failed"); code = 5; break; }
                 } else {
                     cap.compose(*cur, a.cursor);
                 }

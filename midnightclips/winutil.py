@@ -87,6 +87,72 @@ def monitors():
     return result
 
 
+def list_windows():
+    """Обычные окна программ: [{hwnd, title, exe, area}] — для выбора окна записи."""
+    if not WIN:
+        return []
+    result = []
+    own = os.getpid()
+    proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    user32.GetWindow.restype = wintypes.HWND
+
+    def callback(hwnd, lparam):
+        try:
+            if not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, 4):   # 4 = GW_OWNER: диалоги пропускаем
+                return True
+            if user32.GetWindowLongW(hwnd, -20) & 0x00000080:                   # WS_EX_TOOLWINDOW
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            cloaked = wintypes.DWORD()
+            try:   # скрытые окна магазинных приложений
+                ctypes.WinDLL("dwmapi").DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), 4)
+            except Exception:
+                pass
+            if cloaked.value:
+                return True
+            title = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, title, length + 1)
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == own:
+                return True
+            exe = ""
+            handle = kernel32.OpenProcess(0x1000, False, pid.value)
+            if handle:
+                size = wintypes.DWORD(1024)
+                buf = ctypes.create_unicode_buffer(size.value)
+                if kernel32.QueryFullProcessImageNameW(wintypes.HANDLE(handle), 0, buf, ctypes.byref(size)):
+                    exe = os.path.basename(buf.value).lower()
+                kernel32.CloseHandle(wintypes.HANDLE(handle))
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
+            if exe and area > 0:
+                result.append({"hwnd": int(hwnd), "title": title.value, "exe": exe, "area": area,
+                               "minimized": bool(user32.IsIconic(hwnd))})
+        except Exception:
+            pass
+        return True
+
+    try:
+        user32.EnumWindows(proc_type(callback), 0)
+    except Exception:
+        pass
+    return result
+
+
+def find_window(exe):
+    """Главное окно программы (самое большое, не свёрнутое) или None."""
+    exe = (exe or "").lower()
+    if not exe:
+        return None
+    found = [w for w in list_windows() if w["exe"] == exe and not w["minimized"]]
+    return max(found, key=lambda w: w["area"])["hwnd"] if found else None
+
+
 def foreground_app():
     """Имя программы в активном окне (для названия клипа), например «P3R»."""
     if not WIN:

@@ -50,7 +50,7 @@ class App:
                                self.log_path)
         self.recorder = Recorder(
             self.cfg, self.ffmpeg, os.path.join(cache_dir(), "buffer"), self.log_path,
-            self.on_event, winutil.monitors, self.overlay_diag, find_engine(self.res))
+            self.on_event, winutil.monitors, self.overlay_diag, find_engine(self.res), winutil.find_window)
 
     # ---------------------------------------------------------------- запуск
 
@@ -338,6 +338,15 @@ class Api:
     def toggle_record(self):
         threading.Thread(target=self._app.toggle_record, args=("",), daemon=True).start()
         return True
+
+    def list_windows(self):
+        """Открытые окна программ — для выбора, чьё окно записывать."""
+        seen, out = set(), []
+        for w in sorted(winutil.list_windows(), key=lambda w: -w["area"]):
+            if w["exe"] not in seen:
+                seen.add(w["exe"])
+                out.append({"exe": w["exe"], "title": w["title"][:60]})
+        return sorted(out, key=lambda w: w["exe"])
 
     def list_audio_apps(self):
         return self._app.recorder.list_audio_apps()

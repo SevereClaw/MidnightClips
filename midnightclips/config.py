@@ -41,6 +41,8 @@ DEFAULTS = {
     "height": 0,                # 0 = как на экране, иначе 1080 / 720
     "bitrate_mbps": 12,
     "monitor": 0,
+    "capture_target": "monitor",  # что записывать: monitor — весь монитор, window — окно программы
+    "window_exe": "",           # имя exe программы, чьё окно записывать
     "encoder": "auto",          # auto / h264_nvenc / h264_amf / h264_qsv / libx264
     "capture": "auto",          # auto / dda / gdi
     "audio": True,              # звук системы
@@ -74,7 +76,7 @@ DEFAULTS = {
 # Изменение этих ключей требует перезапуска захвата.
 CAPTURE_KEYS = {
     "buffer_enabled", "buffer_seconds", "fps", "height", "bitrate_mbps", "monitor",
-    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes",
+    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe",
 }
 
 

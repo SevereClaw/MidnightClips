@@ -197,6 +197,102 @@ def gpu_checks():
         pattern.kill()
 
 
+WINDOW = r"""
+import tkinter as tk
+root = tk.Tk(); root.title("mc-window-test"); root.geometry("640x480+100+100")
+c = tk.Canvas(root, width=640, height=480, highlightthickness=0); c.pack()
+c.create_rectangle(0, 0, 320, 480, fill="#E4002B", outline="")
+c.create_rectangle(320, 0, 640, 480, fill="#2743D8", outline="")
+root.after(60000, root.destroy); root.mainloop()
+"""
+COVER = r"""
+import tkinter as tk
+root = tk.Tk(); root.overrideredirect(True); root.attributes("-topmost", True); root.geometry("220x200+310+260")
+root.configure(bg="#2FCB4B")
+root.after(60000, root.destroy); root.mainloop()
+"""
+RED, BLUE, GREEN = (60, 124, 226), (78, 196, 110), (154, 88, 65)   # цвета в виде яркость/цвет (YUV)
+
+
+def yuv_at(frame, fx, fy):
+    w, h, _fmt, data = frame
+    x, y = int(w * fx), int(h * fy)
+    i = w * h + (y // 2) * w + (x // 2) * 2
+    return data[y * w + x], data[i], data[i + 1]
+
+
+def near(got, want, tol=16):
+    return all(abs(g - w) <= tol for g, w in zip(got, want))
+
+
+def window_checks():
+    """Захват одного окна: в кадре только оно, даже если поверх лежит чужое окно."""
+    import ctypes
+    win = subprocess.Popen([sys.executable, "-c", WINDOW])
+    cover = None
+    try:
+        hwnd = 0
+        for _ in range(50):
+            hwnd = ctypes.windll.user32.FindWindowW(None, "mc-window-test")
+            if hwnd:
+                break
+            time.sleep(0.2)
+        assert hwnd, "тестовое окно не появилось"
+        time.sleep(1.5)
+        cover = subprocess.Popen([sys.executable, "-c", COVER])
+        time.sleep(2.0)
+        probe = subprocess.run([MCCAP, "--probe", "--seconds", "1", "--window", str(hwnd), "--dump",
+                                os.path.join(tempfile.gettempdir(), "mccap_win.raw")], capture_output=True, text=True, errors="replace")
+        if probe.returncode == 7:
+            print("ВНИМАНИЕ: захват окна НЕ ПРОВЕРЕН — на сервере он недоступен: " + probe.stderr.strip()[-200:], flush=True)
+            return
+        frame = dump("win", "--window", str(hwnd))
+        left, right = yuv_at(frame, 0.40, 0.60), yuv_at(frame, 0.60, 0.60)
+        screen = dump("mon")   # весь монитор: на том же месте должно быть видно зелёное окно сверху
+        on_screen = yuv_at(screen, 420 / screen[0], 360 / screen[1])
+        print("   окно %dx%d: слева %s (красный %s), справа %s (синий %s); на экране в этом месте %s (зелёный %s)" % (
+            frame[0], frame[1], left, RED, right, BLUE, on_screen, GREEN), flush=True)
+        assert near(left, RED) and near(right, BLUE), "в кадре окна не то, что в окне"
+        assert near(on_screen, GREEN), "проверка некорректна: зелёное окно не перекрыло тестовое"
+        small = dump("win240", "--window", str(hwnd), "--height", "240")
+        print("   то же окно с уменьшением: %dx%d, слева %s, справа %s" % (small[0], small[1], yuv_at(small, 0.40, 0.60), yuv_at(small, 0.60, 0.60)), flush=True)
+        assert small[1] == 240 and near(yuv_at(small, 0.40, 0.60), RED) and near(yuv_at(small, 0.60, 0.60), BLUE)
+
+        # поток кадров из окна в ffmpeg
+        pipe = r"\\.\pipe\mccap_wtest_%d" % os.getpid()
+        helper = subprocess.Popen([MCCAP, "--window", str(hwnd), "--fps", "60", "--seconds", "4", "--pipe", pipe,
+                                   "--parent", str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ready = helper.stdout.readline().decode().split()
+        assert ready and ready[0] == "READY" and ready[4] == "nv12", ready
+        ff = subprocess.run([FFMPEG, "-hide_banner", "-f", "rawvideo", "-pixel_format", "nv12", "-video_size",
+                             "%sx%s" % (ready[1], ready[2]), "-framerate", "60", "-i", pipe, "-f", "null", "-"],
+                            capture_output=True, text=True, errors="replace")
+        helper.wait(timeout=20)
+        got = re.findall(r"frame=\s*(\d+)", ff.stderr)
+        print("   окно -> ffmpeg: %s кадров за 4 c" % (got[-1] if got else "?"), flush=True)
+        assert got and abs(int(got[-1]) - 240) <= 8, ff.stderr[-500:]
+
+        # окно закрыли — движок должен сам завершиться с кодом 6 (программа перейдёт на запись монитора)
+        pipe2 = pipe + "_2"
+        helper = subprocess.Popen([MCCAP, "--window", str(hwnd), "--fps", "60", "--seconds", "20", "--pipe", pipe2,
+                                   "--parent", str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        helper.stdout.readline()
+        reader = subprocess.Popen([FFMPEG, "-hide_banner", "-f", "rawvideo", "-pixel_format", "nv12", "-video_size",
+                                   "%sx%s" % (ready[1], ready[2]), "-framerate", "60", "-i", pipe2, "-f", "null", "-"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+        win.kill()
+        t0 = time.time()
+        code = helper.wait(timeout=15)
+        reader.wait(timeout=15)
+        print("   окно закрыто: движок вышел с кодом %s через %.1f c" % (code, time.time() - t0), flush=True)
+        assert code == 6, code
+    finally:
+        win.kill()
+        if cover:
+            cover.kill()
+
+
 if __name__ == "__main__":
     if sys.platform != "win32":
         print("только для Windows — пропуск")
@@ -223,6 +319,9 @@ if __name__ == "__main__":
 
     print("обработка кадра на видеокарте против обычной:", flush=True)
     gpu_checks()
+
+    print("захват одного окна:", flush=True)
+    window_checks()
 
     # Настоящий захват экрана: на сборочном сервере нет видеокарты, так что это только справка.
     probe = subprocess.run([MCCAP, "--probe", "--fps", "60", "--seconds", "3"], capture_output=True, text=True, errors="replace")

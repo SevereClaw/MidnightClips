@@ -12,7 +12,7 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9",
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, app_volumes: '{"discord.exe": 30}', preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, capture_target: "window", window_exe: "p3r.exe", app_volumes: '{"discord.exe": 30}', preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -22,7 +22,7 @@ const demo = {
     favorite: i === 0 || i === 3, tags: [["босс"], [], [], ["эйс", "смешное"], ["эйс"], []][i] })),
 };
 const demoApi = {
-  get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", buffer_in_memory: true, buffer_mb: 99, fps_real: 59.8, fps_target: 60, slow: false, fallback: false, recording: !!demo.rec, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
+  get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", window_active: true, buffer_in_memory: true, buffer_mb: 99, fps_real: 59.8, fps_target: 60, slow: false, fallback: false, recording: !!demo.rec, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
   get_settings: async () => demo.settings,
   set_settings: async (v) => Object.assign(demo.settings, v),
   get_options: async () => ({ monitors: ["Монитор 1 — 2560×1440 (основной)", "Монитор 2 — 1920×1080"], mics: ["Микрофон (USB Audio)"] }),
@@ -39,6 +39,7 @@ const demoApi = {
   copy_clip: async () => true,
   pick_sound: async () => demo.settings,
   get_presets: async () => demo.presets,
+  list_windows: async () => [{ exe: "p3r.exe", title: "Persona 3 Reload" }, { exe: "chrome.exe", title: "YouTube — Google Chrome" }],
   list_audio_apps: async () => ["chrome.exe", "discord.exe", "p3r.exe", "spotify.exe"],
   save_preset: async (name) => { demo.presets.push({ name, builtin: false, height: demo.settings.height, fps: demo.settings.fps, bitrate_mbps: demo.settings.bitrate_mbps, buffer_seconds: demo.settings.buffer_seconds }); return ""; },
   delete_preset: async (name) => { demo.presets = demo.presets.filter((p) => p.name !== name); return true; },
@@ -167,6 +168,9 @@ function applyState(st) {
                              : "Сейчас на диске, около " + size + ". «Авто» держит в памяти буфер до 768 МБ")
       : "";
   }
+  $("targetInfo").textContent = st.state !== "on" ? ""
+    : st.window_active ? "Сейчас записывается окно " + (settings.window_exe || "")
+    : settings.capture_target === "window" ? "Сейчас записывается весь монитор: окно программы не открыто" : "";
   if (st.hotkeys) applyHotkeyStatus(st.hotkeys);
   if (st.version) $("version").textContent = "MidnightClips " + st.version;
   if (st.update) applyUpdate(st.update);
@@ -605,6 +609,10 @@ function applySettings(s) {
     + ". Меняет только запись: в наушниках всё звучит как раньше";
   $("volSysText").textContent = recVol(s.rec_volume_system);
   $("volMicText").textContent = recVol(s.rec_volume_mic);
+  $("rowWindow").hidden = s.capture_target !== "window";
+  const selWin = $("selWindow");
+  if (s.window_exe && ![...selWin.options].some((o) => o.value === s.window_exe)) selWin.add(new Option(s.window_exe, s.window_exe));
+  selWin.value = s.window_exe || "";
   renderSounds();
   renderApps();
   renderPresets();
@@ -707,6 +715,21 @@ document.querySelectorAll("[data-cleanup]").forEach((el) => {
     saveSetting(key, value);
   });
 });
+
+// Запись окна одной программы
+async function fillWindowList() {
+  const sel = $("selWindow");
+  const current = settings.window_exe || "";
+  const wins = (await api.list_windows()) || [];
+  sel.innerHTML = "";
+  sel.add(new Option("Выберите программу…", ""));
+  if (current && !wins.some((w) => w.exe === current)) sel.add(new Option(current + " — сейчас не открыта", current));
+  wins.forEach((w) => sel.add(new Option(w.exe + " — " + w.title, w.exe)));
+  sel.value = current;
+}
+$("selWindow").addEventListener("mousedown", fillWindowList);
+$("selWindow").addEventListener("focus", fillWindowList);
+$("selWindow").addEventListener("change", () => saveSetting("window_exe", $("selWindow").value));
 
 // Своя громкость программ в записи
 function appVolumes() {

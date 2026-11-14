@@ -69,7 +69,8 @@ def safe_name(text, fallback="Клип"):
 
 
 class Recorder:
-    def __init__(self, cfg, ffmpeg, work_dir, log_path, on_event, monitors=None, diag=None, engine=None):
+    def __init__(self, cfg, ffmpeg, work_dir, log_path, on_event, monitors=None, diag=None, engine=None,
+                 find_window=None):
         self.cfg = cfg
         self.ffmpeg = ffmpeg
         self.work_dir = work_dir
@@ -101,11 +102,15 @@ class Recorder:
         self._mem_epoch = 0               # растёт при полной очистке буфера
         self.in_memory = False            # где сейчас лежит буфер повтора
         self._soft = False                # мягкий перезапуск: буфер не стирать
+        self.find_window = find_window or (lambda exe: None)   # окно программы по имени exe
+        self.window_active = False        # сейчас записывается окно, а не весь монитор
+        self._window_check = 0.0
         self.engine = engine              # путь к mccap.exe или None
         self.engine_test = bool(os.environ.get("MC_ENGINE_TEST"))   # тестовая картинка вместо экрана
         self.engine_trouble = False       # кодировщик не успевает за движком
         self.screen_fps = None            # сколько раз в секунду реально обновляется экран (от движка)
         self._format = None               # (кодировщик, размер, частота) прошлого запуска
+        self._window_failed = False       # захват окна здесь не работает — пишем монитор
         self._diag = diag or (lambda: "")  # доп. сведения для журнала (состояние «метронома»)
         self._upgrades = 0                # сколько раз пробовали вернуться с запасного режима
         self._avoid_precise = False       # точный режим захвата здесь не работает
@@ -148,6 +153,7 @@ class Recorder:
                 self._soft = False
                 self._good = None
                 self._upgrades = 0
+                self._window_failed = False
             self._restart.set()
         else:
             self.start()
@@ -163,6 +169,7 @@ class Recorder:
             "capture": CAPTURE_TITLES.get(self.capture, self.capture),
             "audio_note": self.audio_note,
             "buffer_in_memory": self.in_memory,
+            "window_active": self.window_active,
             "buffer_mb": self.buffer_megabytes(),
             "fps_real": self.fps_real,
             "screen_fps": self.screen_fps,
@@ -240,7 +247,16 @@ class Recorder:
                     reason = "движок захвата остановился (код %s)" % helper.returncode
                     if helper.returncode == 3:
                         reason = "изменилось разрешение экрана"
+                    elif helper.returncode == 6:
+                        reason = "окно программы закрыто — записываю весь монитор"
                     break
+                # Окно выбранной программы появилось (или режим сменили) — переключаемся на него.
+                if (helper is not None and self.capture == "own" and time.time() - self._window_check > 3
+                        and self.recording_since is None):
+                    self._window_check = time.time()
+                    if bool(self._wanted_window()) and not self.window_active:
+                        reason = "появилось окно программы — записываю его"
+                        break
                 if proc.poll() is not None:
                     reason = "ffmpeg остановился (код %s)" % proc.returncode
                     break
@@ -527,6 +543,14 @@ class Recorder:
             self._drop(path)
         return None
 
+    def _wanted_window(self):
+        if self.cfg["capture_target"] != "window" or not self.cfg["window_exe"] or self._window_failed:
+            return None
+        try:
+            return self.find_window(self.cfg["window_exe"])
+        except Exception:
+            return None
+
     def app_volumes(self):
         """{имя exe: громкость в процентах} из настроек."""
         try:
@@ -547,7 +571,7 @@ class Recorder:
             return []
         return sorted({line[4:].strip() for line in out.splitlines() if line.startswith("APP ") and line[4:].strip()})
 
-    def _start_engine(self, gpu=True, audio=False):
+    def _start_engine(self, gpu=True, audio=False, allow_window=True):
         """Запустить mccap и дождаться строки «READY ширина высота fps»."""
         fps = max(15, min(240, int(self.cfg["fps"])))
         pipe = r"\\.\pipe\mccap_%d_%d" % (os.getpid(), self._session)
@@ -562,13 +586,18 @@ class Recorder:
             if self.cfg["mic"] and self._degrade < 1:
                 args += ["--mic", self.cfg["mic"],
                          "--vol-mic", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0)]
+        self.window_active = False
+        hwnd = self._wanted_window() if gpu and allow_window and not self.engine_test else None
+        if hwnd:   # записывать только окно выбранной программы
+            args += ["--window", str(hwnd)]
+            self.window_active = True
         if not gpu:
             args += ["--cpu"]
         elif int(self.cfg["height"]) > 0:
             args += ["--height", str(int(self.cfg["height"]))]   # уменьшение — на видеокарте
         if self.engine_test:
             args += ["--test", "--size", "1280x720"]
-        else:
+        elif not hwnd:
             mons = self.monitors()
             idx = int(self.cfg["monitor"])
             if 0 <= idx < len(mons):
@@ -587,8 +616,14 @@ class Recorder:
         text = line[0].decode("ascii", "replace").strip() if line else ""
         parts = text.split()
         if len(parts) < 4 or parts[0] != "READY":
-            self._log("движок захвата не готов (ответ: %r, код %s)" % (text, helper.poll()))
+            code = helper.poll()
+            self._log("движок захвата не готов (ответ: %r, код %s)" % (text, code))
             self._kill(helper)
+            if hwnd and code in (6, 7):   # окно не снимается (закрылось или захват окон недоступен) — пишем монитор
+                if code == 7:
+                    self._window_failed = True
+                    self._log("захват окна здесь недоступен — записываю весь монитор")
+                return self._start_engine(gpu, audio, allow_window=False)
             return None, None
         return helper, (pipe, int(parts[1]), int(parts[2]), parts[4] if len(parts) > 4 else "bgra", audio_pipe)
 

@@ -97,6 +97,13 @@
       <div class="panel">
         <h2>Видео</h2>
         <label class="row"><span>Монитор</span><select data-key="monitor" data-type="int" id="selMonitor"></select></label>
+        <label class="row"><span>Что записывать<small id="targetInfo"></small></span>
+          <select data-key="capture_target">
+            <option value="monitor">Весь монитор</option><option value="window">Окно программы</option>
+          </select></label>
+        <div class="row" id="rowWindow"><span>Программа
+          <small>В запись попадает только её окно — без уведомлений и других окон поверх. Пока окно не открыто или свёрнуто, записывается весь монитор. В Windows 10 вокруг окна видна жёлтая рамка, в Windows 11 её нет</small></span>
+          <select id="selWindow"><option value="">Выберите программу…</option></select></div>
         <label class="row"><span>Кадров в секунду
           <small>Больше 60 имеет смысл, если монитор и игра столько выдают; нагрузка и размер клипов растут</small></span>
           <select data-key="fps" data-type="int"><option value="30">30</option><option value="60">60</option>
