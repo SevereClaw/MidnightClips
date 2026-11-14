@@ -102,6 +102,10 @@ def check(name, engine_args, low, high, tone):
     print("%-28s звук %.2f c, видео %.2f c; пик %5d (ждём %d–%d); тон начался на %.2f c" % (
         name, len(a) / 48000, v, peak, low, high, first / 48000 if first >= 0 else -1), flush=True)
     print("      по четвертям секунды (тысячи): " + profile(a), flush=True)
+    notes = sorted(set(re.findall(r"info: audio (.+)", err)))
+    print("      движок: " + "; ".join(n.strip() for n in notes), flush=True)
+    if "--mic" in engine_args and "CABLE Output" in engine_args:
+        assert "mic opened" in " ".join(notes), "микрофон не открылся\n" + err[-900:]
     assert abs(len(a) / 48000 - v) < 0.2, "длина звука и видео расходится\n" + err[-600:]
     assert low <= peak <= high, "громкость не та: %d\n%s" % (peak, err[-900:])
     assert 0.9 < first / 48000 < 2.6, "тон не там, где его включили: %.2f" % (first / 48000)
