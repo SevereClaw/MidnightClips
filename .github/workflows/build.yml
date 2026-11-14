@@ -29,7 +29,7 @@ jobs:
         shell: cmd
         run: |
           if not exist build mkdir build
-          cl /nologo /O2 /MT /EHsc /std:c++17 /W3 /Fobuild\ /Femccap.exe engine\mccap.cpp
+          cl /nologo /O2 /MT /EHsc /std:c++20 /W3 /Fobuild\ /Femccap.exe engine\mccap.cpp
       - name: Скачать ffmpeg
         shell: pwsh
         run: |

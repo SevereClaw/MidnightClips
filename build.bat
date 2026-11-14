@@ -14,7 +14,7 @@ set ENGINE_ARG=
 if not exist mccap.exe (
   where cl >nul 2>nul && (
     if not exist build mkdir build
-    cl /nologo /O2 /MT /EHsc /std:c++17 /W3 /Fobuild\ /Femccap.exe engine\mccap.cpp || goto :fail
+    cl /nologo /O2 /MT /EHsc /std:c++20 /W3 /Fobuild\ /Femccap.exe engine\mccap.cpp || goto :fail
   )
 )
 if exist mccap.exe set ENGINE_ARG=--add-binary "mccap.exe;."
