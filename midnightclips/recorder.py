@@ -611,6 +611,8 @@ class Recorder:
             if self.cfg["mic"] and self._degrade < 1:
                 args += ["--mic", self.cfg["mic"],
                          "--vol-mic", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0)]
+        if not self.cfg.get("cursor", True):
+            args.append("--no-cursor")
         if encode:   # движок кодирует сам; в канал идёт уже сжатое видео
             mbps = max(2, min(100, int(self.cfg["bitrate_mbps"])))
             args += ["--encode", encode[0], "--bitrate", str(mbps), "--frames", "gpu" if encode[1] else "cpu"]
@@ -726,6 +728,7 @@ class Recorder:
         fps = max(15, min(240, int(cfg["fps"])))
         height = int(cfg["height"])
         mbps = max(2, min(100, int(cfg["bitrate_mbps"])))
+        mouse = 1 if cfg.get("cursor", True) else 0
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats", "-y",
                "-progress", "pipe:1", "-stats_period", "2"]
 
@@ -744,7 +747,7 @@ class Recorder:
             # Частота с большим запасом и без повторов кадров: ddagrab тогда не «спит» между
             # кадрами (Sleep в Windows ошибается на 10–15 мс), а ждёт настоящего обновления
             # экрана. До нужной частоты поток выравнивает уже сам ffmpeg (-r ниже).
-            graph = "ddagrab=output_idx=%d:framerate=1000:dup_frames=0:draw_mouse=1" % int(cfg["monitor"])
+            graph = "ddagrab=output_idx=%d:framerate=1000:dup_frames=0:draw_mouse=%d" % (int(cfg["monitor"]), mouse)
             # Лишние кадры (монитор 144 Гц, запись 30) отбрасываем сразу, пока они ещё в памяти
             # видеокарты, — иначе каждый пришлось бы копировать и уменьшать процессором.
             graph += ",fps=%d" % fps
@@ -752,12 +755,12 @@ class Recorder:
                 graph += ",hwdownload,format=bgra"
             cmd += ["-f", "lavfi", "-i", graph]
         elif capture == "ddal":
-            graph = "ddagrab=output_idx=%d:framerate=%d:draw_mouse=1" % (int(cfg["monitor"]), fps)
+            graph = "ddagrab=output_idx=%d:framerate=%d:draw_mouse=%d" % (int(cfg["monitor"]), fps, mouse)
             if not zero_copy:
                 graph += ",hwdownload,format=bgra"
             cmd += ["-f", "lavfi", "-i", graph]
         else:
-            cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1"]
+            cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", str(mouse)]
             mons = self.monitors()
             idx = int(cfg["monitor"])
             if 0 <= idx < len(mons):

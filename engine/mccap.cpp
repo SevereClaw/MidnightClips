@@ -25,7 +25,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
-#include <dxgi1_2.h>
+#include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <mmsystem.h>
 #include <objbase.h>
@@ -155,6 +155,21 @@ float2 chromaOf(float3 c) {
     return float2(0.5020 + dot(c, float3(-0.1006, -0.3386, 0.4392)), 0.5020 + dot(c, float3(0.4392, -0.3989, -0.0403)));
 }
 float4 psCopy(VSOut i) : SV_Target { return tex.Sample(smp, i.uv); }
+// Подготовка картинки экрана: повёрнутый монитор — поставить «как на столе», HDR — привести к обычным цветам.
+cbuffer Prep : register(b0) { float4 prm; }   // x: поворот 0..3 (по 90 градусов), y: 1 = HDR, z: яркость белого
+float4 psPrep(VSOut i) : SV_Target {
+    float2 uv = i.uv;
+    if (prm.x > 2.5) uv = float2(1 - i.uv.y, i.uv.x);
+    else if (prm.x > 1.5) uv = float2(1 - i.uv.x, 1 - i.uv.y);
+    else if (prm.x > 0.5) uv = float2(i.uv.y, 1 - i.uv.x);
+    float3 c = tex.Sample(smp, uv).rgb;
+    if (prm.y > 0.5) {
+        c = saturate(c / prm.z);   // обычный белый = 1; всё, что ярче, обрезается
+        float3 lo = c * 12.92, hi = 1.055 * pow(max(c, 1e-6), 1.0 / 2.4) - 0.055;
+        c = lerp(lo, hi, step(0.0031308, c));
+    }
+    return float4(c, 1);
+}
 float4 psCopy4(VSOut i) : SV_Target { return float4(four(i.uv), 1); }
 float4 psY(VSOut i) : SV_Target { return float4(lumaOf(one(i.uv)), 0, 0, 1); }
 float4 psYs(VSOut i) : SV_Target { return float4(lumaOf(four(i.uv)), 0, 0, 1); }
@@ -221,6 +236,18 @@ struct Capturer {
 
     // ---- обработка на видеокарте
     bool gpu = false, scaled = false, shapeDirty = false, fakePtr = false;
+    // Источник: «сырой» кадр экрана может быть повёрнут (монитор стоит боком) или в формате HDR —
+    // тогда он сначала приводится к обычному виду (raw -> desk).
+    bool wantGpu = false, prepass = false, hdr = false;
+    int rot = 0, rawW = 0, rawH = 0;
+    float white = 1.0f;
+    DXGI_FORMAT rawFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+    std::wstring deviceName;
+    ID3D11Texture2D* raw = nullptr;
+    ID3D11ShaderResourceView* rawSrv = nullptr;
+    ID3D11RenderTargetView* deskRtv = nullptr;
+    ID3D11PixelShader* psPrep = nullptr;
+    ID3D11Buffer* prepBuf = nullptr;
     int outW = 0, outH = 0, curW = 0, curH = 0;
     DXGI_FORMAT deskFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
     ID3D11Texture2D *desk = nullptr, *stage = nullptr, *yTex = nullptr, *uvTex = nullptr, *yRead = nullptr, *uvRead = nullptr;
@@ -275,11 +302,19 @@ struct Capturer {
         ok = ok && SUCCEEDED(dev->CreateShaderResourceView(desk, nullptr, &deskSrv))
                 && SUCCEEDED(dev->CreateShaderResourceView(stage, nullptr, &stageSrv))
                 && SUCCEEDED(dev->CreateRenderTargetView(stage, nullptr, &stageRtv))
+                && SUCCEEDED(dev->CreateRenderTargetView(desk, nullptr, &deskRtv))
                 && SUCCEEDED(dev->CreateRenderTargetView(yTex, nullptr, &yRtv))
                 && SUCCEEDED(dev->CreateRenderTargetView(uvTex, nullptr, &uvRtv));
         ok = ok && compile("vs", "vs_4_0", &vsFull) && compile("psCopy", "ps_4_0", &psCopy)
                 && compile(scaled ? "psYs" : "psY", "ps_4_0", &psY) && compile(scaled ? "psUVs" : "psUV", "ps_4_0", &psUV)
-                && compile(scaled ? "psCopy4" : "psCopy", "ps_4_0", &psOut);
+                && compile(scaled ? "psCopy4" : "psCopy", "ps_4_0", &psOut) && compile("psPrep", "ps_4_0", &psPrep);
+        if (ok) {
+            D3D11_BUFFER_DESC cb{};
+            cb.ByteWidth = 16;
+            cb.Usage = D3D11_USAGE_DEFAULT;
+            cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            ok = SUCCEEDED(dev->CreateBuffer(&cb, nullptr, &prepBuf)) && makeRaw();
+        }
         if (ok) {
             D3D11_SAMPLER_DESC sd{};
             sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -312,15 +347,69 @@ struct Capturer {
         return ok;
     }
 
+    // Текстура под «сырой» кадр экрана — нужна, только если его приходится поворачивать или переводить из HDR.
+    bool makeRaw() {
+        SafeRelease(rawSrv); SafeRelease(raw);
+        if (!prepass) return true;
+        return makeTex(rawW, rawH, rawFormat, D3D11_BIND_SHADER_RESOURCE, false, &raw)
+            && SUCCEEDED(dev->CreateShaderResourceView(raw, nullptr, &rawSrv));
+    }
+
+    // raw -> desk: поворот и/или перевод HDR в обычные цвета.
+    void runPrepass() {
+        const float prm[4] = { (float)rot, hdr ? 1.0f : 0.0f, white, 0 };
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ctx->UpdateSubresource(prepBuf, 0, nullptr, prm, 0, 0);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->IASetInputLayout(nullptr);
+        ctx->VSSetShader(vsFull, nullptr, 0);
+        ctx->RSSetState(raster);
+        ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        ctx->OMSetRenderTargets(1, &deskRtv, nullptr);
+        viewport(0, 0, (float)srcW, (float)srcH);
+        ctx->PSSetShader(psPrep, nullptr, 0);
+        ctx->PSSetConstantBuffers(0, 1, &prepBuf);
+        ctx->PSSetSamplers(0, 1, &smpPoint);
+        ctx->PSSetShaderResources(0, 1, &rawSrv);
+        ctx->Draw(3, 0);
+        ctx->PSSetShaderResources(0, 1, &nullSrv);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+
+    // Яркость обычного белого на мониторе в режиме HDR (в единицах, где 1 = 80 нит).
+    static float sdrWhite(const std::wstring& device) {
+        UINT32 np = 0, nm = 0;
+        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm) != ERROR_SUCCESS || !np) return 3.0f;
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(np);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(nm ? nm : 1);
+        if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &np, paths.data(), &nm, modes.data(), nullptr) != ERROR_SUCCESS) return 3.0f;
+        for (UINT32 i = 0; i < np; i++) {
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME sn{};
+            sn.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            sn.header.size = sizeof(sn);
+            sn.header.adapterId = paths[i].sourceInfo.adapterId;
+            sn.header.id = paths[i].sourceInfo.id;
+            if (DisplayConfigGetDeviceInfo(&sn.header) != ERROR_SUCCESS || device != sn.viewGdiDeviceName) continue;
+            DISPLAYCONFIG_SDR_WHITE_LEVEL wl{};
+            wl.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+            wl.header.size = sizeof(wl);
+            wl.header.adapterId = paths[i].targetInfo.adapterId;
+            wl.header.id = paths[i].targetInfo.id;
+            if (DisplayConfigGetDeviceInfo(&wl.header) == ERROR_SUCCESS && wl.SDRWhiteLevel >= 1000) return wl.SDRWhiteLevel / 1000.0f;
+        }
+        return 3.0f;
+    }
+
     // Окно изменило размер: пересоздаём текстуры источника. Размер кадра на выходе не меняется —
     // картинка вписывается в него с полями.
     bool resizeSource(int w, int h) {
-        SafeRelease(deskSrv); SafeRelease(stageSrv); SafeRelease(stageRtv); SafeRelease(desk); SafeRelease(stage);
+        SafeRelease(deskSrv); SafeRelease(stageSrv); SafeRelease(stageRtv); SafeRelease(deskRtv); SafeRelease(desk); SafeRelease(stage);
         const UINT both = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         bool ok = makeTex(w, h, deskFormat, both, false, &desk) && makeTex(w, h, deskFormat, both, false, &stage)
                && SUCCEEDED(dev->CreateShaderResourceView(desk, nullptr, &deskSrv))
                && SUCCEEDED(dev->CreateShaderResourceView(stage, nullptr, &stageSrv))
-               && SUCCEEDED(dev->CreateRenderTargetView(stage, nullptr, &stageRtv));
+               && SUCCEEDED(dev->CreateRenderTargetView(stage, nullptr, &stageRtv))
+               && SUCCEEDED(dev->CreateRenderTargetView(desk, nullptr, &deskRtv));
         srcW = w; srcH = h;
         return ok;
     }
@@ -489,7 +578,8 @@ struct Capturer {
     // Куда в кадре ложится картинка. Окно вписывается целиком, по краям — чёрные поля (true — поля есть).
     bool placement(float& vx, float& vy, float& vw, float& vh) {
         vx = 0; vy = 0; vw = (float)outW; vh = (float)outH;
-        if (!windowMode || srcW <= 0 || srcH <= 0) return false;
+        if (srcW <= 0 || srcH <= 0) return false;
+        if (!windowMode && srcW == width && srcH == height) return false;   // экран в исходном размере — во весь кадр
         const float k = std::min((float)outW / srcW, (float)outH / srcH);
         vw = srcW * k; vh = srcH * k;
         vx = (outW - vw) / 2; vy = (outH - vh) / 2;
@@ -616,20 +706,59 @@ struct Capturer {
         return true;
     }
 
-    // 1 — готово, 0 — пока не вышло (повторим позже), -1 — размер экрана изменился
+    // 1 — готово, 0 — пока не вышло (повторим позже), -1 — размер экрана изменился (только без обработки
+    // на видеокарте: с ней новый размер просто вписывается в прежний кадр, запись не прерывается)
     int createDupl() {
-        HRESULT hr = out1->DuplicateOutput(dev, &dupl);
+        HRESULT hr = E_FAIL;
+        if (wantGpu) {   // монитор в режиме HDR — берём картинку как есть и сами приводим к обычным цветам
+            bool hdrOn = false;
+            IDXGIOutput6* o6 = nullptr;
+            if (SUCCEEDED(out1->QueryInterface(__uuidof(IDXGIOutput6), (void**)&o6))) {
+                DXGI_OUTPUT_DESC1 d1;
+                if (SUCCEEDED(o6->GetDesc1(&d1))) {
+                    hdrOn = d1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+                    deviceName = d1.DeviceName;
+                }
+                o6->Release();
+            }
+            IDXGIOutput5* o5 = nullptr;
+            if (hdrOn && SUCCEEDED(out1->QueryInterface(__uuidof(IDXGIOutput5), (void**)&o5))) {
+                const DXGI_FORMAT formats[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
+                hr = o5->DuplicateOutput1(dev, 0, ARRAYSIZE(formats), formats, &dupl);
+                o5->Release();
+                if (FAILED(hr)) { dupl = nullptr; logf("info: hdr capture unavailable 0x%08lx, using plain", hr); }
+            }
+        }
+        if (FAILED(hr)) hr = out1->DuplicateOutput(dev, &dupl);
         if (FAILED(hr)) { lastError = hr; dupl = nullptr; return 0; }
         DXGI_OUTDUPL_DESC d;
         dupl->GetDesc(&d);
-        int w = (int)d.ModeDesc.Width, h = (int)d.ModeDesc.Height;
-        if (width == 0) deskFormat = d.ModeDesc.Format == DXGI_FORMAT_UNKNOWN ? DXGI_FORMAT_B8G8R8A8_UNORM : d.ModeDesc.Format;
-        if (width == 0) {
-            width = w; height = h;
+        const int w = (int)d.ModeDesc.Width, h = (int)d.ModeDesc.Height;
+        const DXGI_FORMAT fmt = d.ModeDesc.Format == DXGI_FORMAT_UNKNOWN ? DXGI_FORMAT_B8G8R8A8_UNORM : d.ModeDesc.Format;
+        int r = 0;
+        if (wantGpu) r = d.Rotation == DXGI_MODE_ROTATION_ROTATE90 ? 1 : d.Rotation == DXGI_MODE_ROTATION_ROTATE180 ? 2
+                       : d.Rotation == DXGI_MODE_ROTATION_ROTATE270 ? 3 : 0;
+        const int uw = (r & 1) ? h : w, uh = (r & 1) ? w : h;   // размер «как на столе»
+        const bool first = width == 0;
+        if (first) {
+            width = srcW = uw; height = srcH = uh;
             base.assign((size_t)w * h * 4, 0);
-        } else if (w != width || h != height) {
+        } else if (!gpu && (w != width || h != height)) {
             logf("error: screen size changed %dx%d -> %dx%d", width, height, w, h);
             return -1;
+        }
+        if (wantGpu) {
+            const bool isHdr = fmt == DXGI_FORMAT_R16G16B16A16_FLOAT;
+            const bool changed = first || rot != r || hdr != isHdr || rawW != w || rawH != h || rawFormat != fmt;
+            rot = r; hdr = isHdr; rawW = w; rawH = h; rawFormat = fmt;
+            white = isHdr ? sdrWhite(deviceName) : 1.0f;
+            prepass = rot != 0 || fmt != DXGI_FORMAT_B8G8R8A8_UNORM;
+            if (changed) logf("info: source %dx%d rotation=%d hdr=%d white=%.0f", uw, uh, rot * 90, isHdr ? 1 : 0, white * 80);
+            if (gpu && changed) {   // экран изменился на ходу: кадр на выходе остаётся прежним
+                if ((uw != srcW || uh != srcH) && !resizeSource(uw, uh)) return -1;
+                if (!makeRaw()) return -1;
+                haveImage = false;
+            }
         }
         return 1;
     }
@@ -672,7 +801,8 @@ struct Capturer {
             ID3D11Texture2D* tex = nullptr;
             if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex))) {
                 if (gpu) {   // картинка остаётся в памяти видеокарты
-                    ctx->CopyResource(desk, tex);
+                    if (prepass && raw) { ctx->CopyResource(raw, tex); runPrepass(); }
+                    else ctx->CopyResource(desk, tex);
                     tex->Release();
                     res->Release();
                     dupl->ReleaseFrame();
@@ -1668,6 +1798,10 @@ static void closePipe(HANDLE h) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    // Без этого Windows не отдаёт картинку экрана в формате HDR.
+    typedef BOOL(WINAPI* SetDpiFn)(HANDLE);
+    if (HMODULE user = GetModuleHandleW(L"user32.dll"))
+        if (SetDpiFn fn = (SetDpiFn)GetProcAddress(user, "SetProcessDpiAwarenessContext")) fn((HANDLE)(INT_PTR)-4);   // PER_MONITOR_AWARE_V2
     Args a;
     for (int i = 1; i < argc; i++) {
         std::wstring k = argv[i];
@@ -1739,6 +1873,7 @@ int wmain(int argc, wchar_t** argv) {
         w = cap.outW;
         h = cap.outH;
     } else if (!a.test) {
+        cap.wantGpu = !a.cpu;
         if (!cap.initDevice(a)) return 2;
         double until = now() + 3.0;
         int r = 0;

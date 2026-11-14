@@ -390,6 +390,102 @@ def encode_checks():
     encode_case("нет такого кодировщика (код 8)", 60, 2, "--test", "--encode", "h264_none", expect_code=8)
 
 
+# ---- смена разрешения и поворот экрана во время записи
+
+class DEVMODE(ctypes.Structure):
+    _fields_ = [("dmDeviceName", ctypes.c_wchar * 32), ("dmSpecVersion", ctypes.c_ushort), ("dmDriverVersion", ctypes.c_ushort),
+                ("dmSize", ctypes.c_ushort), ("dmDriverExtra", ctypes.c_ushort), ("dmFields", ctypes.c_ulong),
+                ("dmPositionX", ctypes.c_long), ("dmPositionY", ctypes.c_long), ("dmDisplayOrientation", ctypes.c_ulong),
+                ("dmDisplayFixedOutput", ctypes.c_ulong), ("dmColor", ctypes.c_short), ("dmDuplex", ctypes.c_short),
+                ("dmYResolution", ctypes.c_short), ("dmTTOption", ctypes.c_short), ("dmCollate", ctypes.c_short),
+                ("dmFormName", ctypes.c_wchar * 32), ("dmLogPixels", ctypes.c_ushort), ("dmBitsPerPel", ctypes.c_ulong),
+                ("dmPelsWidth", ctypes.c_ulong), ("dmPelsHeight", ctypes.c_ulong), ("dmDisplayFlags", ctypes.c_ulong),
+                ("dmDisplayFrequency", ctypes.c_ulong), ("dmICMMethod", ctypes.c_ulong), ("dmICMIntent", ctypes.c_ulong),
+                ("dmMediaType", ctypes.c_ulong), ("dmDitherType", ctypes.c_ulong), ("dmReserved1", ctypes.c_ulong),
+                ("dmReserved2", ctypes.c_ulong), ("dmPanningWidth", ctypes.c_ulong), ("dmPanningHeight", ctypes.c_ulong)]
+
+
+def display_mode(index=-1):
+    dm = DEVMODE()
+    dm.dmSize = ctypes.sizeof(DEVMODE)
+    return dm if ctypes.windll.user32.EnumDisplaySettingsW(None, index, ctypes.byref(dm)) else None
+
+
+def set_display(w, h, orientation):
+    dm = display_mode()
+    dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayOrientation = w, h, orientation
+    dm.dmFields = 0x80000 | 0x100000 | 0x80   # ширина, высота, поворот
+    return ctypes.windll.user32.ChangeDisplaySettingsW(ctypes.byref(dm), 0)
+
+
+def gdi_frame(w, h):
+    """Снимок экрана средствами Windows — эталон «как видит пользователь»."""
+    raw = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "gdigrab", "-draw_mouse", "0", "-i", "desktop",
+                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"], capture_output=True).stdout
+    return raw if len(raw) == w * h * 4 else None
+
+
+def display_checks():
+    import threading
+    cur = display_mode()
+    cw, ch = cur.dmPelsWidth, cur.dmPelsHeight
+    try:
+        # 1. Разрешение меняется посреди записи и возвращается: запись идёт дальше, размер кадра прежний.
+        others, i = set(), 0
+        while True:
+            dm = display_mode(i)
+            if dm is None:
+                break
+            if dm.dmBitsPerPel == cur.dmBitsPerPel and (dm.dmPelsWidth, dm.dmPelsHeight) != (cw, ch) and dm.dmPelsWidth >= 640:
+                others.add((dm.dmPelsWidth, dm.dmPelsHeight))
+            i += 1
+        other = sorted(others, key=lambda m: abs(m[0] * m[1] - cw * ch))[0] if others else None
+        if other is None:
+            print("ВНИМАНИЕ: у экрана сервера один режим — смена разрешения не проверена", flush=True)
+        else:
+            results = []
+            timers = [threading.Timer(2.5, lambda: results.append(set_display(other[0], other[1], 0))),
+                      threading.Timer(5.5, lambda: results.append(set_display(cw, ch, 0)))]
+            for t in timers:
+                t.start()
+            out, w, h = encode_case("смена разрешения на ходу %dx%d" % other, 60, 9, "--frames", "download")
+            for t in timers:
+                t.join()
+            time.sleep(1.0)
+            if results != [0, 0]:
+                print("ВНИМАНИЕ: сервер не дал сменить разрешение (%s) — не проверено" % results, flush=True)
+            else:
+                assert (w, h) == (cw & ~1, ch & ~1), (w, h)
+                for index in (60, 240, 500):   # до смены, во время и после возврата — кадры читаются, размер один
+                    decoded_frame(out, w, h, index)
+                ref = gdi_frame(cw, ch)
+                if ref:
+                    diff = bgra_diff(decoded_frame(out, w, h, 520), ref, w, h)
+                    print("  после возврата разрешения отличие от экрана: %.2f" % diff, flush=True)
+                    assert diff < 8.0, diff
+                print("  запись пережила смену разрешения без перезапуска", flush=True)
+        # 2. Монитор повёрнут боком: в записи картинка должна стоять так же, как на экране.
+        for name, orientation in (("повёрнутый экран, 90", 1), ("перевёрнутый экран, 180", 2), ("повёрнутый экран, 270", 3)):
+            rw, rh = (ch, cw) if orientation & 1 else (cw, ch)
+            code = set_display(rw, rh, orientation)
+            if code != 0:
+                print("ВНИМАНИЕ: сервер не даёт повернуть экран (код %d) — поворот не проверен" % code, flush=True)
+                break
+            time.sleep(1.5)
+            ref = gdi_frame(rw, rh)
+            out, w, h = encode_case(name, 60, 3, "--frames", "download")
+            assert (w, h) == (rw & ~1, rh & ~1), (w, h, rw, rh)
+            if ref:
+                diff = bgra_diff(decoded_frame(out, w, h, 60), ref, w, h)
+                print("  отличие от экрана: %.2f" % diff, flush=True)
+                assert diff < 8.0, "повёрнутая картинка не совпадает с экраном: %.2f" % diff
+            else:
+                print("  ВНИМАНИЕ: нет эталонного снимка — проверен только размер", flush=True)
+    finally:
+        set_display(cw, ch, 0)
+        time.sleep(1.5)
+
+
 if __name__ == "__main__":
     if sys.platform != "win32":
         print("только для Windows — пропуск")
@@ -422,6 +518,9 @@ if __name__ == "__main__":
 
     print("кодирование в движке:", flush=True)
     encode_checks()
+
+    print("смена разрешения и поворот экрана:", flush=True)
+    display_checks()
 
     # Настоящий захват экрана: на сборочном сервере нет видеокарты, так что это только справка.
     probe = subprocess.run([MCCAP, "--probe", "--fps", "60", "--seconds", "3"], capture_output=True, text=True, errors="replace")

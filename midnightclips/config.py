@@ -63,6 +63,7 @@ DEFAULTS = {
     "sound_rec_on": "",
     "sound_rec_off": "",
     "sound_error": "",
+    "cursor": True,             # показывать курсор мыши в записи
     "indicator": True,          # красная точка поверх экрана, пока идёт запись
     "indicator_corner": "tl",   # tl / tr / bl / br
     "preset_record": "",        # набор, который сам включается на время записи; пусто = не менять
@@ -76,8 +77,7 @@ DEFAULTS = {
 # Изменение этих ключей требует перезапуска захвата.
 CAPTURE_KEYS = {
     "buffer_enabled", "buffer_seconds", "fps", "height", "bitrate_mbps", "monitor",
-    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe",
-}
+    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe", "cursor"}
 
 
 class Config:
