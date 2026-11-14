@@ -1,0 +1,20 @@
+name: Опыт
+on:
+  push:
+    branches: ["diag/**"]
+jobs:
+  audio:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Виртуальная звуковая карта
+        uses: LABSN/sound-ci-helpers@v1
+        continue-on-error: true
+      - run: python -m pip install PyAudioWPatch
+      - name: Опыт
+        run: python diag/audio.py
+        env:
+          PYTHONUTF8: "1"
