@@ -720,6 +720,7 @@ struct AudioSource {
     double nextOpen = 0;
     bool reported = false;
     long long captured = 0, reopened = 0;
+    HRESULT openError = S_OK;
 
     void close() { SafeRelease(cap); SafeRelease(client); SafeRelease(dev); }
 
@@ -775,7 +776,7 @@ struct AudioSource {
         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2000000 /*200 мс*/, 0, (WAVEFORMATEX*)&wf, nullptr);
         if (SUCCEEDED(hr)) hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&cap);
         if (SUCCEEDED(hr)) hr = client->Start();
-        if (FAILED(hr)) { logf("info: audio %s: open failed 0x%08lx", loopback ? "system" : "mic", hr); close(); return false; }
+        if (FAILED(hr)) { openError = hr; close(); return false; }
         return true;
     }
 
@@ -784,8 +785,12 @@ struct AudioSource {
         if (!cap) {
             if (now() < nextOpen) return;
             nextOpen = now() + 1.0;
+            openError = S_OK;
             if (!open()) {
-                if (!reported) { logf("info: audio %s unavailable", loopback ? "system" : "mic"); reported = true; }
+                if (!reported) {   // 0x80070005 — Windows запретила доступ (настройки конфиденциальности)
+                    logf("info: audio %s unavailable 0x%08lx", loopback ? "system" : "mic", openError);
+                    reported = true;
+                }
                 return;
             }
             reopened++;

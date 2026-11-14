@@ -591,6 +591,19 @@ class Recorder:
                     self.engine_trouble = trouble and count > 2   # первые секунды — разгон, не считаются
                     if count % 12 != 1 and not (self.engine_trouble and count % 2 == 0):
                         continue   # в журнал — раз в минуту; при проблемах — каждые 10 секунд
+                if text.startswith("info: audio "):   # состояние звука — показать в окне программы
+                    note = self.audio_note
+                    if "mic unavailable 0x80070005" in text:
+                        note = "Windows не даёт доступ к микрофону: Параметры → Конфиденциальность → Микрофон."
+                    elif "mic unavailable" in text:
+                        note = "Микрофон не найден — запись идёт без него."
+                    elif "system unavailable" in text:
+                        note = "Звук компьютера недоступен — нет устройства вывода."
+                    elif text.endswith(" opened"):
+                        note = ""
+                    if note != self.audio_note:
+                        self.audio_note = note
+                        self._emit_state()
                 if text:
                     self._log("движок: " + text)
         except (OSError, ValueError):
