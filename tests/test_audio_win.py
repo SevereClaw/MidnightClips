@@ -54,7 +54,7 @@ def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True
     ff = subprocess.Popen(
         [FFMPEG, "-hide_banner", "-y"] + video_in + ["-i", pipe, "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", pipe + "_a",
          "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", out],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        stdout=subprocess.DEVNULL, stderr=open(out + ".log", "wb"))   # в файл: сообщений может быть много
     t0 = time.time()
     if side:
         side(t0)
@@ -62,9 +62,28 @@ def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True
         import winsound
         time.sleep(max(0, play_at - (time.time() - t0)))
         winsound.PlaySound(play, winsound.SND_FILENAME | winsound.SND_ASYNC)
-    err = helper.stderr.read().decode(errors="replace")
-    helper.wait(timeout=30)
-    ff_err = ff.communicate(timeout=60)[1].decode(errors="replace")
+    import threading
+    got = []
+    reader = threading.Thread(target=lambda: got.append(helper.stderr.read()), daemon=True)
+    reader.start()
+    reader.join(seconds + 40)
+    stuck = reader.is_alive()
+    if stuck:   # движок не завершился — не ждём вечно, показываем, что происходило
+        helper.kill()
+        ff.kill()
+        reader.join(10)
+    err = (got[0] if got else b"").decode(errors="replace")
+    try:
+        helper.wait(timeout=30)
+        ff.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        ff.kill()
+        stuck = True
+    with open(out + ".log", "rb") as f:
+        ff_err = f.read().decode(errors="replace")
+    if encode:
+        print("      ffmpeg написал %d строк; последние: %s" % (ff_err.count("\n"), " | ".join(l.strip()[:110] for l in ff_err.strip().splitlines()[-3:])), flush=True)
+    assert not stuck, "запись не завершилась\n--- движок:\n%s\n--- ffmpeg:\n%s" % (err[-1500:], ff_err[-1500:])
     assert ff.returncode == 0, ff_err[-800:]
     return out, err
 

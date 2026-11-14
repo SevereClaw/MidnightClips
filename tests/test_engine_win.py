@@ -317,6 +317,9 @@ def encode_case(name, fps, seconds, *args, expect_code=None):
                          "-c", "copy", out], capture_output=True, text=True, errors="replace")
     (frames, elapsed, late, over, wmax, hi, trimmed, overflow), err = finish_helper(helper)
     assert ff.returncode == 0, ff.stderr[-1200:]
+    notes = [l.strip() for l in ff.stderr.splitlines() if l.startswith("[") and "Guessed" not in l]
+    if notes:
+        print("  ffmpeg при чтении потока: %d сообщений, например: %s" % (len(notes), notes[len(notes) // 2][:160]), flush=True)
     # время кадров: строго подряд, с шагом 1/fps
     info = subprocess.run([FFMPEG, "-hide_banner", "-i", out, "-vf", "showinfo", "-f", "null", "-"],
                           capture_output=True, text=True, errors="replace").stderr
