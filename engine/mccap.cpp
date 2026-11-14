@@ -9,13 +9,20 @@
 // Запуск:  mccap --pipe \\.\pipe\имя --fps 60 [--x X --y Y] [--parent PID]
 //          mccap --test --size 1280x720 ...   тестовая картинка вместо экрана
 //          mccap --probe                       проверить, работает ли захват здесь
-// В stdout печатает одну строку «READY ширина высота fps», в stderr — статистику.
+//          mccap --height 720 ...              уменьшить картинку (на видеокарте)
+//          mccap --cpu ...                     без обработки на видеокарте: кадры BGRA как есть
+// В stdout печатает одну строку «READY ширина высота fps формат», в stderr — статистику.
+//
+// Обычный режим: кадр экрана остаётся в памяти видеокарты, там же на него накладывается
+// курсор, картинка уменьшается и переводится в NV12 — и только готовый маленький кадр
+// (в 2,7 раза меньше BGRA) копируется в обычную память.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <d3dcompiler.h>
 #include <mmsystem.h>
 
 #include <algorithm>
@@ -32,6 +39,7 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "d3dcompiler.lib")
 
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
@@ -62,7 +70,38 @@ struct Args {
     double seconds = 0;
     DWORD parent = 0;
     double stat = 5.0;   // как часто писать статистику, секунд
+    int height = 0;      // до какой высоты уменьшать (0 — не уменьшать)
+    bool cpu = false;    // не обрабатывать кадр на видеокарте
+    std::wstring dump;   // --probe: сохранить один готовый кадр в файл (для проверок)
+    std::wstring fakeCursor;   // проверка рисования курсора: mono / color / masked
 };
+
+static const char* kShaders = R"(
+struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+VSOut vs(uint id : SV_VertexID) {
+    VSOut o;
+    o.uv = float2((id << 1) & 2, id & 2);
+    o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+Texture2D tex : register(t0);
+SamplerState smp : register(s0);
+float3 one(float2 uv) { return tex.Sample(smp, uv).rgb; }
+float3 four(float2 uv) {   // при уменьшении берём четыре точки, чтобы картинка не «сыпалась»
+    float2 d = float2(ddx(uv.x), ddy(uv.y)) * 0.25;
+    return (tex.Sample(smp, uv + float2(-d.x, -d.y)).rgb + tex.Sample(smp, uv + float2(d.x, -d.y)).rgb +
+            tex.Sample(smp, uv + float2(-d.x, d.y)).rgb + tex.Sample(smp, uv + float2(d.x, d.y)).rgb) * 0.25;
+}
+float lumaOf(float3 c) { return 0.0627 + dot(c, float3(0.1826, 0.6142, 0.0620)); }           // BT.709, 16..235
+float2 chromaOf(float3 c) {
+    return float2(0.5020 + dot(c, float3(-0.1006, -0.3386, 0.4392)), 0.5020 + dot(c, float3(0.4392, -0.3989, -0.0403)));
+}
+float4 psCopy(VSOut i) : SV_Target { return tex.Sample(smp, i.uv); }
+float4 psY(VSOut i) : SV_Target { return float4(lumaOf(one(i.uv)), 0, 0, 1); }
+float4 psYs(VSOut i) : SV_Target { return float4(lumaOf(four(i.uv)), 0, 0, 1); }
+float4 psUV(VSOut i) : SV_Target { return float4(chromaOf(one(i.uv)), 0, 1); }
+float4 psUVs(VSOut i) : SV_Target { return float4(chromaOf(four(i.uv)), 0, 1); }
+)";
 
 // ------------------------------------------------------------------ точный таймер
 
@@ -111,6 +150,239 @@ struct Capturer {
     double nextRetry = 0;
     HRESULT lastError = S_OK;
 
+    // ---- обработка на видеокарте
+    bool gpu = false, scaled = false, shapeDirty = false, fakePtr = false;
+    int outW = 0, outH = 0, curW = 0, curH = 0;
+    DXGI_FORMAT deskFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+    ID3D11Texture2D *desk = nullptr, *stage = nullptr, *yTex = nullptr, *uvTex = nullptr, *yRead = nullptr, *uvRead = nullptr;
+    ID3D11Texture2D *curColor = nullptr, *curInvert = nullptr;
+    ID3D11ShaderResourceView *deskSrv = nullptr, *stageSrv = nullptr, *curColorSrv = nullptr, *curInvertSrv = nullptr;
+    ID3D11RenderTargetView *stageRtv = nullptr, *yRtv = nullptr, *uvRtv = nullptr;
+    ID3D11VertexShader* vsFull = nullptr;
+    ID3D11PixelShader *psCopy = nullptr, *psY = nullptr, *psUV = nullptr;
+    ID3D11SamplerState *smpLinear = nullptr, *smpPoint = nullptr;
+    ID3D11BlendState *blendAlpha = nullptr, *blendInvert = nullptr;
+    ID3D11RasterizerState* raster = nullptr;
+
+    bool makeTex(int w, int h, DXGI_FORMAT fmt, UINT bind, bool readback, ID3D11Texture2D** out) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = (UINT)w; td.Height = (UINT)h; td.MipLevels = 1; td.ArraySize = 1; td.Format = fmt;
+        td.SampleDesc.Count = 1;
+        td.Usage = readback ? D3D11_USAGE_STAGING : D3D11_USAGE_DEFAULT;
+        td.BindFlags = readback ? 0 : bind;
+        td.CPUAccessFlags = readback ? D3D11_CPU_ACCESS_READ : 0;
+        return SUCCEEDED(dev->CreateTexture2D(&td, nullptr, out));
+    }
+
+    template <class T> bool compile(const char* entry, const char* target, T** shader) {
+        ID3DBlob *code = nullptr, *errors = nullptr;
+        HRESULT hr = D3DCompile(kShaders, strlen(kShaders), nullptr, nullptr, nullptr, entry, target, 0, 0, &code, &errors);
+        if (FAILED(hr)) {
+            logf("error: shader %s: %s", entry, errors ? (const char*)errors->GetBufferPointer() : "?");
+            SafeRelease(errors);
+            return false;
+        }
+        hr = createShader(code->GetBufferPointer(), code->GetBufferSize(), shader);
+        SafeRelease(code);
+        SafeRelease(errors);
+        return SUCCEEDED(hr);
+    }
+    HRESULT createShader(const void* p, size_t n, ID3D11VertexShader** s) { return dev->CreateVertexShader(p, n, nullptr, s); }
+    HRESULT createShader(const void* p, size_t n, ID3D11PixelShader** s) { return dev->CreatePixelShader(p, n, nullptr, s); }
+
+    // Всё, что нужно для обработки на видеокарте. false — здесь так нельзя, остаёмся на BGRA.
+    bool initGpu(int targetHeight) {
+        outH = (targetHeight > 0 && targetHeight < height) ? targetHeight : height;
+        outW = (int)((double)width * outH / height + 0.5);
+        outW &= ~1; outH &= ~1;
+        scaled = outH != (height & ~1);
+        const UINT both = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        bool ok = makeTex(width, height, deskFormat, both, false, &desk)
+               && makeTex(width, height, deskFormat, both, false, &stage)
+               && makeTex(outW, outH, DXGI_FORMAT_R8_UNORM, D3D11_BIND_RENDER_TARGET, false, &yTex)
+               && makeTex(outW / 2, outH / 2, DXGI_FORMAT_R8G8_UNORM, D3D11_BIND_RENDER_TARGET, false, &uvTex)
+               && makeTex(outW, outH, DXGI_FORMAT_R8_UNORM, 0, true, &yRead)
+               && makeTex(outW / 2, outH / 2, DXGI_FORMAT_R8G8_UNORM, 0, true, &uvRead);
+        ok = ok && SUCCEEDED(dev->CreateShaderResourceView(desk, nullptr, &deskSrv))
+                && SUCCEEDED(dev->CreateShaderResourceView(stage, nullptr, &stageSrv))
+                && SUCCEEDED(dev->CreateRenderTargetView(stage, nullptr, &stageRtv))
+                && SUCCEEDED(dev->CreateRenderTargetView(yTex, nullptr, &yRtv))
+                && SUCCEEDED(dev->CreateRenderTargetView(uvTex, nullptr, &uvRtv));
+        ok = ok && compile("vs", "vs_4_0", &vsFull) && compile("psCopy", "ps_4_0", &psCopy)
+                && compile(scaled ? "psYs" : "psY", "ps_4_0", &psY) && compile(scaled ? "psUVs" : "psUV", "ps_4_0", &psUV);
+        if (ok) {
+            D3D11_SAMPLER_DESC sd{};
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.MaxLOD = D3D11_FLOAT32_MAX;
+            sd.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+            ok = SUCCEEDED(dev->CreateSamplerState(&sd, &smpLinear));
+            sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+            ok = ok && SUCCEEDED(dev->CreateSamplerState(&sd, &smpPoint));
+            D3D11_BLEND_DESC bd{};
+            bd.RenderTarget[0].BlendEnable = TRUE;
+            bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;        // обычный цветной курсор
+            bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+            bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+            bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+            ok = ok && SUCCEEDED(dev->CreateBlendState(&bd, &blendAlpha));
+            bd.RenderTarget[0].SrcBlend = D3D11_BLEND_INV_DEST_COLOR;   // «инвертирующие» точки: белое = обратить цвет
+            bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_COLOR;
+            bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+            bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+            ok = ok && SUCCEEDED(dev->CreateBlendState(&bd, &blendInvert));
+            D3D11_RASTERIZER_DESC rd{};
+            rd.FillMode = D3D11_FILL_SOLID;
+            rd.CullMode = D3D11_CULL_NONE;
+            rd.DepthClipEnable = TRUE;
+            ok = ok && SUCCEEDED(dev->CreateRasterizerState(&rd, &raster));
+        }
+        gpu = ok;
+        return ok;
+    }
+
+    // Курсор -> две текстурки: обычная (с прозрачностью) и «инвертирующая» (как у текстового курсора).
+    void buildCursor() {
+        shapeDirty = false;
+        SafeRelease(curColorSrv); SafeRelease(curInvertSrv); SafeRelease(curColor); SafeRelease(curInvert);
+        if (shape.empty()) return;
+        const int cw = (int)shapeInfo.Width, pitch = (int)shapeInfo.Pitch;
+        int ch = (int)shapeInfo.Height;
+        const bool mono = shapeInfo.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME;
+        const bool masked = shapeInfo.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR;
+        if (mono) ch /= 2;
+        if (cw <= 0 || ch <= 0 || (size_t)pitch * (size_t)(mono ? ch * 2 : ch) > shape.size()) return;
+        std::vector<uint32_t> color((size_t)cw * ch, 0), inv((size_t)cw * ch, 0);
+        bool anyColor = false, anyInv = false;
+        for (int yy = 0; yy < ch; yy++) {
+            for (int xx = 0; xx < cw; xx++) {
+                const size_t i = (size_t)yy * cw + xx;
+                if (mono) {
+                    const uint8_t bit = (uint8_t)(0x80 >> (xx % 8));
+                    const bool andBit = (shape[(size_t)yy * pitch + xx / 8] & bit) != 0;
+                    const bool xorBit = (shape[(size_t)(yy + ch) * pitch + xx / 8] & bit) != 0;
+                    if (!andBit) { color[i] = xorBit ? 0xFFFFFFFFu : 0xFF000000u; anyColor = true; }
+                    else if (xorBit) { inv[i] = 0xFFFFFFFFu; anyInv = true; }
+                } else {
+                    uint32_t px;
+                    memcpy(&px, shape.data() + (size_t)yy * pitch + (size_t)xx * 4, 4);
+                    if (masked) {
+                        if (px & 0xFF000000u) { if (px & 0x00FFFFFFu) { inv[i] = px | 0xFF000000u; anyInv = true; } }
+                        else { color[i] = px | 0xFF000000u; anyColor = true; }
+                    } else if (px & 0xFF000000u) { color[i] = px; anyColor = true; }
+                }
+            }
+        }
+        auto upload = [&](std::vector<uint32_t>& data, ID3D11Texture2D** t, ID3D11ShaderResourceView** v) {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = (UINT)cw; td.Height = (UINT)ch; td.MipLevels = 1; td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA init{};
+            init.pSysMem = data.data();
+            init.SysMemPitch = (UINT)cw * 4;
+            if (SUCCEEDED(dev->CreateTexture2D(&td, &init, t))) dev->CreateShaderResourceView(*t, nullptr, v);
+        };
+        if (anyColor) upload(color, &curColor, &curColorSrv);
+        if (anyInv) upload(inv, &curInvert, &curInvertSrv);
+        curW = cw; curH = ch;
+    }
+
+    void viewport(float x, float y, float w, float h) {
+        D3D11_VIEWPORT vp{};
+        vp.TopLeftX = x; vp.TopLeftY = y; vp.Width = w; vp.Height = h; vp.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &vp);
+    }
+
+    // Готовый кадр NV12: курсор, уменьшение и перевод цвета — на видеокарте, копируется только результат.
+    bool composeGpu(std::vector<uint8_t>& dst, bool drawCursor) {
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ID3D11ShaderResourceView* src = deskSrv;
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->IASetInputLayout(nullptr);
+        ctx->VSSetShader(vsFull, nullptr, 0);
+        ctx->RSSetState(raster);
+        if (drawCursor && ptrVisible && !shape.empty()) {
+            if (shapeDirty) buildCursor();
+            if (curColorSrv || curInvertSrv) {
+                ctx->CopyResource(stage, desk);
+                ctx->OMSetRenderTargets(1, &stageRtv, nullptr);
+                viewport((float)ptr.x, (float)ptr.y, (float)curW, (float)curH);
+                ctx->PSSetShader(psCopy, nullptr, 0);
+                ctx->PSSetSamplers(0, 1, &smpPoint);
+                if (curColorSrv) {
+                    ctx->OMSetBlendState(blendAlpha, nullptr, 0xFFFFFFFF);
+                    ctx->PSSetShaderResources(0, 1, &curColorSrv);
+                    ctx->Draw(3, 0);
+                }
+                if (curInvertSrv) {
+                    ctx->OMSetBlendState(blendInvert, nullptr, 0xFFFFFFFF);
+                    ctx->PSSetShaderResources(0, 1, &curInvertSrv);
+                    ctx->Draw(3, 0);
+                }
+                ctx->PSSetShaderResources(0, 1, &nullSrv);
+                src = stageSrv;
+            }
+        }
+        ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        ctx->PSSetSamplers(0, 1, &smpLinear);
+        ctx->OMSetRenderTargets(1, &yRtv, nullptr);      // яркость
+        viewport(0, 0, (float)outW, (float)outH);
+        ctx->PSSetShader(psY, nullptr, 0);
+        ctx->PSSetShaderResources(0, 1, &src);
+        ctx->Draw(3, 0);
+        ctx->OMSetRenderTargets(1, &uvRtv, nullptr);     // цвет, вдвое меньше
+        viewport(0, 0, (float)(outW / 2), (float)(outH / 2));
+        ctx->PSSetShader(psUV, nullptr, 0);
+        ctx->Draw(3, 0);
+        ctx->PSSetShaderResources(0, 1, &nullSrv);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        ctx->CopyResource(yRead, yTex);
+        ctx->CopyResource(uvRead, uvTex);
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (FAILED(ctx->Map(yRead, 0, D3D11_MAP_READ, 0, &m))) return false;
+        uint8_t* out = dst.data();
+        for (int yy = 0; yy < outH; yy++) memcpy(out + (size_t)yy * outW, (const uint8_t*)m.pData + (size_t)yy * m.RowPitch, (size_t)outW);
+        ctx->Unmap(yRead, 0);
+        if (FAILED(ctx->Map(uvRead, 0, D3D11_MAP_READ, 0, &m))) return false;
+        out += (size_t)outW * outH;
+        for (int yy = 0; yy < outH / 2; yy++) memcpy(out + (size_t)yy * outW, (const uint8_t*)m.pData + (size_t)yy * m.RowPitch, (size_t)outW);
+        ctx->Unmap(uvRead, 0);
+        return true;
+    }
+
+    // Курсор-заглушка для проверок: рисование курсора должно совпадать на видеокарте и без неё.
+    void fakeCursor(const std::wstring& kind) {
+        const int cw = 32, ch = 32;
+        ptr.x = 100; ptr.y = 100; ptrVisible = true; shapeDirty = true;
+        shapeInfo.Width = cw; shapeInfo.HotSpot.x = 0; shapeInfo.HotSpot.y = 0;
+        if (kind == L"mono") {
+            shapeInfo.Type = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME;
+            shapeInfo.Height = ch * 2; shapeInfo.Pitch = cw / 8;
+            shape.assign((size_t)(cw / 8) * ch * 2, 0);
+            for (int yy = 0; yy < ch; yy++)
+                for (int xx = 0; xx < cw; xx++) {
+                    // четверти: чёрная, белая, прозрачная, инвертирующая
+                    const bool andBit = yy >= 16, xorBit = xx >= 16;
+                    if (andBit) shape[(size_t)yy * (cw / 8) + xx / 8] |= (uint8_t)(0x80 >> (xx % 8));
+                    if (xorBit) shape[(size_t)(yy + ch) * (cw / 8) + xx / 8] |= (uint8_t)(0x80 >> (xx % 8));
+                }
+        } else {
+            const bool masked = kind == L"masked";
+            shapeInfo.Type = masked ? DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR : DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR;
+            shapeInfo.Height = ch; shapeInfo.Pitch = cw * 4;
+            shape.assign((size_t)cw * ch * 4, 0);
+            for (int yy = 0; yy < ch; yy++)
+                for (int xx = 0; xx < cw; xx++) {
+                    uint32_t px;
+                    if (masked) px = yy < 16 ? 0x0000C8FFu : (xx < 16 ? 0xFFFFFFFFu : 0xFF000000u);   // цвет / инверсия / без изменений
+                    else px = yy < 16 ? 0xFFE4002Bu : (xx < 16 ? 0x80FFFFFFu : 0x00000000u);          // плотный / полупрозрачный / пусто
+                    memcpy(shape.data() + ((size_t)yy * cw + xx) * 4, &px, 4);
+                }
+        }
+    }
+
     bool initDevice(const Args& a) {
         IDXGIFactory1* factory = nullptr;
         HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory);
@@ -153,6 +425,7 @@ struct Capturer {
         DXGI_OUTDUPL_DESC d;
         dupl->GetDesc(&d);
         int w = (int)d.ModeDesc.Width, h = (int)d.ModeDesc.Height;
+        if (width == 0) deskFormat = d.ModeDesc.Format == DXGI_FORMAT_UNKNOWN ? DXGI_FORMAT_B8G8R8A8_UNORM : d.ModeDesc.Format;
         if (width == 0) {
             width = w; height = h;
             base.assign((size_t)w * h * 4, 0);
@@ -185,7 +458,7 @@ struct Capturer {
             return 0;
         }
         int result = 0;
-        if (info.LastMouseUpdateTime.QuadPart != 0) {
+        if (info.LastMouseUpdateTime.QuadPart != 0 && !fakePtr) {
             ptrVisible = info.PointerPosition.Visible != 0;
             ptr = info.PointerPosition.Position;
             pointerMoves++;
@@ -194,11 +467,21 @@ struct Capturer {
                 shape.resize(info.PointerShapeBufferSize);
                 UINT need = 0;
                 if (FAILED(dupl->GetFramePointerShape((UINT)shape.size(), shape.data(), &need, &shapeInfo))) shape.clear();
+                shapeDirty = true;
             }
         }
         if (info.LastPresentTime.QuadPart != 0 && res) {
             ID3D11Texture2D* tex = nullptr;
             if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex))) {
+                if (gpu) {   // картинка остаётся в памяти видеокарты
+                    ctx->CopyResource(desk, tex);
+                    tex->Release();
+                    res->Release();
+                    dupl->ReleaseFrame();
+                    haveImage = true;
+                    images++;
+                    return 1;
+                }
                 if (!staging) {
                     D3D11_TEXTURE2D_DESC td;
                     tex->GetDesc(&td);
@@ -275,6 +558,11 @@ struct Capturer {
     }
 
     void close() {
+        SafeRelease(curColorSrv); SafeRelease(curInvertSrv); SafeRelease(curColor); SafeRelease(curInvert);
+        SafeRelease(deskSrv); SafeRelease(stageSrv); SafeRelease(stageRtv); SafeRelease(yRtv); SafeRelease(uvRtv);
+        SafeRelease(desk); SafeRelease(stage); SafeRelease(yTex); SafeRelease(uvTex); SafeRelease(yRead); SafeRelease(uvRead);
+        SafeRelease(vsFull); SafeRelease(psCopy); SafeRelease(psY); SafeRelease(psUV);
+        SafeRelease(smpLinear); SafeRelease(smpPoint); SafeRelease(blendAlpha); SafeRelease(blendInvert); SafeRelease(raster);
         SafeRelease(staging); SafeRelease(dupl); SafeRelease(out1); SafeRelease(ctx); SafeRelease(dev);
     }
 };
@@ -423,6 +711,10 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--test") a.test = true;
         else if (k == L"--probe") a.probe = true;
         else if (k == L"--no-cursor") a.cursor = false;
+        else if (k == L"--height") a.height = _wtoi(next());
+        else if (k == L"--cpu") a.cpu = true;
+        else if (k == L"--dump") a.dump = next();
+        else if (k == L"--fake-cursor") a.fakeCursor = next();
     }
     a.fps = std::max(1, std::min(480, a.fps));
     if (a.parent) CreateThread(nullptr, 0, parentWatch, (LPVOID)(ULONG_PTR)a.parent, 0, nullptr);
@@ -435,16 +727,26 @@ int wmain(int argc, wchar_t** argv) {
 
     if (!a.test) {
         if (!cap.initDevice(a)) return 2;
-        double until = now() + 3.0;   // ждём первую картинку экрана
+        double until = now() + 3.0;
         int r = 0;
+        while ((r = cap.createDupl()) == 0 && now() < until) Sleep(50);
+        if (r <= 0) { logf("error: DuplicateOutput 0x%08lx", cap.lastError); return 2; }
+        if (!a.cpu && !cap.initGpu(a.height)) {
+            logf("error: gpu path unavailable");   // программа запустит движок заново с --cpu
+            return 5;
+        }
+        if (!a.fakeCursor.empty()) { cap.fakePtr = true; cap.fakeCursor(a.fakeCursor); }
+        until = now() + 3.0;   // ждём первую картинку экрана
         while (!cap.haveImage && now() < until) {
             r = cap.poll();
             if (r < 0) return 3;
             if (!cap.haveImage) Sleep(5);
         }
-        if (cap.width == 0) { logf("error: DuplicateOutput 0x%08lx", cap.lastError); return 2; }
-        w = cap.width; h = cap.height;
+        w = cap.gpu ? cap.outW : cap.width;
+        h = cap.gpu ? cap.outH : cap.height;
     }
+    const bool nv12 = !a.test && cap.gpu;
+    const size_t frameSize = nv12 ? (size_t)w * h * 3 / 2 : (size_t)w * h * 4;
 
     if (a.probe) {
         const double t0 = now();
@@ -454,15 +756,25 @@ int wmain(int argc, wchar_t** argv) {
             if (cap.poll() < 0) break;
             n++;
         }
-        printf("PROBE ok %dx%d images=%u pointer=%u lost=%u highres_timer=%d\n",
-               w, h, cap.images, cap.pointerMoves, cap.lost, timer.highRes ? 1 : 0);
+        bool dumped = false;
+        if (!a.dump.empty()) {   // один готовый кадр в файл — сверить картинку в проверках
+            std::vector<uint8_t> frame(frameSize, 0);
+            const bool ok = nv12 ? cap.composeGpu(frame, a.cursor) : (cap.compose(frame, a.cursor), true);
+            FILE* f = nullptr;
+            if (ok && _wfopen_s(&f, a.dump.c_str(), L"wb") == 0 && f) {
+                dumped = fwrite(frame.data(), 1, frame.size(), f) == frame.size();
+                fclose(f);
+            }
+        }
+        printf("PROBE ok %dx%d %s source=%dx%d images=%u pointer=%u lost=%u highres_timer=%d dumped=%d\n",
+               w, h, nv12 ? "nv12" : "bgra", cap.width, cap.height, cap.images, cap.pointerMoves, cap.lost,
+               timer.highRes ? 1 : 0, dumped ? 1 : 0);
         fflush(stdout);
         cap.close();
         return 0;
     }
 
     if (a.pipe.empty()) { logf("error: --pipe required"); return 2; }
-    const size_t frameSize = (size_t)w * h * 4;
     g_queue.frameSize = frameSize;
     g_queue.capacity = (size_t)std::max(8, (int)(a.fps * 0.25));   // до четверти секунды кадров
     HANDLE pipe = CreateNamedPipeW(a.pipe.c_str(), PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1,
@@ -470,7 +782,7 @@ int wmain(int argc, wchar_t** argv) {
     if (pipe == INVALID_HANDLE_VALUE) { logf("error: CreateNamedPipe %lu", GetLastError()); return 2; }
     g_pipe = pipe;
 
-    printf("READY %d %d %d\n", w, h, a.fps);
+    printf("READY %d %d %d %s\n", w, h, a.fps, nv12 ? "nv12" : "bgra");
     fflush(stdout);
 
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
@@ -507,7 +819,11 @@ int wmain(int argc, wchar_t** argv) {
             if (r < 0) { code = 3; break; }
             if (r > 0 || !cur) {
                 cur = g_queue.acquire();
-                cap.compose(*cur, a.cursor);
+                if (nv12) {
+                    if (!cap.composeGpu(*cur, a.cursor)) { logf("error: gpu readback failed"); code = 5; break; }
+                } else {
+                    cap.compose(*cur, a.cursor);
+                }
             }
         }
 

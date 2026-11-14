@@ -99,6 +99,104 @@ def read_case(name, size, fps, seconds, startup_stall=0.0, burst=0, pause=0.0):
     return gaps, lag[len(lag) // 2], lag[-1], len(steady)
 
 
+PATTERN = r"""
+import tkinter as tk
+root = tk.Tk(); root.geometry("940x680+20+20"); root.attributes("-topmost", True); root.overrideredirect(True)
+c = tk.Canvas(root, width=940, height=680, bg="#181818", highlightthickness=0); c.pack()
+colors = ["#FFE100", "#E4002B", "#2743D8", "#2FCB4B", "#E63BC8", "#20D6E8", "#F4F4F4", "#000000", "#808080", "#FF7A00"]
+for i, col in enumerate(colors):
+    c.create_rectangle(20 + i * 90, 20, 100 + i * 90, 300, fill=col, outline="")
+for i in range(32):
+    v = "#%02x%02x%02x" % (i * 8, 255 - i * 8, (i * 16) % 256)
+    c.create_rectangle(20 + i * 28, 330, 48 + i * 28, 520, fill=v, outline="")
+c.create_oval(60, 540, 400, 670, fill="#FFE100", outline="#E4002B", width=12)
+c.create_text(650, 600, text="MIDNIGHT CLIPS", fill="#FFFFFF", font=("Arial", 36, "bold"))
+root.after(60000, root.destroy); root.mainloop()
+"""
+
+
+def dump(name, *extra):
+    """Один готовый кадр настоящего экрана -> (ширина, высота, формат, байты)."""
+    path = os.path.join(tempfile.gettempdir(), "mccap_%s.raw" % name)
+    res = subprocess.run([MCCAP, "--probe", "--seconds", "1", "--dump", path, *extra],
+                         capture_output=True, text=True, errors="replace")
+    found = re.search(r"PROBE ok (\d+)x(\d+) (\w+) source=(\d+)x(\d+).* dumped=(\d)", res.stdout)
+    assert res.returncode == 0 and found and found[6] == "1", (res.returncode, res.stdout, res.stderr[-500:])
+    with open(path, "rb") as f:
+        data = f.read()
+    return int(found[1]), int(found[2]), found[3], data
+
+
+def compare(name, ref, got, box=None, limit=3.0):
+    """ref — кадр BGRA без видеокарты, got — NV12 с видеокарты. Сверяем яркость и цвет по точкам."""
+    sw, sh, _, bgra = ref
+    ow, oh, fmt, nv12 = got
+    assert fmt == "nv12" and len(nv12) == ow * oh * 3 // 2, (fmt, len(nv12), ow, oh)
+    fx, fy = sw / ow, sh / oh
+    scaled = (ow, oh) != (sw & ~1, sh & ~1)
+
+    def src(x, y):   # среднее по 2x2 точкам исходника вокруг (x, y)
+        x0 = min(max(int(x - 0.5), 0), sw - 2)
+        y0 = min(max(int(y - 0.5), 0), sh - 2)
+        b = g = r = 0
+        for dy in (0, 1):
+            for dx in (0, 1):
+                i = ((y0 + dy) * sw + x0 + dx) * 4
+                b += bgra[i]; g += bgra[i + 1]; r += bgra[i + 2]
+        return b / 4.0, g / 4.0, r / 4.0
+
+    x1, y1, x2, y2 = box or (0, 0, ow, oh)
+    step = 1 if box else 3
+    ysum = ybad = n = 0
+    for oy in range(y1, y2, step):
+        for ox in range(x1, x2, step):
+            if scaled:
+                b, g, r = src((ox + 0.5) * fx, (oy + 0.5) * fy)
+            else:
+                i = (oy * sw + ox) * 4
+                b, g, r = bgra[i], bgra[i + 1], bgra[i + 2]
+            d = abs(nv12[oy * ow + ox] - (16 + 0.1826 * r + 0.6142 * g + 0.0620 * b))
+            ysum += d; n += 1
+            if d > 24:
+                ybad += 1
+    csum = m = 0
+    uv = ow * oh
+    for cy in range(y1 // 2, y2 // 2, step):
+        for cx in range(x1 // 2, x2 // 2, step):
+            b, g, r = src((cx * 2 + 1) * fx, (cy * 2 + 1) * fy)
+            u = 128 - 0.1006 * r - 0.3386 * g + 0.4392 * b
+            v = 128 + 0.4392 * r - 0.3989 * g - 0.0403 * b
+            i = uv + cy * ow + cx * 2
+            csum += abs(nv12[i] - u) + abs(nv12[i + 1] - v); m += 2
+    print("   %-34s %dx%d: яркость расходится в среднем на %.2f (резко — %.1f%% точек), цвет — на %.2f" % (
+        name, ow, oh, ysum / n, 100.0 * ybad / n, csum / m), flush=True)
+    assert ysum / n < limit and csum / m < limit + 1.5, "картинка с видеокарты не совпадает: %s" % name
+    assert ybad / n < (0.08 if scaled else 0.01), "слишком много резких расхождений: %s" % name
+
+
+def gpu_checks():
+    """Кадр, собранный на видеокарте (курсор, уменьшение, NV12), должен совпадать с обычным."""
+    pattern = subprocess.Popen([sys.executable, "-c", PATTERN])
+    try:
+        time.sleep(2.5)
+        ref = dump("cpu", "--cpu")
+        assert ref[2] == "bgra"
+        compare("без уменьшения", ref, dump("gpu"))
+        compare("уменьшение до 480", ref, dump("gpu480", "--height", "480"), limit=7.0)
+        compare("уменьшение до 360", ref, dump("gpu360", "--height", "360"), limit=9.0)
+        for kind, title in (("color", "цветной курсор"), ("mono", "чёрно-белый курсор"), ("masked", "курсор с маской")):
+            ref_c = dump("cpu_" + kind, "--cpu", "--fake-cursor", kind)
+            got_c = dump("gpu_" + kind, "--fake-cursor", kind)
+            compare(title, ref_c, got_c, box=(96, 96, 138, 138))
+            # курсор действительно нарисован: область под ним отличается от кадра без курсора
+            sw = ref[0]
+            changed = sum(1 for y in range(100, 132) for x in range(100, 132)
+                          if ref_c[3][(y * sw + x) * 4:(y * sw + x) * 4 + 3] != ref[3][(y * sw + x) * 4:(y * sw + x) * 4 + 3])
+            assert changed > 200, "курсор не нарисован (%s): %d точек" % (kind, changed)
+    finally:
+        pattern.kill()
+
+
 if __name__ == "__main__":
     if sys.platform != "win32":
         print("только для Windows — пропуск")
@@ -121,6 +219,9 @@ if __name__ == "__main__":
     assert med < 40, "отставание после задержки на старте не убрано: %.0f мс" % med
     gaps, med, mx, n = read_case("задержка + порции, 60 к/с", "1280x720", 60, 8, startup_stall=1.0, burst=8, pause=0.125)
     assert med < 150 and gaps <= n * 0.02, (gaps, med)
+
+    print("обработка кадра на видеокарте против обычной:", flush=True)
+    gpu_checks()
 
     # Настоящий захват экрана: на сборочном сервере нет видеокарты, так что это только справка.
     probe = subprocess.run([MCCAP, "--probe", "--fps", "60", "--seconds", "3"], capture_output=True, text=True, errors="replace")

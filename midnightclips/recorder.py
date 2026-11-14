@@ -30,7 +30,7 @@ ENCODER_TITLES = {
     "h264_qsv": "Intel Quick Sync",
     "libx264": "процессор (x264)",
 }
-CAPTURE_TITLES = {"own": "движок MidnightClips", "dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
+CAPTURE_TITLES = {"own": "движок MidnightClips", "owncpu": "движок MidnightClips (без обработки на видеокарте)", "dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
                   "gdi": "GDI", "test": "тест"}
 
 
@@ -157,10 +157,10 @@ class Recorder:
             "fps_real": self.fps_real,
             "screen_fps": self.screen_fps,
             "fps_target": self.fps_target,
-            "slow": self.slow or (self.capture == "own" and self.engine_trouble),
+            "slow": self.slow or (self.capture in ("own", "owncpu") and self.engine_trouble),
             "fallback": self.state == "on" and (
                 self.capture in ("gdi", "ddal") or self.encoder == "libx264"
-                or (self.capture != "own" and self.engine is not None and self.cfg["capture"] == "auto")),
+                or (self.capture not in ("own", "owncpu") and self.engine is not None and self.cfg["capture"] == "auto")),
             "capture_kind": self.capture,
             "recording": self.recording_since is not None,
             "recording_since": self.recording_since,
@@ -352,16 +352,20 @@ class Recorder:
         # ddal — старый режим: ffmpeg сам отмеряет кадры (на Windows получается с рывками);
         # gdi  — самый медленный запасной.
         # own  — свой движок: сам отмеряет кадры точным таймером и сам переживает потерю экрана;
-        captures = {"own": ["own", "dda"], "dda": ["dda", "ddal"], "ddal": ["ddal"],
-                    "gdi": ["gdi"]}.get(capture, ["own", "dda", "ddal", "gdi"])
-        if not self.engine and "own" in captures:
-            captures.remove("own")
+        #        кадр готовится на видеокарте (курсор, уменьшение, NV12); owncpu — то же без видеокарты;
+        captures = {"own": ["own", "owncpu"], "owncpu": ["owncpu", "dda"], "dda": ["dda", "ddal"], "ddal": ["ddal"],
+                    "gdi": ["gdi"]}.get(capture, ["own", "owncpu", "dda", "ddal", "gdi"])
+        if not self.engine:
+            captures = [c for c in captures if c not in ("own", "owncpu")] or ["dda", "ddal", "gdi"]
         if self._avoid_precise and "dda" in captures and len(captures) > 1:
             captures.remove("dda")
         result = []
         for enc in encoders:
             for cap in captures:
                 if cap == "own":
+                    result.append((cap, enc, True))       # готовый NV12 сразу в кодировщик
+                    continue
+                if cap == "owncpu":
                     if enc == "h264_nvenc" and not self._needs_scaling():
                         result.append((cap, enc, True))   # кадр BGRA сразу в кодировщик видеокарты
                     result.append((cap, enc, False))
@@ -433,8 +437,8 @@ class Recorder:
                 source.close()
                 source = None
         helper, own = None, None
-        if capture == "own":
-            helper, own = self._start_engine()
+        if capture in ("own", "owncpu"):
+            helper, own = self._start_engine(gpu=capture == "own")
             if helper is None:
                 if source:
                     source.close()
@@ -497,11 +501,15 @@ class Recorder:
             self._remove(path)
         return None
 
-    def _start_engine(self):
+    def _start_engine(self, gpu=True):
         """Запустить mccap и дождаться строки «READY ширина высота fps»."""
         fps = max(15, min(240, int(self.cfg["fps"])))
         pipe = r"\\.\pipe\mccap_%d_%d" % (os.getpid(), self._session)
         args = [self.engine, "--pipe", pipe, "--fps", str(fps), "--parent", str(os.getpid())]
+        if not gpu:
+            args += ["--cpu"]
+        elif int(self.cfg["height"]) > 0:
+            args += ["--height", str(int(self.cfg["height"]))]   # уменьшение — на видеокарте
         if self.engine_test:
             args += ["--test", "--size", "1280x720"]
         else:
@@ -522,11 +530,11 @@ class Recorder:
         reader.join(8)
         text = line[0].decode("ascii", "replace").strip() if line else ""
         parts = text.split()
-        if len(parts) != 4 or parts[0] != "READY":
+        if len(parts) < 4 or parts[0] != "READY":
             self._log("движок захвата не готов (ответ: %r, код %s)" % (text, helper.poll()))
             self._kill(helper)
             return None, None
-        return helper, (pipe, int(parts[1]), int(parts[2]))
+        return helper, (pipe, int(parts[1]), int(parts[2]), parts[4] if len(parts) > 4 else "bgra")
 
     def _watch_engine(self, helper, fps):
         """Сообщения движка — в журнал; из статистики берём реальную частоту обновления экрана."""
@@ -587,10 +595,10 @@ class Recorder:
         # --- вход 0: экран
         if capture == "test":
             cmd += ["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=%d" % fps]
-        elif capture == "own":
-            # Кадры уже идут ровно с нужной частотой — ffmpeg только кодирует и пишет.
-            # Кадры приходят ровно с нужной частотой, по порядку — время кадра считается по номеру.
-            cmd += ["-f", "rawvideo", "-pixel_format", "bgra",
+        elif capture in ("own", "owncpu"):
+            # Кадры приходят ровно с нужной частотой, по порядку — время кадра считается по номеру;
+            # ffmpeg только кодирует и пишет.
+            cmd += ["-f", "rawvideo", "-pixel_format", own[3],
                     "-video_size", "%dx%d" % (own[1], own[2]), "-framerate", str(fps), "-i", own[0]]
         elif capture == "dda":
             # Частота с большим запасом и без повторов кадров: ddagrab тогда не «спит» между
@@ -642,6 +650,8 @@ class Recorder:
             pix = "yuv420p" if encoder == "libx264" else "nv12"
             cmd += ["-vf", "%s,format=%s" % (scale, pix)]
         cmd += ["-r", str(fps), "-fps_mode", "cfr"]   # ровная частота кадров на выходе
+        if own and own[3] == "nv12":   # движок отдаёт цвет в стандарте BT.709 — подписываем, чтобы плееры не гадали
+            cmd += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
         rate = ["-b:v", "%dM" % mbps, "-maxrate", "%dM" % int(mbps * 1.5),
                 "-bufsize", "%dM" % (mbps * 2), "-g", str(fps)]
         if encoder == "h264_nvenc":
