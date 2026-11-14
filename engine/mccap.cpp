@@ -65,6 +65,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "mmdevapi.lib")
 #pragma comment(lib, "windowsapp.lib")
+#pragma comment(lib, "user32.lib")
 
 namespace wgc = winrt::Windows::Graphics::Capture;
 namespace wgd = winrt::Windows::Graphics::DirectX;
