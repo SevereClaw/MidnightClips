@@ -75,5 +75,10 @@ def import_libs():
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):   # в консоли Windows русские буквы могут не печататься
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     fetch()
     sys.exit(0 if import_libs() or "--optional" in sys.argv else 1)

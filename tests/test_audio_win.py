@@ -38,18 +38,21 @@ def has_audio_device():
         return False
 
 
-def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True, side=None):
+def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True, side=None, encode=False):
     """Движок (+звук) -> ffmpeg -> файл с несжатым звуком. Возвращает (путь, сообщения движка)."""
     pipe = r"\\.\pipe\mccap_au_%d_%d" % (os.getpid(), int(time.time() * 1000) % 100000)
     args = [MCCAP, "--fps", "60", "--seconds", str(seconds), "--pipe", pipe, "--audio-pipe", pipe + "_a",
             "--parent", str(os.getpid()), "--stat", "2"] + (["--test", "--size", "640x360"] if test_pattern else []) + engine_args
+    if encode:   # движок кодирует сам; кадр готовится в текстуре кодировщика
+        args += ["--encode", "libx264", "--bitrate", "20", "--frames", "download"]
     helper = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     ready = helper.stdout.readline().decode().strip().split()
     assert ready and ready[0] == "READY", ready
+    video_in = (["-analyzeduration", "1000000", "-f", "nut"] if encode else
+                ["-f", "rawvideo", "-pixel_format", ready[4], "-video_size", "%sx%s" % (ready[1], ready[2]), "-framerate", ready[3]])
     out = os.path.join(TMP, "mccap_audio_%s.mkv" % name)
     ff = subprocess.Popen(
-        [FFMPEG, "-hide_banner", "-y", "-f", "rawvideo", "-pixel_format", ready[4], "-video_size", "%sx%s" % (ready[1], ready[2]),
-         "-framerate", ready[3], "-i", pipe, "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", pipe + "_a",
+        [FFMPEG, "-hide_banner", "-y"] + video_in + ["-i", pipe, "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", pipe + "_a",
          "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", out],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     t0 = time.time()
@@ -128,11 +131,11 @@ root.mainloop()
 """
 
 
-def sync_check(beep):
+def sync_check(beep, encode=False):
     """Вспышка на экране и щелчок в один момент — в записи они должны совпасть, оба раза одинаково."""
     def side(t0):
         subprocess.Popen([sys.executable, "-c", FLASH, repr(t0), beep])
-    path, err = record("sync", 9, [], test_pattern=False, side=side)
+    path, err = record("sync", 9, [], test_pattern=False, side=side, encode=encode)
     raw = subprocess.run([FFMPEG, "-v", "error", "-i", path, "-map", "0:v", "-vf", "crop=400:300:160:140,scale=4:4,format=gray",
                           "-f", "rawvideo", "-"], capture_output=True).stdout
     bright = [sum(raw[i:i + 16]) / 16.0 for i in range(0, len(raw) - 15, 16)]
@@ -232,6 +235,8 @@ if __name__ == "__main__":
     print("%-28s звук %.2f c, пик %d" % ("тишина", len(a) / 48000, max(abs(x) for x in a)), flush=True)
     assert abs(len(a) / 48000 - 4.0) < 0.25 and max(abs(x) for x in a) < 200
     sync_check(make_wav("beep.wav", 0.12, 1000, 14000))
+    print("то же, когда движок кодирует сам:", flush=True)
+    sync_check(make_wav("beep.wav", 0.12, 1000, 14000), encode=True)
     if os.path.isfile(FFPLAY):
         app_checks()
     else:
