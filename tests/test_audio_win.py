@@ -78,10 +78,19 @@ def video_seconds(path):
 
 
 def onset(samples, start=0, level=1500):
-    for i in range(start, len(samples)):
-        if abs(samples[i]) > level:
-            return i
+    """Начало устойчивого звука: громко и сейчас, и ещё через 50 мс (одиночный щелчок не считается)."""
+    step = 48
+    for i in range(start, len(samples) - 4800, step):
+        if max(abs(x) for x in samples[i:i + step]) > level and max(abs(x) for x in samples[i + 2400:i + 2880]) > level:
+            for j in range(i, i + step):
+                if abs(samples[j]) > level:
+                    return j
     return -1
+
+
+def profile(samples):
+    """Пик по четвертям секунды — чтобы видеть, где в записи звук."""
+    return " ".join("%d" % (max(abs(x) for x in samples[i:i + 12000]) // 1000) for i in range(0, len(samples) - 11999, 12000))
 
 
 def check(name, engine_args, low, high, tone):
@@ -92,6 +101,7 @@ def check(name, engine_args, low, high, tone):
     v = video_seconds(path)
     print("%-28s звук %.2f c, видео %.2f c; пик %5d (ждём %d–%d); тон начался на %.2f c" % (
         name, len(a) / 48000, v, peak, low, high, first / 48000 if first >= 0 else -1), flush=True)
+    print("      по четвертям секунды (тысячи): " + profile(a), flush=True)
     assert abs(len(a) / 48000 - v) < 0.2, "длина звука и видео расходится\n" + err[-600:]
     assert low <= peak <= high, "громкость не та: %d\n%s" % (peak, err[-900:])
     assert 0.9 < first / 48000 < 2.6, "тон не там, где его включили: %.2f" % (first / 48000)
