@@ -188,6 +188,7 @@ struct Capturer {
 
     // ---- захват одного окна (Windows Graphics Capture)
     bool windowMode = false;
+    HWND hwndTarget = nullptr;
     std::atomic<bool> windowClosed{false};
     int srcW = 0, srcH = 0;   // текущий размер окна (может меняться; размер кадра на выходе остаётся прежним)
     wgc::GraphicsCaptureItem item{nullptr};
@@ -331,6 +332,7 @@ struct Capturer {
             item.Closed([this](auto&&, auto&&) { windowClosed = true; });
             session.StartCapture();
             windowMode = true;
+            hwndTarget = hwnd;
             deskFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
             return initGpu(targetHeight);
         } catch (winrt::hresult_error const& e) {
@@ -341,7 +343,7 @@ struct Capturer {
 
     // 1 — новая картинка окна, 0 — ничего нового, -2 — окно закрыто
     int pollWindow() {
-        if (windowClosed) return -2;
+        if (windowClosed || !IsWindow(hwndTarget)) return -2;   // событие «закрыто» приходит не всегда — проверяем и сами
         try {
             wgc::Direct3D11CaptureFrame frame{nullptr}, latest{nullptr};
             while ((frame = pool.TryGetNextFrame())) latest = frame;   // берём самый свежий кадр
