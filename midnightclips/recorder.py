@@ -611,7 +611,7 @@ class Recorder:
             if self.cfg["mic"] and self._degrade < 1:
                 args += ["--mic", self.cfg["mic"],
                          "--vol-mic", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0)]
-        if not self.cfg.get("cursor", True):
+        if not self.cfg["cursor"]:
             args.append("--no-cursor")
         if encode:   # движок кодирует сам; в канал идёт уже сжатое видео
             mbps = max(2, min(100, int(self.cfg["bitrate_mbps"])))
@@ -728,7 +728,7 @@ class Recorder:
         fps = max(15, min(240, int(cfg["fps"])))
         height = int(cfg["height"])
         mbps = max(2, min(100, int(cfg["bitrate_mbps"])))
-        mouse = 1 if cfg.get("cursor", True) else 0
+        mouse = 1 if cfg["cursor"] else 0
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats", "-y",
                "-progress", "pipe:1", "-stats_period", "2"]
 
