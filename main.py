@@ -50,7 +50,8 @@ class App:
                                self.log_path)
         self.recorder = Recorder(
             self.cfg, self.ffmpeg, os.path.join(cache_dir(), "buffer"), self.log_path,
-            self.on_event, winutil.monitors, self.overlay_diag, find_engine(self.res), winutil.find_window)
+            self.on_event, winutil.monitors, self.overlay_diag, find_engine(self.res), winutil.find_window,
+            winutil.detect_game)
 
     # ---------------------------------------------------------------- запуск
 

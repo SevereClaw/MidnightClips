@@ -169,8 +169,9 @@ function applyState(st) {
       : "";
   }
   $("targetInfo").textContent = st.state !== "on" ? ""
-    : st.window_active ? "Сейчас записывается окно " + (settings.window_exe || "")
-    : settings.capture_target === "window" ? "Сейчас записывается весь монитор: окно программы не открыто" : "";
+    : st.window_active ? "Сейчас записывается окно " + (st.window_name || settings.window_exe || "")
+    : settings.capture_target === "window" ? "Сейчас записывается весь монитор: окно программы не открыто"
+    : settings.capture_target === "game" ? "Сейчас записывается весь монитор: игра не запущена" : "";
   if (st.hotkeys) applyHotkeyStatus(st.hotkeys);
   if (st.version) $("version").textContent = "MidnightClips " + st.version;
   if (st.update) applyUpdate(st.update);
@@ -610,6 +611,7 @@ function applySettings(s) {
   $("volSysText").textContent = recVol(s.rec_volume_system);
   $("volMicText").textContent = recVol(s.rec_volume_mic);
   $("rowWindow").hidden = s.capture_target !== "window";
+  $("rowGame").hidden = s.capture_target !== "game";
   const selWin = $("selWindow");
   if (s.window_exe && ![...selWin.options].some((o) => o.value === s.window_exe)) selWin.add(new Option(s.window_exe, s.window_exe));
   selWin.value = s.window_exe || "";

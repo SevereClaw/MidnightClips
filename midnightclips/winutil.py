@@ -1,6 +1,7 @@
 """Мелкие обращения к Windows через ctypes. На других системах — безопасные заглушки."""
 import ctypes
 import os
+import time
 import subprocess
 import sys
 
@@ -151,6 +152,115 @@ def find_window(exe):
         return None
     found = [w for w in list_windows() if w["exe"] == exe and not w["minimized"]]
     return max(found, key=lambda w: w["area"])["hwnd"] if found else None
+
+
+# ---- автоопределение игры
+
+# Папки, куда игры ставят магазины и лаунчеры (и просто «Games» / «Игры»).
+GAME_DIRS = ("\\steamapps\\common\\", "\\epic games\\", "\\gog galaxy\\games\\", "\\gog games\\",
+             "\\riot games\\", "\\ubisoft game launcher\\games\\", "\\origin games\\", "\\ea games\\",
+             "\\xboxgames\\", "\\rockstar games\\", "\\games\\", "\\игры\\")
+# Что игрой не считается никогда: лаунчеры, браузеры, плееры, мессенджеры, системные окна.
+NOT_GAMES = {
+    "explorer.exe", "applicationframehost.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe",
+    "lockapp.exe", "taskmgr.exe", "dwm.exe", "textinputhost.exe",
+    "firefox.exe", "chrome.exe", "msedge.exe", "opera.exe", "opera_gx.exe", "brave.exe", "browser.exe", "vivaldi.exe",
+    "msedgewebview2.exe",
+    "vlc.exe", "mpc-hc.exe", "mpc-hc64.exe", "mpc-be.exe", "mpc-be64.exe", "mpv.exe", "potplayer.exe", "potplayer64.exe",
+    "potplayermini64.exe", "wmplayer.exe", "kmplayer.exe",
+    "discord.exe", "telegram.exe", "zoom.exe", "teams.exe", "skype.exe",
+    "steam.exe", "steamwebhelper.exe", "epicgameslauncher.exe", "galaxyclient.exe", "battle.net.exe", "launcher.exe",
+    "riotclientux.exe", "riotclientservices.exe", "eadesktop.exe", "ubisoftconnect.exe", "upc.exe",
+    "wallpaper32.exe", "wallpaper64.exe", "ui32.exe",
+    "obs64.exe", "obs32.exe", "medal.exe", "sharex.exe", "midnightclips.exe",
+    "powerpnt.exe", "winword.exe", "excel.exe", "code.exe", "devenv.exe", "notepad.exe",
+    "python.exe", "pythonw.exe",
+}
+_known_games = {"at": 0.0, "paths": set()}
+
+
+def known_games():
+    """Программы, которые сама Windows считает играми (список игровой панели). Полные пути, в нижнем регистре."""
+    if not WIN:
+        return set()
+    if time.time() - _known_games["at"] < 120:
+        return _known_games["paths"]
+    paths = set()
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"System\GameConfigStore\Children") as root:
+            for i in range(winreg.QueryInfoKey(root)[0]):
+                try:
+                    with winreg.OpenKey(root, winreg.EnumKey(root, i)) as child:
+                        paths.add(str(winreg.QueryValueEx(child, "MatchedExeFullPath")[0]).lower())
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    _known_games["at"], _known_games["paths"] = time.time(), paths
+    return paths
+
+
+def is_game(exe, path, fullscreen, include=(), exclude=()):
+    """Похоже ли окно на игру. exe — имя файла, path — полный путь (оба в нижнем регистре),
+    fullscreen — окно без рамки во весь монитор."""
+    if not exe or exe in exclude:
+        return False
+    if exe in include:
+        return True
+    if exe in NOT_GAMES or "\\launcher\\" in path or "\\windows\\system32\\" in path:
+        return False
+    if any(mark in path for mark in GAME_DIRS) or path in known_games():
+        return True
+    return bool(fullscreen)
+
+
+def detect_game(include=(), exclude=()):
+    """Игра в активном окне: (имя exe, окно) или None."""
+    if not WIN:
+        return None
+    try:
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.MonitorFromWindow.restype = wintypes.HANDLE
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd or not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return None
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == os.getpid():
+            return None
+        path = ""
+        handle = kernel32.OpenProcess(0x1000, False, pid.value)
+        if handle:
+            size = wintypes.DWORD(1024)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if kernel32.QueryFullProcessImageNameW(wintypes.HANDLE(handle), 0, buf, ctypes.byref(size)):
+                path = buf.value.lower()
+            kernel32.CloseHandle(wintypes.HANDLE(handle))
+        if not path:
+            return None
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        rect, info = wintypes.RECT(), MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        fullscreen = False
+        monitor = user32.MonitorFromWindow(hwnd, 2)
+        if monitor and user32.GetMonitorInfoW(wintypes.HANDLE(monitor), ctypes.byref(info)):
+            m = info.rcMonitor
+            covers = rect.left <= m.left and rect.top <= m.top and rect.right >= m.right and rect.bottom >= m.bottom
+            caption = (user32.GetWindowLongW(hwnd, -16) & 0x00C00000) == 0x00C00000   # обычное окно с заголовком
+            fullscreen = covers and not caption
+        exe = os.path.basename(path)
+        if is_game(exe, path, fullscreen, include, exclude):
+            return exe, int(hwnd)
+    except Exception:
+        pass
+    return None
 
 
 def foreground_app():

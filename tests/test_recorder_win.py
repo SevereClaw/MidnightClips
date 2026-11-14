@@ -127,9 +127,81 @@ def main(kind="own"):
             r.stop()
 
 
+GAME = r"""
+import tkinter as tk
+root = tk.Tk(); root.title("mc-game-test"); root.geometry("640x480+120+120"); root.configure(bg="#E4002B")
+root.after(120000, root.destroy); root.mainloop()
+"""
+
+
+def game_mode():
+    """Автозахват игры: игра появилась — пишем её окно, закрылась — снова весь монитор; буфер при этом цел."""
+    import ctypes
+    from midnightclips import recorder as rec, winutil
+    from midnightclips.config import Config
+
+    # правила «игра или нет» на настоящем активном окне
+    print("активное окно сейчас: %s" % (winutil.detect_game({"python.exe"}, set()),), flush=True)
+    assert winutil.detect_game(set(), {"python.exe"}) is None or winutil.detect_game(set(), {"python.exe"})[0] != "python.exe"
+
+    ffmpeg = os.path.join(ROOT, "ffmpeg.exe")
+    engine = rec.find_engine(ROOT)
+    tmp = tempfile.mkdtemp(prefix="mc_game_")
+    cfg = Config(os.path.join(tmp, "settings.json"))
+    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 30, "fps": 60, "capture": "own",
+                "capture_target": "game"})
+    events, game = [], {"proc": None}
+
+    def detect(include, exclude):   # «игра» — наше тестовое окно, пока оно открыто
+        hwnd = ctypes.windll.user32.FindWindowW(None, "mc-game-test")
+        return ("python.exe", int(hwnd)) if hwnd and game["proc"] is not None else None
+
+    def find(exe):
+        hwnd = ctypes.windll.user32.FindWindowW(None, "mc-game-test")
+        return int(hwnd) if hwnd else None
+
+    r = rec.Recorder(cfg, ffmpeg, os.path.join(tmp, "buf"), os.path.join(tmp, "ffmpeg.log"),
+                     lambda k, p: events.append((k, dict(p))), winutil.monitors, None, engine, find, detect)
+
+    def wait(cond, seconds, what):
+        t0 = time.time()
+        while not cond() and time.time() - t0 < seconds:
+            time.sleep(0.2)
+        assert cond(), "%s\n%s" % (what, open(os.path.join(tmp, "ffmpeg.log"), encoding="utf-8", errors="replace").read()[-2500:])
+        return time.time() - t0
+
+    try:
+        r.start()
+        wait(lambda: r.state == "on", 60, "захват не запустился")
+        assert not r.window_active
+        time.sleep(5)
+        game["proc"] = subprocess.Popen([sys.executable, "-c", GAME])
+        took = wait(lambda: r.window_active and r.state == "on", 30, "на окно игры не переключились")
+        print("игра появилась: переключение на её окно за %.1f c (%s)" % (took, r.snapshot().get("window_name")), flush=True)
+        time.sleep(6)
+        game["proc"].kill()
+        game["proc"] = None
+        took = wait(lambda: not r.window_active and r.state == "on", 30, "к монитору не вернулись")
+        print("игра закрыта: возврат к монитору за %.1f c" % took, flush=True)
+        time.sleep(5)
+        r.save_clip("Игра")
+        wait(lambda: [1 for k, _ in events if k in ("saved", "error")], 30, "клип не сохранился")
+        saved = [p for k, p in events if k == "saved"]
+        assert saved, events
+        total, info = frames(ffmpeg, saved[0]["path"])
+        print("клип через оба переключения: %d кадров (%.1f c) | %s" % (total, total / 60.0, info), flush=True)
+        assert total > 60 * 14, "буфер не пережил переключения: %d кадров" % total
+        print("АВТОЗАХВАТ ИГРЫ: OK", flush=True)
+    finally:
+        r.stop()
+        if game["proc"]:
+            game["proc"].kill()
+
+
 if __name__ == "__main__":
     if sys.platform != "win32":
         print("только для Windows — пропуск")
         sys.exit(0)
     main("own")
+    game_mode()
     main("enc")   # движок кодирует сам (на сервере — процессором: кодировщика видеокарты здесь нет)

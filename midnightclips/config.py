@@ -42,6 +42,8 @@ DEFAULTS = {
     "bitrate_mbps": 12,
     "monitor": 0,
     "capture_target": "monitor",  # что записывать: monitor — весь монитор, window — окно программы
+    "game_include": "",         # через запятую: exe, которые всегда считать играми
+    "game_exclude": "",         # ... и которые никогда
     "window_exe": "",           # имя exe программы, чьё окно записывать
     "encoder": "auto",          # auto / h264_nvenc / h264_amf / h264_qsv / libx264
     "capture": "auto",          # auto / dda / gdi

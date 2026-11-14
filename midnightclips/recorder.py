@@ -82,7 +82,7 @@ def safe_name(text, fallback="Клип"):
 
 class Recorder:
     def __init__(self, cfg, ffmpeg, work_dir, log_path, on_event, monitors=None, diag=None, engine=None,
-                 find_window=None):
+                 find_window=None, detect_game=None):
         self.cfg = cfg
         self.ffmpeg = ffmpeg
         self.work_dir = work_dir
@@ -118,6 +118,9 @@ class Recorder:
         self.in_memory = False            # где сейчас лежит буфер повтора
         self._soft = False                # мягкий перезапуск: буфер не стирать
         self.find_window = find_window or (lambda exe: None)   # окно программы по имени exe
+        self.detect_game = detect_game or (lambda include, exclude: None)   # игра в активном окне: (exe, окно)
+        self._game_exe = None             # игра, найденная автоматически, пока её окно открыто
+        self._game_skip = set()           # программы, чьё окно записать не получилось
         self.window_active = False        # сейчас записывается окно, а не весь монитор
         self._window_check = 0.0
         self.engine = engine              # путь к mccap.exe или None
@@ -187,6 +190,7 @@ class Recorder:
             "audio_note": self.audio_note,
             "buffer_in_memory": self.in_memory,
             "window_active": self.window_active,
+            "window_name": (self._game_exe if self.cfg["capture_target"] == "game" else self.cfg["window_exe"]) or "",
             "buffer_mb": self.buffer_megabytes(),
             "fps_real": self.fps_real,
             "screen_fps": self.screen_fps,
@@ -583,12 +587,29 @@ class Recorder:
         return None
 
     def _wanted_window(self):
-        if self.cfg["capture_target"] != "window" or not self.cfg["window_exe"] or self._window_failed:
+        if self._window_failed:
             return None
+        target = self.cfg["capture_target"]
         try:
-            return self.find_window(self.cfg["window_exe"])
+            if target == "window" and self.cfg["window_exe"]:
+                return self.find_window(self.cfg["window_exe"])
+            if target == "game":
+                if self._game_exe:
+                    hwnd = self.find_window(self._game_exe)
+                    if hwnd:
+                        return hwnd
+                    if self.window_active:
+                        return None            # игра свёрнута — остаёмся на её окне
+                    self._game_exe = None      # игра закрыта
+                names = lambda key: {n.strip().lower() for n in str(self.cfg[key] or "").replace(";", ",").split(",") if n.strip()}
+                found = self.detect_game(names("game_include"), names("game_exclude"))
+                if found and found[0] not in self._game_skip:
+                    self._game_exe = found[0]
+                    self._log("обнаружена игра: %s" % found[0])
+                    return found[1]
         except Exception:
-            return None
+            pass
+        return None
 
     def app_volumes(self):
         """{имя exe: громкость в процентах} из настроек."""
@@ -667,6 +688,9 @@ class Recorder:
                 self._avoid_enc = True
                 self._log("кодирование в движке здесь недоступно — кодирует ffmpeg")
             if hwnd and code in (6, 7):   # окно не снимается (закрылось или захват окон недоступен) — пишем монитор
+                if self._game_exe:        # найденную игру записать не вышло — больше на неё не переключаемся
+                    self._game_skip.add(self._game_exe)
+                    self._game_exe = None
                 if code == 7:
                     self._window_failed = True
                     self._log("захват окна здесь недоступен — записываю весь монитор")
