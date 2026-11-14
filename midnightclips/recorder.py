@@ -6,6 +6,7 @@ ffmpeg непрерывно пишет экран маленькими кусо�
 Обычная запись (старт/стоп) — те же кусочки, только без удаления.
 """
 import glob
+import json
 import math
 import os
 import shutil
@@ -526,6 +527,26 @@ class Recorder:
             self._drop(path)
         return None
 
+    def app_volumes(self):
+        """{имя exe: громкость в процентах} из настроек."""
+        try:
+            data = json.loads(self.cfg["app_volumes"] or "{}")
+            return {str(k).lower(): max(0, min(200, int(v))) for k, v in data.items() if str(k).strip()}
+        except (ValueError, TypeError, AttributeError):
+            return {}
+
+    def list_audio_apps(self):
+        """Программы, у которых сейчас есть звук (спрашиваем у движка)."""
+        if not self.engine:
+            return []
+        try:
+            out = subprocess.run([self.engine, "--list-audio-apps", "--parent", str(os.getpid())],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 timeout=8, creationflags=NO_WINDOW).stdout.decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return sorted({line[4:].strip() for line in out.splitlines() if line.startswith("APP ") and line[4:].strip()})
+
     def _start_engine(self, gpu=True, audio=False):
         """Запустить mccap и дождаться строки «READY ширина высота fps»."""
         fps = max(15, min(240, int(self.cfg["fps"])))
@@ -536,6 +557,8 @@ class Recorder:
             audio_pipe = pipe + "_a"
             args += ["--audio-pipe", audio_pipe, "--audio-system", "1" if self.cfg["audio"] else "0",
                      "--vol-system", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_system"]))) / 100.0)]
+            for exe, percent in sorted(self.app_volumes().items()):   # своя громкость программ
+                args += ["--app-vol", "%s=%.2f" % (exe, percent / 100.0)]
             if self.cfg["mic"] and self._degrade < 1:
                 args += ["--mic", self.cfg["mic"],
                          "--vol-mic", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0)]
@@ -597,6 +620,8 @@ class Recorder:
                         note = "Windows не даёт доступ к микрофону: Параметры → Конфиденциальность → Микрофон."
                     elif "mic unavailable" in text:
                         note = "Микрофон не найден — запись идёт без него."
+                    elif "per-app unavailable" in text:
+                        note = "Отдельная громкость программ здесь не работает (нужна Windows 10 2004 или новее) — пишу общий звук."
                     elif "system unavailable" in text:
                         note = "Звук компьютера недоступен — нет устройства вывода."
                     elif text.endswith(" opened"):

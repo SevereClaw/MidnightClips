@@ -30,6 +30,9 @@
 #include <audioclient.h>
 #include <initguid.h>
 #include <functiondiscoverykeys_devpkey.h>
+#include <audiopolicy.h>
+#include <audioclientactivationparams.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <atomic>
@@ -39,7 +42,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <deque>
+#include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -49,6 +55,7 @@
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "mmdevapi.lib")
 
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
@@ -87,6 +94,8 @@ struct Args {
     bool audioSystem = true;   // записывать звук компьютера
     float volSystem = 1.0f, volMic = 1.0f;
     std::wstring mic;          // название микрофона; "default" — основной; пусто — без микрофона
+    std::map<std::wstring, float> appVol;   // своя громкость программ: имя exe (строчными) -> громкость
+    bool listApps = false;     // вывести программы, у которых сейчас есть звук, и выйти
 };
 
 static const char* kShaders = R"(
@@ -708,7 +717,123 @@ static std::atomic<long long> g_audioSkip(0);
 static int g_fps = 60;
 static void onVideoDrop() { g_audioSkip += kRate / g_fps; }
 
+static std::string narrow(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string out((size_t)n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], n, nullptr, nullptr);
+    return out;
+}
+
+struct ProcInfo { DWORD parent = 0; std::wstring exe; };
+
+static std::map<DWORD, ProcInfo> snapshotProcesses() {
+    std::map<DWORD, ProcInfo> out;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return out;
+    PROCESSENTRY32W e{};
+    e.dwSize = sizeof(e);
+    if (Process32FirstW(snap, &e)) {
+        do {
+            ProcInfo p;
+            p.parent = e.th32ParentProcessID;
+            p.exe = e.szExeFile;
+            for (auto& c : p.exe) c = (wchar_t)towlower(c);
+            out[e.th32ProcessID] = p;
+        } while (Process32NextW(snap, &e));
+    }
+    CloseHandle(snap);
+    return out;
+}
+
+// Номера процессов, у которых есть звуковой сеанс на любом устройстве вывода.
+static std::set<DWORD> sessionPids() {
+    std::set<DWORD> out;
+    IMMDeviceEnumerator* en = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&en))) return out;
+    IMMDeviceCollection* all = nullptr;
+    if (SUCCEEDED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &all))) {
+        UINT count = 0;
+        all->GetCount(&count);
+        for (UINT i = 0; i < count; i++) {
+            IMMDevice* d = nullptr;
+            IAudioSessionManager2* mgr = nullptr;
+            IAudioSessionEnumerator* sessions = nullptr;
+            if (FAILED(all->Item(i, &d))) continue;
+            if (SUCCEEDED(d->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&mgr))
+                && SUCCEEDED(mgr->GetSessionEnumerator(&sessions))) {
+                int n = 0;
+                sessions->GetCount(&n);
+                for (int j = 0; j < n; j++) {
+                    IAudioSessionControl* c = nullptr;
+                    IAudioSessionControl2* c2 = nullptr;
+                    if (FAILED(sessions->GetSession(j, &c))) continue;
+                    if (SUCCEEDED(c->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&c2))) {
+                        DWORD pid = 0;
+                        AudioSessionState state = AudioSessionStateExpired;
+                        c->GetState(&state);
+                        if (c2->IsSystemSoundsSession() != S_OK && state != AudioSessionStateExpired
+                            && SUCCEEDED(c2->GetProcessId(&pid)) && pid != 0) out.insert(pid);
+                        c2->Release();
+                    }
+                    c->Release();
+                }
+            }
+            SafeRelease(sessions); SafeRelease(mgr); SafeRelease(d);
+        }
+        all->Release();
+    }
+    en->Release();
+    return out;
+}
+
+// «Корневые» процессы со звуком: у программы из нескольких процессов (браузер, Discord) берётся
+// самый верхний с тем же именем — захват идёт сразу по всему его дереву процессов.
+static std::set<DWORD> audioRoots(const std::map<DWORD, ProcInfo>& procs, DWORD skipA, DWORD skipB) {
+    std::set<DWORD> roots;
+    for (DWORD pid : sessionPids()) {
+        auto it = procs.find(pid);
+        if (it == procs.end() || pid == skipA || pid == skipB) continue;
+        DWORD r = pid;
+        for (int depth = 0; depth < 32; depth++) {
+            auto cur = procs.find(r);
+            if (cur == procs.end()) break;
+            auto par = procs.find(cur->second.parent);
+            if (par == procs.end() || par->first == r || par->second.exe != it->second.exe) break;
+            r = par->first;
+        }
+        if (r != skipA && r != skipB) roots.insert(r);
+    }
+    return roots;
+}
+
+class ActivateHandler : public IActivateAudioInterfaceCompletionHandler, public IAgileObject {
+    LONG ref_ = 1;
+public:
+    HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    virtual ~ActivateHandler() { CloseHandle(done); }
+    STDMETHODIMP QueryInterface(REFIID riid, void** out) override {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IActivateAudioInterfaceCompletionHandler))
+            *out = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+        else if (riid == __uuidof(IAgileObject)) *out = static_cast<IAgileObject*>(this);
+        else { *out = nullptr; return E_NOINTERFACE; }
+        AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return (ULONG)InterlockedIncrement(&ref_); }
+    STDMETHODIMP_(ULONG) Release() override {
+        const LONG n = InterlockedDecrement(&ref_);
+        if (n == 0) delete this;
+        return (ULONG)n;
+    }
+    STDMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation*) override { SetEvent(done); return S_OK; }
+};
+
 struct AudioSource {
+    DWORD pid = 0;             // не ноль — это звук одной программы (и всех её дочерних процессов)
+    std::wstring exe;
+    HANDLE evt = nullptr;
+    double discardUntil = 0;
     bool loopback = false;
     std::wstring name;         // для микрофона: название устройства или "default"
     float gain = 1.0f;
@@ -721,10 +846,72 @@ struct AudioSource {
     bool reported = false;
     long long captured = 0, reopened = 0;
     HRESULT openError = S_OK;
+    int failures = 0;
 
-    void close() { SafeRelease(cap); SafeRelease(client); SafeRelease(dev); }
+    void close() {
+        SafeRelease(cap); SafeRelease(client); SafeRelease(dev);
+        if (evt) { CloseHandle(evt); evt = nullptr; }
+    }
+
+    std::string label() const { return pid ? narrow(exe) : (loopback ? "system" : "mic"); }
+
+    // Общая часть: попросить у Windows сразу 48 кГц, стерео (пересчёт она делает сама) и запустить.
+    bool startClient(DWORD extraFlags, REFERENCE_TIME buffer) {
+        WAVEFORMATEXTENSIBLE wf{};
+        wf.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+        wf.Format.nChannels = 2;
+        wf.Format.nSamplesPerSec = kRate;
+        wf.Format.wBitsPerSample = 32;
+        wf.Format.nBlockAlign = 8;
+        wf.Format.nAvgBytesPerSec = kRate * 8;
+        wf.Format.cbSize = 22;
+        wf.Samples.wValidBitsPerSample = 32;
+        wf.dwChannelMask = 3;   // левый + правый
+        wf.SubFormat = kFloatFormat;
+        const DWORD flags = 0x80000000 /*AUTOCONVERTPCM*/ | 0x08000000 /*SRC_DEFAULT_QUALITY*/ | extraFlags;
+        HRESULT hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, buffer, 0, (WAVEFORMATEX*)&wf, nullptr);
+        if (SUCCEEDED(hr) && (extraFlags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK)) {
+            evt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            hr = client->SetEventHandle(evt);
+        }
+        if (SUCCEEDED(hr)) hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&cap);
+        if (SUCCEEDED(hr)) hr = client->Start();
+        if (FAILED(hr)) { openError = hr; close(); return false; }
+        return true;
+    }
+
+    // Звук одной программы: «петля по процессу» (Windows 10 2004 и новее).
+    bool openProcess() {
+        AUDIOCLIENT_ACTIVATION_PARAMS params{};
+        params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+        params.ProcessLoopbackParams.TargetProcessId = pid;
+        params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+        PROPVARIANT pv{};
+        pv.vt = VT_BLOB;
+        pv.blob.cbSize = sizeof(params);
+        pv.blob.pBlobData = (BYTE*)&params;
+        ActivateHandler* handler = new ActivateHandler();
+        IActivateAudioInterfaceAsyncOperation* op = nullptr;
+        HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient), &pv, handler, &op);
+        if (SUCCEEDED(hr)) {
+            hr = E_FAIL;
+            if (WaitForSingleObject(handler->done, 3000) == WAIT_OBJECT_0) {
+                HRESULT result = E_FAIL;
+                IUnknown* unk = nullptr;
+                if (SUCCEEDED(op->GetActivateResult(&result, &unk)) && SUCCEEDED(result) && unk)
+                    hr = unk->QueryInterface(__uuidof(IAudioClient), (void**)&client);
+                else hr = FAILED(result) ? result : E_FAIL;
+                SafeRelease(unk);
+            }
+        }
+        SafeRelease(op);
+        handler->Release();
+        if (FAILED(hr) || !client) { openError = hr; client = nullptr; return false; }
+        return startClient(AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0);
+    }
 
     bool open() {
+        if (pid) return openProcess();
         IMMDeviceEnumerator* en = nullptr;
         if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&en)))
             return false;
@@ -760,35 +947,10 @@ struct AudioSource {
         en->Release();
         if (FAILED(hr) || !dev) { dev = nullptr; return false; }
         if (FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client))) { close(); return false; }
-        WAVEFORMATEXTENSIBLE wf{};   // просим у Windows сразу 48 кГц, стерео — пересчёт она делает сама
-        wf.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-        wf.Format.nChannels = 2;
-        wf.Format.nSamplesPerSec = kRate;
-        wf.Format.wBitsPerSample = 32;
-        wf.Format.nBlockAlign = 8;
-        wf.Format.nAvgBytesPerSec = kRate * 8;
-        wf.Format.cbSize = 22;
-        wf.Samples.wValidBitsPerSample = 32;
-        wf.dwChannelMask = 3;   // левый + правый
-        wf.SubFormat = kFloatFormat;
-        const DWORD flags = 0x80000000 /*AUTOCONVERTPCM*/ | 0x08000000 /*SRC_DEFAULT_QUALITY*/
-                          | (loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0);
-        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2000000 /*200 мс*/, 0, (WAVEFORMATEX*)&wf, nullptr);
-        if (SUCCEEDED(hr)) hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&cap);
-        if (SUCCEEDED(hr)) hr = client->Start();
-        if (FAILED(hr)) { openError = hr; close(); return false; }
-        // Некоторые устройства (виртуальные кабели) при старте отдают остатки старого звука — выбрасываем их.
-        for (int pass = 0; pass < 5; pass++) {
-            Sleep(50);
-            UINT32 stale = 0;
-            while (SUCCEEDED(cap->GetNextPacketSize(&stale)) && stale > 0) {
-                BYTE* data = nullptr;
-                UINT32 frames = 0;
-                DWORD flags = 0;
-                if (FAILED(cap->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
-                cap->ReleaseBuffer(frames);
-            }
-        }
+        if (!startClient(loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0, 2000000 /*200 мс*/)) return false;
+        // Некоторые микрофоны (виртуальные кабели) при старте отдают остатки старого звука — первую
+        // четверть секунды выбрасываем.
+        if (!loopback) discardUntil = now() + 0.25;
         return true;
     }
 
@@ -799,14 +961,15 @@ struct AudioSource {
             nextOpen = now() + 1.0;
             openError = S_OK;
             if (!open()) {
+                failures++;
                 if (!reported) {   // 0x80070005 — Windows запретила доступ (настройки конфиденциальности)
-                    logf("info: audio %s unavailable 0x%08lx", loopback ? "system" : "mic", openError);
+                    logf("info: audio %s unavailable 0x%08lx", label().c_str(), openError);
                     reported = true;
                 }
                 return;
             }
             reopened++;
-            logf("info: audio %s opened", loopback ? "system" : "mic");
+            logf("info: audio %s opened", label().c_str());
             reported = false;
         }
         UINT32 packet = 0;
@@ -821,14 +984,14 @@ struct AudioSource {
             cap->ReleaseBuffer(frames);
         }
         if (FAILED(hr)) {   // устройство отключили или сменили — откроем заново
-            logf("info: audio %s lost 0x%08lx", loopback ? "system" : "mic", hr);
+            logf("info: audio %s lost 0x%08lx", label().c_str(), hr);
             close();
             nextOpen = now() + 0.5;
         }
     }
 
     void push(const float* data, UINT32 frames, bool silent) {
-        if (g_t0 == 0 || frames == 0) return;
+        if (g_t0 == 0 || frames == 0 || now() < discardUntil) return;
         const long long start = (long long)((now() - g_t0) * kRate) - frames;   // момент начала этой порции
         const long long have = (long long)(fifo.size() / 2);
         if (have == 0) frontPos = start;
@@ -866,6 +1029,75 @@ static std::vector<AudioSource*> g_sources;
 static volatile LONG g_audioStop = 0, g_audioFailed = 0;
 static volatile LONG64 g_audioWritten = 0;
 
+static std::mutex g_audioInfoLock;
+static std::string g_audioInfo;   // состояние источников звука — для статистики
+static std::map<std::wstring, float> g_appVol;   // своя громкость программ; пусто — обычный режим (общий звук)
+static float g_volSystem = 1.0f;
+static DWORD g_parentPid = 0;
+static bool g_perApp = false;
+
+static float gainOf(const std::wstring& exe) {
+    auto it = g_appVol.find(exe);
+    return it == g_appVol.end() ? g_volSystem : it->second;
+}
+
+// Режим «по программам»: держим по одному источнику на каждую программу со звуком.
+static void refreshApps() {
+    const std::map<DWORD, ProcInfo> procs = snapshotProcesses();
+    std::set<DWORD> roots = audioRoots(procs, GetCurrentProcessId(), g_parentPid);
+    // Захват идёт по дереву процессов. Если одна программа со звуком запущена из другой (игра из
+    // лаунчера), их нельзя снять обе, не записав игру дважды: при одинаковой громкости берём
+    // верхнюю (она включает нижнюю), при разной — нижнюю.
+    std::set<DWORD> drop;
+    for (DWORD r : roots) {
+        DWORD cur = r;
+        for (int depth = 0; depth < 32; depth++) {
+            auto it = procs.find(cur);
+            if (it == procs.end() || it->second.parent == cur) break;
+            cur = it->second.parent;
+            if (roots.count(cur)) {
+                const float g1 = gainOf(procs.at(cur).exe), g2 = gainOf(procs.at(r).exe);
+                drop.insert(g1 == g2 ? r : cur);
+            }
+        }
+    }
+    for (DWORD d : drop) roots.erase(d);
+    for (size_t i = 0; i < g_sources.size();) {   // программа закрылась или больше не нужна
+        AudioSource* s = g_sources[i];
+        if (s->pid && !roots.count(s->pid)) {
+            logf("info: audio %s closed", s->label().c_str());
+            s->close();
+            delete s;
+            g_sources.erase(g_sources.begin() + i);
+        } else i++;
+    }
+    for (DWORD r : roots) {
+        bool have = false;
+        for (AudioSource* s : g_sources) have = have || s->pid == r;
+        if (have) continue;
+        AudioSource* s = new AudioSource();
+        s->pid = r;
+        s->exe = procs.at(r).exe;
+        s->gain = gainOf(s->exe);
+        g_sources.push_back(s);
+    }
+    // Если «петля по процессу» здесь не работает совсем (старая Windows) — возвращаемся к общему звуку.
+    int failed = 0, opened = 0;
+    for (AudioSource* s : g_sources) if (s->pid) { if (s->cap) opened++; else if (s->failures >= 3) failed++; }
+    if (failed && !opened) {
+        logf("info: audio per-app unavailable, using the common mix");
+        for (size_t i = 0; i < g_sources.size();) {
+            if (g_sources[i]->pid) { g_sources[i]->close(); delete g_sources[i]; g_sources.erase(g_sources.begin() + i); }
+            else i++;
+        }
+        AudioSource* s = new AudioSource();
+        s->loopback = true;
+        s->gain = g_volSystem;
+        g_sources.push_back(s);
+        g_perApp = false;
+    }
+}
+
 static DWORD WINAPI audioThread(LPVOID) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -877,8 +1109,24 @@ static DWORD WINAPI audioThread(LPVOID) {
     long long outPos = 0;
     std::vector<float> mix;
     std::vector<int16_t> pcm;
+    double nextRefresh = 0, nextInfo = 0;
     while (!g_audioStop) {
+        if (g_perApp && now() >= nextRefresh) {
+            refreshApps();
+            nextRefresh = now() + 0.5;
+        }
         for (AudioSource* s : g_sources) s->poll();
+        if (now() >= nextInfo) {
+            std::string info;
+            for (AudioSource* s : g_sources) {
+                char part[160];
+                snprintf(part, sizeof(part), " %s=%s/%lld", s->label().c_str(), s->cap ? "on" : "off", s->captured);
+                info += part;
+            }
+            std::lock_guard<std::mutex> lock(g_audioInfoLock);
+            g_audioInfo = info;
+            nextInfo = now() + 1.0;
+        }
         if (g_t0 != 0) {
             outPos += g_audioSkip.exchange(0);   // из видео выбросили кадры — выбрасываем столько же звука
             const long long target = (long long)((now() - g_t0 - kAudioDelay) * kRate);
@@ -950,8 +1198,27 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--vol-system") a.volSystem = (float)_wtof(next());
         else if (k == L"--vol-mic") a.volMic = (float)_wtof(next());
         else if (k == L"--mic") a.mic = next();
+        else if (k == L"--list-audio-apps") a.listApps = true;
+        else if (k == L"--app-vol") {   // имя.exe=громкость
+            std::wstring spec = next();
+            const size_t eq = spec.rfind(L'=');
+            if (eq != std::wstring::npos && eq > 0) {
+                std::wstring exe = spec.substr(0, eq);
+                for (auto& c : exe) c = (wchar_t)towlower(c);
+                a.appVol[exe] = (float)_wtof(spec.substr(eq + 1).c_str());
+            }
+        }
     }
     a.fps = std::max(1, std::min(480, a.fps));
+    if (a.listApps) {   // какие программы сейчас могут звучать — для списка в настройках
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const std::map<DWORD, ProcInfo> procs = snapshotProcesses();
+        std::set<std::wstring> names;
+        for (DWORD r : audioRoots(procs, GetCurrentProcessId(), a.parent)) names.insert(procs.at(r).exe);
+        for (const std::wstring& n : names) printf("APP %s\n", narrow(n).c_str());
+        fflush(stdout);
+        return 0;
+    }
     if (a.parent) CreateThread(nullptr, 0, parentWatch, (LPVOID)(ULONG_PTR)a.parent, 0, nullptr);
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -1035,7 +1302,11 @@ int wmain(int argc, wchar_t** argv) {
     if (audio) {
         g_fps = a.fps;
         g_queue.onDrop = onVideoDrop;
-        if (a.audioSystem) { AudioSource* s = new AudioSource(); s->loopback = true; s->gain = a.volSystem; g_sources.push_back(s); }
+        g_appVol = a.appVol;
+        g_volSystem = a.volSystem;
+        g_parentPid = a.parent;
+        g_perApp = a.audioSystem && !a.appVol.empty();   // есть своя громкость программ — снимаем каждую отдельно
+        if (a.audioSystem && !g_perApp) { AudioSource* s = new AudioSource(); s->loopback = true; s->gain = a.volSystem; g_sources.push_back(s); }
         if (!a.mic.empty()) { AudioSource* s = new AudioSource(); s->name = a.mic; s->gain = a.volMic; g_sources.push_back(s); }
         audioWorker = CreateThread(nullptr, 0, audioThread, nullptr, 0, nullptr);
     }
@@ -1100,11 +1371,7 @@ int wmain(int argc, wchar_t** argv) {
             const LONG wmax = InterlockedExchange(&g_writeMaxMicros, 0);
             if (audio) {
                 std::string info;
-                for (AudioSource* s : g_sources) {
-                    char part[96];
-                    snprintf(part, sizeof(part), " %s=%s/%lld", s->loopback ? "system" : "mic", s->cap ? "on" : "off", s->captured);
-                    info += part;
-                }
+                { std::lock_guard<std::mutex> lock(g_audioInfoLock); info = g_audioInfo; }
                 logf("audio written=%.1fs%s", (double)g_audioWritten / kRate, info.c_str());
             }
             logf("stat out=%.1f new=%.1f late_max=%.2fms write_max=%.1fms queue_max=%u trimmed=%lld overflow=%lld lost=%u",

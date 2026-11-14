@@ -37,6 +37,7 @@ jobs:
           Invoke-WebRequest 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip' -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp -Force
           Copy-Item (Get-ChildItem ffmpeg_tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName ffmpeg.exe
+          Copy-Item (Get-ChildItem ffmpeg_tmp -Recurse -Filter ffplay.exe | Select-Object -First 1).FullName ffplay.exe
           Remove-Item ffmpeg.zip; Remove-Item ffmpeg_tmp -Recurse -Force
       - name: Проверить движок захвата
         run: python tests/test_engine_win.py

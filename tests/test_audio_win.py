@@ -156,6 +156,60 @@ def sync_check(beep):
     assert abs((flashes[1] - flashes[0]) - 3.0) < 0.08 and abs((beeps[1] - beeps[0]) - 3.0) < 0.08, "время в записи идёт неровно"
 
 
+def tone_level(samples, freq, start, seconds):
+    """Амплитуда тона заданной частоты на отрезке записи (алгоритм Гёрцеля)."""
+    part = samples[int(start * 48000):int((start + seconds) * 48000)]
+    w = 2 * math.pi * freq / 48000
+    coeff = 2 * math.cos(w)
+    s1 = s2 = 0.0
+    for x in part:
+        s0 = x + coeff * s1 - s2
+        s2, s1 = s1, s0
+    power = s1 * s1 + s2 * s2 - coeff * s1 * s2
+    return 2 * math.sqrt(max(power, 0.0)) / max(1, len(part))
+
+
+FFPLAY = os.path.join(ROOT, "ffplay.exe")
+
+
+def app_check(name, engine_args, want_a, want_b, tone_a, tone_b):
+    """Две программы звучат одновременно: ffplay (440 Гц) и PowerShell (1000 Гц).
+    В записи у каждой должна быть своя громкость."""
+    def side(t0):
+        time.sleep(0.3)
+        subprocess.Popen([FFPLAY, "-nodisp", "-autoexit", "-loglevel", "quiet", tone_a],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["powershell", "-NoProfile", "-Command",
+                          "(New-Object Media.SoundPlayer '%s').PlaySync()" % tone_b],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    path, err = record(name, 7, engine_args, side=side)
+    a = audio_of(path)
+    la, lb = tone_level(a, 440, 3.5, 1.5), tone_level(a, 1000, 3.5, 1.5)
+    print("%-34s ffplay (440 Гц): %5.0f, ждём %s; PowerShell (1000 Гц): %5.0f, ждём %s" % (
+        name, la, "%d–%d" % want_a, lb, "%d–%d" % want_b), flush=True)
+    opened = sorted(set(re.findall(r"info: audio (\S+) opened", err)))
+    print("      движок открыл: %s" % ", ".join(opened), flush=True)
+    assert want_a[0] <= la <= want_a[1] and want_b[0] <= lb <= want_b[1], "громкость программ не та\n" + err[-1500:]
+
+
+def app_checks():
+    tone_a = make_wav("tone440.wav", 6.0, 440)
+    tone_b = make_wav("tone1000.wav", 6.0, 1000)
+    full, quarter, half, none = (10000, 13500), (2400, 3600), (5000, 6900), (0, 250)
+    app_check("обе программы как есть", [], full, full, tone_a, tone_b)
+    app_check("ffplay 25%", ["--app-vol", "ffplay.exe=0.25"], quarter, full, tone_a, tone_b)
+    app_check("PowerShell выключен", ["--app-vol", "powershell.exe=0"], full, none, tone_a, tone_b)
+    app_check("остальные 50%, ffplay 100%", ["--vol-system", "0.5", "--app-vol", "ffplay.exe=1"], full, half, tone_a, tone_b)
+    # список программ со звуком — для настроек
+    p1 = subprocess.Popen([FFPLAY, "-nodisp", "-autoexit", "-loglevel", "quiet", tone_a], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1.5)
+    listed = subprocess.run([MCCAP, "--list-audio-apps"], capture_output=True, text=True, errors="replace").stdout
+    p1.kill()
+    names = [line[4:] for line in listed.splitlines() if line.startswith("APP ")]
+    print("программы со звуком:", names, flush=True)
+    assert "ffplay.exe" in names, listed
+
+
 if __name__ == "__main__":
     if sys.platform != "win32":
         print("только для Windows — пропуск")
@@ -174,4 +228,8 @@ if __name__ == "__main__":
     print("%-28s звук %.2f c, пик %d" % ("тишина", len(a) / 48000, max(abs(x) for x in a)), flush=True)
     assert abs(len(a) / 48000 - 4.0) < 0.25 and max(abs(x) for x in a) < 200
     sync_check(make_wav("beep.wav", 0.12, 1000, 14000))
+    if os.path.isfile(FFPLAY):
+        app_checks()
+    else:
+        print("ВНИМАНИЕ: громкость по программам не проверена — нет ffplay.exe")
     print("ЗВУК В ДВИЖКЕ: OK")

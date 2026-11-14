@@ -329,6 +329,8 @@ select { padding-right: 6px; max-width: 320px; }
 .row small { display: block; font-weight: 400; color: #555; font-size: 12.5px; margin-top: 2px; max-width: 420px; overflow-wrap: anywhere; }
 .row small.warn { color: var(--red); font-weight: 700; }
 .row-buttons { display: flex; gap: 10px; }
+.row-top { align-items: flex-start; }
+.app-row span:first-child { font-family: var(--display); font-style: italic; }
 input[type="number"] { width: 110px; }
 input[type="checkbox"] {
   appearance: none; width: 54px; height: 28px; flex: none; margin: 0;

@@ -320,7 +320,7 @@ class Api:
                 capture_changed.add("buffer_storage")   # буфер переезжает из памяти на диск или обратно
             if capture_changed:
                 # громкость в записи применяется без потери буфера и идущей записи
-                app.recorder.restart(soft=capture_changed <= {"rec_volume_system", "rec_volume_mic"})
+                app.recorder.restart(soft=capture_changed <= {"rec_volume_system", "rec_volume_mic", "app_volumes"})
         return self.get_settings()
 
     def get_options(self):
@@ -338,6 +338,9 @@ class Api:
     def toggle_record(self):
         threading.Thread(target=self._app.toggle_record, args=("",), daemon=True).start()
         return True
+
+    def list_audio_apps(self):
+        return self._app.recorder.list_audio_apps()
 
     def get_presets(self):
         return self._app.presets.all()

@@ -12,7 +12,7 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9",
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, app_volumes: '{"discord.exe": 30}', preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -39,6 +39,7 @@ const demoApi = {
   copy_clip: async () => true,
   pick_sound: async () => demo.settings,
   get_presets: async () => demo.presets,
+  list_audio_apps: async () => ["chrome.exe", "discord.exe", "p3r.exe", "spotify.exe"],
   save_preset: async (name) => { demo.presets.push({ name, builtin: false, height: demo.settings.height, fps: demo.settings.fps, bitrate_mbps: demo.settings.bitrate_mbps, buffer_seconds: demo.settings.buffer_seconds }); return ""; },
   delete_preset: async (name) => { demo.presets = demo.presets.filter((p) => p.name !== name); return true; },
   delete_clips: async (paths) => { demo.clips = demo.clips.filter((c) => !paths.includes(c.path)); return paths.length; },
@@ -605,6 +606,7 @@ function applySettings(s) {
   $("volSysText").textContent = recVol(s.rec_volume_system);
   $("volMicText").textContent = recVol(s.rec_volume_mic);
   renderSounds();
+  renderApps();
   renderPresets();
 }
 async function saveSetting(key, value) {
@@ -704,6 +706,58 @@ document.querySelectorAll("[data-cleanup]").forEach((el) => {
     }
     saveSetting(key, value);
   });
+});
+
+// Своя громкость программ в записи
+function appVolumes() {
+  try { return JSON.parse(settings.app_volumes || "{}") || {}; } catch (e) { return {}; }
+}
+function saveAppVolumes(obj) { return saveSetting("app_volumes", Object.keys(obj).length ? JSON.stringify(obj) : ""); }
+function renderApps() {
+  const box = $("appRows");
+  box.innerHTML = "";
+  const vols = appVolumes();
+  Object.keys(vols).sort().forEach((exe) => {
+    const row = document.createElement("div");
+    row.className = "row app-row";
+    const name = document.createElement("span");
+    name.textContent = exe;
+    const small = document.createElement("small");
+    const describe = (v) => v + "% — " + (v === 0 ? "в записи не слышно" : v === 100 ? "как есть" : v < 100 ? "в записи тише" : "в записи громче");
+    small.textContent = describe(vols[exe]);
+    name.appendChild(small);
+    const controls = document.createElement("span");
+    controls.className = "row-buttons";
+    const slider = document.createElement("input");
+    slider.type = "range"; slider.className = "vol"; slider.min = 0; slider.max = 200; slider.step = 5; slider.value = vols[exe];
+    slider.setAttribute("aria-label", "Громкость " + exe + " в записи");
+    slider.oninput = () => { small.textContent = describe(parseInt(slider.value, 10)); };
+    slider.onchange = () => { const v = appVolumes(); v[exe] = parseInt(slider.value, 10); saveAppVolumes(v); };
+    const del = document.createElement("button");
+    del.className = "mini"; del.textContent = "Убрать";
+    del.onclick = () => { const v = appVolumes(); delete v[exe]; saveAppVolumes(v); };
+    controls.append(slider, del);
+    row.append(name, controls);
+    box.appendChild(row);
+  });
+}
+async function fillAppList() {
+  const sel = $("selAddApp");
+  const have = appVolumes();
+  const apps = ((await api.list_audio_apps()) || []).filter((a) => !(a in have));
+  sel.innerHTML = "";
+  sel.add(new Option(apps.length ? "Добавить программу…" : "Сейчас ни одна программа не звучит", ""));
+  apps.forEach((a) => sel.add(new Option(a, a)));
+}
+$("selAddApp").addEventListener("mousedown", fillAppList);
+$("selAddApp").addEventListener("focus", fillAppList);
+$("selAddApp").addEventListener("change", () => {
+  const exe = $("selAddApp").value;
+  if (!exe) return;
+  const v = appVolumes();
+  v[exe] = 50;
+  saveAppVolumes(v);
+  $("selAddApp").value = "";
 });
 
 // Свои звуки сигналов
