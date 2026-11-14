@@ -27,7 +27,7 @@ def start_helper(size, fps, seconds):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     ready = helper.stdout.readline().decode().strip()
     assert ready.startswith("READY"), ready
-    _, w, h, f = ready.split()
+    w, h, f = ready.split()[1:4]
     return helper, pipe, int(w), int(h), int(f)
 
 
