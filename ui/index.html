@@ -65,9 +65,14 @@
       <header class="view-head"><h1>Настройки</h1></header>
 
       <div class="panel">
-        <h2>Готовые наборы</h2>
-        <p class="panel-note">Набор одним нажатием выставляет разрешение, кадры, качество и длину клипа. Дальше любую настройку можно поменять вручную.</p>
+        <h2>Наборы настроек</h2>
+        <p class="panel-note">Набор одним нажатием выставляет разрешение, кадры, качество и длину клипа. Дальше любую настройку можно поменять вручную и сохранить как свой набор.</p>
         <div class="presets" id="presets"></div>
+        <div class="row"><span id="presetClipText"></span>
+          <button class="mini" id="btnSavePreset">Сохранить текущие настройки как свой набор</button></div>
+        <label class="row"><span>Набор для записи
+          <small>Включается сам, когда начинаете запись, и выключается, когда останавливаете. При переключении буфер повтора начинается заново, а запись стартует на пару секунд позже</small></span>
+          <select data-key="preset_record" id="selPresetRecord"></select></label>
       </div>
 
       <div class="panel">

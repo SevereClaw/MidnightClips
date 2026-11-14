@@ -5,11 +5,14 @@
 // включается демо-режим с выдуманными клипами — удобно править оформление.
 
 const demo = {
+  presets: [["Слабый компьютер", 720, 30, 6, 30], ["Для Discord", 720, 60, 6, 30], ["Стандарт", 1080, 60, 12, 60], ["Высокое качество", 0, 60, 20, 60],
+    ["Плавность", 0, 120, 50, 60], ["Долгие моменты", 1080, 30, 12, 600]].map((p) => ({ name: p[0], builtin: true, height: p[1], fps: p[2], bitrate_mbps: p[3], buffer_seconds: p[4] }))
+    .concat([{ name: "Рейды", builtin: false, height: 1440, fps: 90, bitrate_mbps: 30, buffer_seconds: 120 }]),
   settings: {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9",
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -35,6 +38,9 @@ const demoApi = {
   delete_clip: async (p) => { demo.clips = demo.clips.filter((c) => c.path !== p); return true; },
   copy_clip: async () => true,
   pick_sound: async () => demo.settings,
+  get_presets: async () => demo.presets,
+  save_preset: async (name) => { demo.presets.push({ name, builtin: false, height: demo.settings.height, fps: demo.settings.fps, bitrate_mbps: demo.settings.bitrate_mbps, buffer_seconds: demo.settings.buffer_seconds }); return ""; },
+  delete_preset: async (name) => { demo.presets = demo.presets.filter((p) => p.name !== name); return true; },
   delete_clips: async (paths) => { demo.clips = demo.clips.filter((c) => !paths.includes(c.path)); return paths.length; },
   set_favorites: async (paths, v) => { demo.clips.forEach((c) => { if (paths.includes(c.path)) c.favorite = v; }); return paths.length; },
   set_tags: async (p, tags) => { demo.clips.find((c) => c.path === p).tags = tags; return true; },
@@ -188,6 +194,7 @@ window.onBackendEvent = (kind, data) => {
   if (kind === "state") applyState(data);
   else if (kind === "hotkeys") applyHotkeyStatus(data);
   else if (kind === "update") applyUpdate(data);
+  else if (kind === "settings") api.get_settings().then(applySettings);
   else if (kind === "job") showJob(data);
   else if (kind === "cleaned") {
     flash("Автоочистка: в корзину ушло клипов — " + data.count + " (" + fmtSize(data.bytes) + ")");
@@ -612,36 +619,70 @@ document.querySelectorAll("[data-key]").forEach((el) => {
   });
 });
 
-// Готовые наборы настроек
-const PRESETS = [
-  ["Слабый компьютер", "720p, 30 кадров, клип 30 секунд. Меньше всего нагрузки", { height: 720, fps: 30, bitrate_mbps: 6, buffer_seconds: 30 }],
-  ["Для Discord", "720p, 60 кадров, клип 30 секунд. Лёгкие файлы", { height: 720, fps: 60, bitrate_mbps: 6, buffer_seconds: 30 }],
-  ["Стандарт", "1080p, 60 кадров, клип 1 минута", { height: 1080, fps: 60, bitrate_mbps: 12, buffer_seconds: 60 }],
-  ["Высокое качество", "Как на экране, 60 кадров, клип 1 минута", { height: 0, fps: 60, bitrate_mbps: 20, buffer_seconds: 60 }],
-  ["Плавность", "Как на экране, 120 кадров. Нужны мощная видеокарта и быстрый монитор", { height: 0, fps: 120, bitrate_mbps: 50, buffer_seconds: 60 }],
-  ["Долгие моменты", "1080p, 30 кадров, клип 10 минут. Для длинных записей", { height: 1080, fps: 30, bitrate_mbps: 12, buffer_seconds: 600 }],
-];
+// Наборы настроек: готовые и свои
+let presets = [];
+function fmtLen(sec) { return sec >= 60 ? (sec / 60) + " мин" : sec + " с"; }
+function presetText(p) {
+  return (p.height ? p.height + "p" : "Как на экране") + ", " + p.fps + " кадров, " + p.bitrate_mbps + " Мбит/с, клип " + fmtLen(p.buffer_seconds);
+}
+const PRESET_KEYS = ["height", "fps", "bitrate_mbps", "buffer_seconds"];
+async function loadPresets() {
+  presets = (await api.get_presets()) || [];
+  renderPresets();
+}
 function renderPresets() {
   const box = $("presets");
   box.innerHTML = "";
-  PRESETS.forEach(([title, text, values]) => {
+  let activeName = "";
+  presets.forEach((p) => {
     const b = document.createElement("button");
-    const active = Object.keys(values).every((k) => settings[k] === values[k]);
-    b.className = "preset" + (active ? " is-active" : "");
+    const active = PRESET_KEYS.every((k) => settings[k] === p[k]);
+    if (active && !activeName) activeName = p.name;
+    b.className = "preset" + (active ? " is-active" : "") + (p.builtin ? "" : " is-custom");
     b.setAttribute("aria-pressed", active ? "true" : "false");
     const strong = document.createElement("strong");
-    strong.textContent = title;
+    strong.textContent = p.name;
     const span = document.createElement("span");
-    span.textContent = text;
+    span.textContent = presetText(p);
     b.append(strong, span);
     b.onclick = async () => {
+      const values = {};
+      PRESET_KEYS.forEach((k) => { values[k] = p[k]; });
       applySettings(await api.set_settings(values));
-      flash("Набор «" + title + "» включён");
+      flash("Набор «" + p.name + "» включён для клипов");
       applyState(await api.get_state());
     };
+    if (!p.builtin) {
+      const del = document.createElement("span");
+      del.className = "preset-del";
+      del.textContent = "×";
+      del.title = "Удалить набор";
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        if (!(await ask({ title: "Удалить набор?", text: "«" + p.name + "» — " + presetText(p), okLabel: "Удалить" }))) return;
+        await api.delete_preset(p.name);
+        applySettings(await api.get_settings());
+        loadPresets();
+      };
+      b.appendChild(del);
+    }
     box.appendChild(b);
   });
+  $("presetClipText").textContent = activeName ? "Для клипов сейчас включён набор «" + activeName + "»" : "Для клипов сейчас свои настройки, не из набора";
+  const sel = $("selPresetRecord");
+  sel.innerHTML = "";
+  sel.add(new Option("Те же настройки, что и для клипов", ""));
+  presets.forEach((p) => sel.add(new Option(p.name, p.name)));
+  sel.value = presets.some((p) => p.name === settings.preset_record) ? settings.preset_record : "";
 }
+$("btnSavePreset").onclick = async () => {
+  const name = await ask({ title: "Свой набор", text: "Сохранятся текущие разрешение, кадры, качество и длина клипа. Как назвать набор?", input: "", okLabel: "Сохранить" });
+  if (!name) return;
+  const error = await api.save_preset(name);
+  if (error) { flash(error, true); return; }
+  flash("Набор «" + name + "» сохранён");
+  loadPresets();
+};
 
 // Автоочистка: перед включением показываем, сколько клипов уйдёт прямо сейчас.
 document.querySelectorAll("[data-cleanup]").forEach((el) => {
@@ -795,6 +836,7 @@ async function init() {
   applySettings(await api.get_settings());
   applyState(await api.get_state());
   loadClips();
+  loadPresets();
   const options = await api.get_options();
   const mon = $("selMonitor");
   mon.innerHTML = "";

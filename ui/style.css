@@ -313,6 +313,10 @@ select { padding-right: 6px; max-width: 320px; }
 .preset strong { display: block; font-family: var(--display); font-style: italic; font-size: 17px; }
 .preset span { display: block; font-size: 12.5px; color: #444; margin-top: 3px; line-height: 1.35; }
 .preset:hover { background: var(--yellow); }
+.preset { position: relative; }
+.preset.is-custom { border-style: dashed; }
+.preset-del { position: absolute; top: 2px; right: 6px; font-size: 20px; font-weight: 900; line-height: 1; padding: 2px 5px; }
+.preset-del:hover { background: var(--red); color: var(--white); }
 .preset.is-active { background: var(--black); color: var(--yellow); box-shadow: 5px 5px 0 var(--orange); }
 .preset.is-active span { color: var(--white); }
 .status-sub.is-warn { color: var(--orange); font-weight: 700; }

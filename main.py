@@ -11,6 +11,7 @@ from midnightclips.hotkeys import Hotkeys
 from midnightclips.library import Library
 from midnightclips.recorder import Recorder, find_engine, find_ffmpeg
 from midnightclips.media import MediaServer
+from midnightclips.presets import KEYS as PRESET_KEYS, VIDEO_KEYS, Presets
 from midnightclips.sounds import EVENTS as SOUND_EVENTS, SoundBank
 from midnightclips.toast import Toast
 from midnightclips.tools import ClipTools
@@ -28,6 +29,13 @@ class App:
                 os.remove(self.log_path)
         except OSError:
             pass
+        self.presets = Presets(data_dir())
+        self._record_switch = threading.Lock()
+        if self.cfg["clip_restore"]:   # прошлый раз программу закрыли посреди записи — вернуть настройки клипов
+            try:
+                self.cfg.update(dict(json.loads(self.cfg["clip_restore"]), clip_restore=""))
+            except (ValueError, TypeError):
+                self.cfg.update({"clip_restore": ""})
         self.window = None
         self.tray = None
         self.quitting = False
@@ -167,8 +175,51 @@ class App:
     def save_clip(self):
         self.recorder.save_clip(winutil.foreground_app())
 
-    def toggle_record(self):
-        self.recorder.toggle_recording(winutil.foreground_app())
+    def toggle_record(self, title=None):
+        """Начать или остановить запись. Если для записи выбран свой набор настроек,
+        он включается на время записи, а после неё возвращаются настройки клипов."""
+        if title is None:
+            title = winutil.foreground_app()
+        rec = self.recorder
+        if rec.recording_since is not None:
+            rec.stop_recording()
+            return
+        preset = self.presets.get(self.cfg["preset_record"]) if self.cfg["preset_record"] else None
+        wanted = {k: preset[k] for k in VIDEO_KEYS} if preset else {}
+        if not wanted or all(self.cfg[k] == v for k, v in wanted.items()) or not self.ffmpeg:
+            rec.start_recording(title)
+            return
+        if not self._record_switch.acquire(False):
+            return   # переключение уже идёт
+        try:
+            current = {k: self.cfg[k] for k in VIDEO_KEYS}
+            self.cfg.update(dict(wanted, clip_restore=json.dumps(current)))
+            self.push("settings", {})
+            if self.cfg["toast"]:
+                self.toast.show("Включаю набор «%s»" % preset["name"], "Запись начнётся через пару секунд")
+            session = rec._session
+            rec.restart()
+            deadline = time.time() + 25
+            while time.time() < deadline and not (rec.state == "on" and rec._session != session):
+                time.sleep(0.1)
+            if rec.state != "on" or not rec.start_recording(title):
+                self.restore_clip_settings()   # не вышло — вернуть как было
+        finally:
+            self._record_switch.release()
+
+    def restore_clip_settings(self):
+        """После записи со своим набором вернуть настройки клипов."""
+        saved = self.cfg["clip_restore"]
+        if not saved:
+            return
+        try:
+            values = json.loads(saved)
+        except (ValueError, TypeError):
+            values = {}
+        changed = self.cfg.update(dict(values, clip_restore=""))
+        self.push("settings", {})
+        if changed & set(VIDEO_KEYS) and self.ffmpeg:
+            self.recorder.restart()
 
     def sound(self, name):
         self.sounds.play(name)
@@ -205,6 +256,8 @@ class App:
                 title = "Клип сохранён" if payload.get("kind") == "clip" else "Запись сохранена"
                 self.toast.show(title, os.path.basename(payload.get("path", "")))
         elif kind == "recording":
+            if not payload.get("on") and self.cfg["clip_restore"]:
+                threading.Thread(target=self.restore_clip_settings, daemon=True).start()
             self.sound("rec_on" if payload.get("on") else "rec_off")
             if payload.get("on") and self.cfg["toast"]:
                 self.toast.show("Запись идёт", "Остановить: " + (self.cfg["hotkey_record"] or "кнопкой в окне"))
@@ -283,8 +336,27 @@ class Api:
         return True
 
     def toggle_record(self):
-        self._app.recorder.toggle_recording("")
+        threading.Thread(target=self._app.toggle_record, args=("",), daemon=True).start()
         return True
+
+    def get_presets(self):
+        return self._app.presets.all()
+
+    def save_preset(self, name):
+        """Сохранить текущие настройки как свой набор. Возвращает текст ошибки или пустую строку."""
+        values = {k: self._app.cfg[k] for k in PRESET_KEYS}
+        if self._app.cfg["clip_restore"]:   # идёт запись со своим набором — берём настройки клипов
+            try:
+                values.update(json.loads(self._app.cfg["clip_restore"]))
+            except (ValueError, TypeError):
+                pass
+        return self._app.presets.save(name or "", values)
+
+    def delete_preset(self, name):
+        ok = self._app.presets.delete(name)
+        if ok and self._app.cfg["preset_record"] == name:
+            self._app.cfg.update({"preset_record": ""})
+        return ok
 
     def check_update(self):
         threading.Thread(target=self._app.updater.check, daemon=True).start()
