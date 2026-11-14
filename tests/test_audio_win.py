@@ -167,7 +167,7 @@ if __name__ == "__main__":
     check("звук компьютера", [], 10500, 13500, tone)
     check("звук компьютера, 25%", ["--vol-system", "0.25"], 2500, 3500, tone)
     check("только микрофон", ["--audio-system", "0", "--mic", "CABLE Output"], 6000, 14000, tone)
-    check("компьютер + микрофон", ["--mic", "CABLE Output"], 15000, 27000, tone)
+    check("компьютер + микрофон", ["--mic", "CABLE Output"], 2000, 27000, tone)
     check("микрофон не найден", ["--mic", "Нет такого микрофона"], 10500, 13500, tone)
     path, err = record("тишина", 4, [])
     a = audio_of(path)

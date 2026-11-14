@@ -778,14 +778,16 @@ struct AudioSource {
         if (SUCCEEDED(hr)) hr = client->Start();
         if (FAILED(hr)) { openError = hr; close(); return false; }
         // Некоторые устройства (виртуальные кабели) при старте отдают остатки старого звука — выбрасываем их.
-        Sleep(60);
-        UINT32 stale = 0;
-        while (SUCCEEDED(cap->GetNextPacketSize(&stale)) && stale > 0) {
-            BYTE* data = nullptr;
-            UINT32 frames = 0;
-            DWORD flags = 0;
-            if (FAILED(cap->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
-            cap->ReleaseBuffer(frames);
+        for (int pass = 0; pass < 5; pass++) {
+            Sleep(50);
+            UINT32 stale = 0;
+            while (SUCCEEDED(cap->GetNextPacketSize(&stale)) && stale > 0) {
+                BYTE* data = nullptr;
+                UINT32 frames = 0;
+                DWORD flags = 0;
+                if (FAILED(cap->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
+                cap->ReleaseBuffer(frames);
+            }
         }
         return true;
     }
