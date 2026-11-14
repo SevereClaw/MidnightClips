@@ -1651,6 +1651,22 @@ static bool writeAll(HANDLE h, const uint8_t* data, size_t size) {
     return true;
 }
 
+// Закрыть канал, дав читателю забрать остаток, — но не ждать вечно, если тот занят другим каналом.
+static DWORD WINAPI flushThread(LPVOID h) { FlushFileBuffers((HANDLE)h); return 0; }
+static void closePipe(HANDLE h) {
+    HANDLE t = CreateThread(nullptr, 0, flushThread, h, 0, nullptr);
+    bool done = true;
+    if (t) {
+        done = WaitForSingleObject(t, 3000) == WAIT_OBJECT_0;
+        if (!done) {
+            CancelSynchronousIo(t);
+            done = WaitForSingleObject(t, 500) == WAIT_OBJECT_0;
+        }
+        CloseHandle(t);
+    }
+    if (done) CloseHandle(h);   // иначе канал закроется при выходе из программы
+}
+
 int wmain(int argc, wchar_t** argv) {
     Args a;
     for (int i = 1; i < argc; i++) {
@@ -1921,13 +1937,13 @@ int wmain(int argc, wchar_t** argv) {
         while (now() < until && !g_audioFailed) Sleep(5);
         InterlockedExchange(&g_audioStop, 1);
         WaitForSingleObject(audioWorker, 2000);
-        if (g_audioPipe != INVALID_HANDLE_VALUE) { FlushFileBuffers(g_audioPipe); CloseHandle(g_audioPipe); }
     }
     logf("done frames=%lld elapsed=%.3f late_max=%.2fms late_over_2ms=%lld write_max=%.1fms highres_timer=%d trimmed=%lld overflow=%lld",
          (long long)g_written, now() - t0, totalMaxLate * 1000.0, lateOver2, g_writeMaxTotalMicros / 1000.0,
          timer.highRes ? 1 : 0, trimmed, g_queue.overflow);
-    FlushFileBuffers(pipe);
-    CloseHandle(pipe);
+    // Сначала закрываем видео: читатель дочитывает его до конца, после этого спокойно добирает звук.
+    closePipe(pipe);
+    if (g_audioPipe != INVALID_HANDLE_VALUE) closePipe(g_audioPipe);
     cap.close();
     return code;
 }
