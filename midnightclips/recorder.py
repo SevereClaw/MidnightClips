@@ -439,7 +439,10 @@ class Recorder:
         prefix = "s%04d_" % self._session
         source = None
         self.audio_note = ""
-        if self.cfg["audio"] and self._degrade < 2:
+        # Свой движок снимает звук сам, на тех же часах, что и кадры.
+        engine_audio = (capture in ("own", "owncpu") and self._degrade < 2
+                        and bool(self.cfg["audio"] or self.cfg["mic"]))
+        if self.cfg["audio"] and self._degrade < 2 and not engine_audio:
             source = audio_mod.FakeSource() if TEST else audio_mod.LoopbackSource()
             try:
                 source.open()
@@ -449,7 +452,7 @@ class Recorder:
                 source = None
         helper, own = None, None
         if capture in ("own", "owncpu"):
-            helper, own = self._start_engine(gpu=capture == "own")
+            helper, own = self._start_engine(gpu=capture == "own", audio=engine_audio)
             if helper is None:
                 if source:
                     source.close()
@@ -503,7 +506,7 @@ class Recorder:
             files = self._segments(prefix)
             if files and max(self._seg_size(f) for f in files) > 0:
                 self._proc = proc
-                self._format_changed((encoder, own[1:] if own else None, self.fps_target,
+                self._format_changed((encoder, own[1:4] if own else None, self.fps_target,
                                       int(self.cfg["height"])), prefix)
                 return proc, source, pump, time.time()
             if helper is not None and helper.poll() is not None:
@@ -523,11 +526,19 @@ class Recorder:
             self._drop(path)
         return None
 
-    def _start_engine(self, gpu=True):
+    def _start_engine(self, gpu=True, audio=False):
         """Запустить mccap и дождаться строки «READY ширина высота fps»."""
         fps = max(15, min(240, int(self.cfg["fps"])))
         pipe = r"\\.\pipe\mccap_%d_%d" % (os.getpid(), self._session)
         args = [self.engine, "--pipe", pipe, "--fps", str(fps), "--parent", str(os.getpid())]
+        audio_pipe = ""
+        if audio:
+            audio_pipe = pipe + "_a"
+            args += ["--audio-pipe", audio_pipe, "--audio-system", "1" if self.cfg["audio"] else "0",
+                     "--vol-system", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_system"]))) / 100.0)]
+            if self.cfg["mic"] and self._degrade < 1:
+                args += ["--mic", self.cfg["mic"],
+                         "--vol-mic", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0)]
         if not gpu:
             args += ["--cpu"]
         elif int(self.cfg["height"]) > 0:
@@ -556,7 +567,7 @@ class Recorder:
             self._log("движок захвата не готов (ответ: %r, код %s)" % (text, helper.poll()))
             self._kill(helper)
             return None, None
-        return helper, (pipe, int(parts[1]), int(parts[2]), parts[4] if len(parts) > 4 else "bgra")
+        return helper, (pipe, int(parts[1]), int(parts[2]), parts[4] if len(parts) > 4 else "bgra", audio_pipe)
 
     def _watch_engine(self, helper, fps):
         """Сообщения движка — в журнал; из статистики берём реальную частоту обновления экрана."""
@@ -650,14 +661,22 @@ class Recorder:
 
         # --- входы звука
         audio_inputs = []
-        if source:
+        engine_audio = bool(own and len(own) > 4 and own[4])
+        if engine_audio:   # звук уже сведён движком: 48 кГц, стерео, громкости применены
+            cmd += ["-f", "s16le", "-ar", "48000", "-ac", "2"]
+            offset = int(cfg["audio_offset_ms"])
+            if offset:
+                cmd += ["-itsoffset", "%.3f" % (offset / 1000.0)]
+            cmd += ["-i", own[4]]
+            audio_inputs.append(1)
+        elif source:
             cmd += ["-f", "s16le", "-ar", str(source.rate), "-ac", str(source.channels)]
             offset = int(cfg["audio_offset_ms"])
             if offset:
                 cmd += ["-itsoffset", "%.3f" % (offset / 1000.0)]
             cmd += ["-i", "pipe:0"]
             audio_inputs.append(1)
-        if cfg["mic"] and not TEST and self._degrade < 1:
+        if cfg["mic"] and not TEST and self._degrade < 1 and not engine_audio:
             # Маленький буфер: иначе микрофон приходит крупными порциями, и ffmpeg в такт ему
             # читает порциями и видео.
             cmd += ["-f", "dshow", "-audio_buffer_size", "30", "-i", "audio=" + cfg["mic"]]
@@ -699,7 +718,7 @@ class Recorder:
                     "-map", "0:v", "-map", "[a]"]
         elif audio_inputs:
             cmd += ["-map", "0:v", "-map", "1:a"]
-            volume = vol_sys if source else vol_mic
+            volume = 1.0 if engine_audio else (vol_sys if source else vol_mic)
             if abs(volume - 1.0) > 0.001:
                 cmd += ["-af", "volume=%.2f" % volume]
         else:

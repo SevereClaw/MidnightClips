@@ -24,8 +24,16 @@
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #include <mmsystem.h>
+#include <objbase.h>
+#include <propidl.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <initguid.h>
+#include <functiondiscoverykeys_devpkey.h>
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -40,6 +48,7 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "d3dcompiler.lib")
+#pragma comment(lib, "ole32.lib")
 
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
@@ -74,6 +83,10 @@ struct Args {
     bool cpu = false;    // не обрабатывать кадр на видеокарте
     std::wstring dump;   // --probe: сохранить один готовый кадр в файл (для проверок)
     std::wstring fakeCursor;   // проверка рисования курсора: mono / color / masked
+    std::wstring audioPipe;    // канал для звука (PCM 48 кГц, стерео, 16 бит); пусто — звук не нужен
+    bool audioSystem = true;   // записывать звук компьютера
+    float volSystem = 1.0f, volMic = 1.0f;
+    std::wstring mic;          // название микрофона; "default" — основной; пусто — без микрофона
 };
 
 static const char* kShaders = R"(
@@ -605,6 +618,7 @@ struct FrameQueue {
     size_t frameSize = 0, capacity = 8;
     bool stop = false;
     long long overflow = 0;
+    void (*onDrop)() = nullptr;
 
     FrameQueue() { InitializeCriticalSection(&cs); InitializeConditionVariable(&cv); }
 
@@ -622,7 +636,11 @@ struct FrameQueue {
     }
     void push(const FramePtr& f) {
         EnterCriticalSection(&cs);
-        if (q.size() >= capacity) { q.pop_front(); overflow++; }   // читатель совсем встал — старое не копим
+        if (q.size() >= capacity) {   // читатель совсем встал — старое не копим
+            q.pop_front();
+            overflow++;
+            if (onDrop) onDrop();     // столько же выбросить из звука, чтобы он не разошёлся с картинкой
+        }
         q.push_back(f);
         LeaveCriticalSection(&cs);
         WakeConditionVariable(&cv);
@@ -676,6 +694,201 @@ static DWORD WINAPI writerThread(LPVOID) {
     return 0;
 }
 
+// ------------------------------------------------------------------ звук
+//
+// Звук компьютера и микрофон снимаются здесь же и привязаны к тем же часам, что и кадры:
+// отсчёт номер N в звуке — это ровно момент t0 + N/48000, как кадр K — момент t0 + K/fps.
+// Поэтому звук и картинка в клипе совпадают независимо от того, как их читает ffmpeg.
+
+static const int kRate = 48000;
+static const double kAudioDelay = 0.08;   // звук отдаём с запасом 80 мс: за это время он точно успевает прийти
+static const GUID kFloatFormat = { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static double g_t0 = 0;                    // начало общего отсчёта (0 — ещё не начался)
+static std::atomic<long long> g_audioSkip(0);
+static int g_fps = 60;
+static void onVideoDrop() { g_audioSkip += kRate / g_fps; }
+
+struct AudioSource {
+    bool loopback = false;
+    std::wstring name;         // для микрофона: название устройства или "default"
+    float gain = 1.0f;
+    IMMDevice* dev = nullptr;
+    IAudioClient* client = nullptr;
+    IAudioCaptureClient* cap = nullptr;
+    std::deque<float> fifo;    // стерео, по два числа на отсчёт
+    long long frontPos = 0;    // какому моменту (в отсчётах от t0) соответствует начало очереди
+    double nextOpen = 0;
+    bool reported = false;
+    long long captured = 0, reopened = 0;
+
+    void close() { SafeRelease(cap); SafeRelease(client); SafeRelease(dev); }
+
+    bool open() {
+        IMMDeviceEnumerator* en = nullptr;
+        if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&en)))
+            return false;
+        HRESULT hr = E_FAIL;
+        if (loopback) hr = en->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
+        else if (name.empty() || name == L"default") hr = en->GetDefaultAudioEndpoint(eCapture, eConsole, &dev);
+        else {
+            IMMDeviceCollection* all = nullptr;
+            if (SUCCEEDED(en->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &all))) {
+                UINT count = 0;
+                all->GetCount(&count);
+                for (UINT i = 0; i < count && !dev; i++) {
+                    IMMDevice* d = nullptr;
+                    IPropertyStore* props = nullptr;
+                    if (FAILED(all->Item(i, &d))) continue;
+                    if (SUCCEEDED(d->OpenPropertyStore(STGM_READ, &props))) {
+                        PROPVARIANT v;
+                        PropVariantInit(&v);
+                        if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &v)) && v.vt == VT_LPWSTR) {
+                            const std::wstring friendly = v.pwszVal;   // названия могут быть обрезаны — сравниваем по началу
+                            const size_t n = std::min(friendly.size(), name.size());
+                            if (n >= 4 && friendly.compare(0, n, name, 0, n) == 0) { dev = d; d = nullptr; }
+                        }
+                        PropVariantClear(&v);
+                        props->Release();
+                    }
+                    SafeRelease(d);
+                }
+                all->Release();
+            }
+            hr = dev ? S_OK : E_FAIL;
+        }
+        en->Release();
+        if (FAILED(hr) || !dev) { dev = nullptr; return false; }
+        if (FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client))) { close(); return false; }
+        WAVEFORMATEXTENSIBLE wf{};   // просим у Windows сразу 48 кГц, стерео — пересчёт она делает сама
+        wf.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+        wf.Format.nChannels = 2;
+        wf.Format.nSamplesPerSec = kRate;
+        wf.Format.wBitsPerSample = 32;
+        wf.Format.nBlockAlign = 8;
+        wf.Format.nAvgBytesPerSec = kRate * 8;
+        wf.Format.cbSize = 22;
+        wf.Samples.wValidBitsPerSample = 32;
+        wf.dwChannelMask = 3;   // левый + правый
+        wf.SubFormat = kFloatFormat;
+        const DWORD flags = 0x80000000 /*AUTOCONVERTPCM*/ | 0x08000000 /*SRC_DEFAULT_QUALITY*/
+                          | (loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0);
+        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2000000 /*200 мс*/, 0, (WAVEFORMATEX*)&wf, nullptr);
+        if (SUCCEEDED(hr)) hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&cap);
+        if (SUCCEEDED(hr)) hr = client->Start();
+        if (FAILED(hr)) { logf("info: audio %s: open failed 0x%08lx", loopback ? "system" : "mic", hr); close(); return false; }
+        return true;
+    }
+
+    // Забрать всё, что пришло с устройства, в очередь.
+    void poll() {
+        if (!cap) {
+            if (now() < nextOpen) return;
+            nextOpen = now() + 1.0;
+            if (!open()) {
+                if (!reported) { logf("info: audio %s unavailable", loopback ? "system" : "mic"); reported = true; }
+                return;
+            }
+            reopened++;
+            logf("info: audio %s opened", loopback ? "system" : "mic");
+            reported = false;
+        }
+        UINT32 packet = 0;
+        HRESULT hr;
+        while (SUCCEEDED(hr = cap->GetNextPacketSize(&packet)) && packet > 0) {
+            BYTE* data = nullptr;
+            UINT32 frames = 0;
+            DWORD flags = 0;
+            hr = cap->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+            if (FAILED(hr)) break;
+            push((const float*)data, frames, (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+            cap->ReleaseBuffer(frames);
+        }
+        if (FAILED(hr)) {   // устройство отключили или сменили — откроем заново
+            logf("info: audio %s lost 0x%08lx", loopback ? "system" : "mic", hr);
+            close();
+            nextOpen = now() + 0.5;
+        }
+    }
+
+    void push(const float* data, UINT32 frames, bool silent) {
+        if (g_t0 == 0 || frames == 0) return;
+        const long long start = (long long)((now() - g_t0) * kRate) - frames;   // момент начала этой порции
+        const long long have = (long long)(fifo.size() / 2);
+        if (have == 0) frontPos = start;
+        else {
+            const long long gap = start - (frontPos + have);
+            if (gap > kRate * 6 / 100) fifo.insert(fifo.end(), (size_t)std::min<long long>(gap, kRate) * 2, 0.0f);   // устройство молчало
+        }
+        if (silent) fifo.insert(fifo.end(), (size_t)frames * 2, 0.0f);
+        else fifo.insert(fifo.end(), data, data + (size_t)frames * 2);
+        captured += frames;
+        const long long extra = (long long)(fifo.size() / 2) - kRate * 2;   // больше двух секунд не копим
+        if (extra > 0) { fifo.erase(fifo.begin(), fifo.begin() + (size_t)extra * 2); frontPos += extra; }
+    }
+
+    // Подмешать в out отсчёты [pos, pos + count).
+    void mixInto(std::vector<float>& out, long long pos, long long count) {
+        long long have = (long long)(fifo.size() / 2);
+        if (have && frontPos < pos) {   // устаревшее
+            const long long drop = std::min(have, pos - frontPos);
+            fifo.erase(fifo.begin(), fifo.begin() + (size_t)drop * 2);
+            frontPos += drop;
+            have -= drop;
+        }
+        if (!have || frontPos >= pos + count) return;
+        const long long offset = frontPos - pos;
+        const long long n = std::min(have, count - offset);
+        for (long long i = 0; i < n * 2; i++) out[(size_t)(offset * 2 + i)] += fifo[(size_t)i] * gain;
+        fifo.erase(fifo.begin(), fifo.begin() + (size_t)n * 2);
+        frontPos += n;
+    }
+};
+
+static HANDLE g_audioPipe = INVALID_HANDLE_VALUE;
+static std::vector<AudioSource*> g_sources;
+static volatile LONG g_audioStop = 0, g_audioFailed = 0;
+static volatile LONG64 g_audioWritten = 0;
+
+static DWORD WINAPI audioThread(LPVOID) {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    if (!ConnectNamedPipe(g_audioPipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
+        logf("error: audio pipe %lu", GetLastError());
+        InterlockedExchange(&g_audioFailed, 1);
+        return 0;
+    }
+    long long outPos = 0;
+    std::vector<float> mix;
+    std::vector<int16_t> pcm;
+    while (!g_audioStop) {
+        for (AudioSource* s : g_sources) s->poll();
+        if (g_t0 != 0) {
+            outPos += g_audioSkip.exchange(0);   // из видео выбросили кадры — выбрасываем столько же звука
+            const long long target = (long long)((now() - g_t0 - kAudioDelay) * kRate);
+            const long long due = std::min<long long>(target - outPos, kRate);
+            if (due > 0) {
+                mix.assign((size_t)due * 2, 0.0f);
+                for (AudioSource* s : g_sources) s->mixInto(mix, outPos, due);
+                pcm.resize((size_t)due * 2);
+                for (size_t i = 0; i < pcm.size(); i++) {
+                    float v = mix[i] * 32767.0f;
+                    pcm[i] = (int16_t)(v > 32767.0f ? 32767.0f : (v < -32768.0f ? -32768.0f : v));
+                }
+                if (!writeAll(g_audioPipe, (const uint8_t*)pcm.data(), pcm.size() * 2)) {
+                    InterlockedExchange(&g_audioFailed, 1);   // читатель (ffmpeg) закрылся
+                    break;
+                }
+                outPos += due;
+                InterlockedAdd64(&g_audioWritten, due);
+            }
+        }
+        Sleep(5);
+    }
+    for (AudioSource* s : g_sources) s->close();
+    CoUninitialize();
+    return 0;
+}
+
 // ------------------------------------------------------------------ запуск
 
 static DWORD WINAPI parentWatch(LPVOID param) {
@@ -715,6 +928,11 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--cpu") a.cpu = true;
         else if (k == L"--dump") a.dump = next();
         else if (k == L"--fake-cursor") a.fakeCursor = next();
+        else if (k == L"--audio-pipe") a.audioPipe = next();
+        else if (k == L"--audio-system") a.audioSystem = _wtoi(next()) != 0;
+        else if (k == L"--vol-system") a.volSystem = (float)_wtof(next());
+        else if (k == L"--vol-mic") a.volMic = (float)_wtof(next());
+        else if (k == L"--mic") a.mic = next();
     }
     a.fps = std::max(1, std::min(480, a.fps));
     if (a.parent) CreateThread(nullptr, 0, parentWatch, (LPVOID)(ULONG_PTR)a.parent, 0, nullptr);
@@ -782,6 +1000,10 @@ int wmain(int argc, wchar_t** argv) {
     if (pipe == INVALID_HANDLE_VALUE) { logf("error: CreateNamedPipe %lu", GetLastError()); return 2; }
     g_pipe = pipe;
 
+    if (!a.audioPipe.empty()) {
+        g_audioPipe = CreateNamedPipeW(a.audioPipe.c_str(), PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 1 << 16, 0, 0, nullptr);
+        if (g_audioPipe == INVALID_HANDLE_VALUE) { logf("error: CreateNamedPipe(audio) %lu", GetLastError()); return 2; }
+    }
     printf("READY %d %d %d %s\n", w, h, a.fps, nv12 ? "nv12" : "bgra");
     fflush(stdout);
 
@@ -791,7 +1013,18 @@ int wmain(int argc, wchar_t** argv) {
     }
     HANDLE writer = CreateThread(nullptr, 0, writerThread, nullptr, 0, nullptr);
 
+    const bool audio = !a.audioPipe.empty();
+    HANDLE audioWorker = nullptr;
+    if (audio) {
+        g_fps = a.fps;
+        g_queue.onDrop = onVideoDrop;
+        if (a.audioSystem) { AudioSource* s = new AudioSource(); s->loopback = true; s->gain = a.volSystem; g_sources.push_back(s); }
+        if (!a.mic.empty()) { AudioSource* s = new AudioSource(); s->name = a.mic; s->gain = a.volMic; g_sources.push_back(s); }
+        audioWorker = CreateThread(nullptr, 0, audioThread, nullptr, 0, nullptr);
+    }
+
     const double t0 = now();
+    g_t0 = t0;   // с этого момента идёт общий отсчёт кадров и звука
     long long n = 0, produced = 0, trimmed = 0, lateOver2 = 0;
     FramePtr cur;
     double statT = t0, maxLate = 0, totalMaxLate = 0;
@@ -834,19 +1067,29 @@ int wmain(int argc, wchar_t** argv) {
         if (depth < minDepth) minDepth = depth;
         if (depth > maxDepth) maxDepth = depth;
         if (++windowCount >= a.fps) {
-            if (minDepth > 2) { g_queue.trim(minDepth - 1); trimmed += (long long)(minDepth - 1); }
+            // Со своим звуком очередь подрезать нельзя (и незачем): звук идёт с той же задержкой.
+            if (minDepth > 2 && !audio) { g_queue.trim(minDepth - 1); trimmed += (long long)(minDepth - 1); }
             minDepth = (size_t)-1;
             windowCount = 0;
         }
         g_queue.push(cur);   // нового кадра нет — повторяется прошлый, без копирования
         n++;
         produced++;
-        if (g_writerFailed) break;   // читатель (ffmpeg) закрылся
+        if (g_writerFailed || g_audioFailed) break;   // читатель (ffmpeg) закрылся
 
         const double t = now();
         if (t - statT >= a.stat) {
             const long long written = g_written;
             const LONG wmax = InterlockedExchange(&g_writeMaxMicros, 0);
+            if (audio) {
+                std::string info;
+                for (AudioSource* s : g_sources) {
+                    char part[96];
+                    snprintf(part, sizeof(part), " %s=%s/%lld", s->loopback ? "system" : "mic", s->cap ? "on" : "off", s->captured);
+                    info += part;
+                }
+                logf("audio written=%.1fs%s", (double)g_audioWritten / kRate, info.c_str());
+            }
             logf("stat out=%.1f new=%.1f late_max=%.2fms write_max=%.1fms queue_max=%u trimmed=%lld overflow=%lld lost=%u",
                  (double)(written - statWritten) / (t - statT), (double)(cap.images - statImages) / (t - statT),
                  maxLate * 1000.0, wmax / 1000.0, (unsigned)maxDepth, trimmed - statTrimmed,
@@ -859,6 +1102,14 @@ int wmain(int argc, wchar_t** argv) {
     cur.reset();
     g_queue.finish();   // писатель дописывает остаток очереди и выходит
     if (writer) WaitForSingleObject(writer, 3000);
+    if (audioWorker) {
+        // дать звуку дойти до той же отметки, что и видео
+        const double until = now() + kAudioDelay + 0.05;
+        while (now() < until && !g_audioFailed) Sleep(5);
+        InterlockedExchange(&g_audioStop, 1);
+        WaitForSingleObject(audioWorker, 2000);
+        if (g_audioPipe != INVALID_HANDLE_VALUE) { FlushFileBuffers(g_audioPipe); CloseHandle(g_audioPipe); }
+    }
     logf("done frames=%lld elapsed=%.3f late_max=%.2fms late_over_2ms=%lld write_max=%.1fms highres_timer=%d trimmed=%lld overflow=%lld",
          (long long)g_written, now() - t0, totalMaxLate * 1000.0, lateOver2, g_writeMaxTotalMicros / 1000.0,
          timer.highRes ? 1 : 0, trimmed, g_queue.overflow);
