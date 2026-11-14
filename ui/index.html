@@ -128,9 +128,11 @@
             <option value="libx264">Процессор (x264)</option>
           </select></label>
         <label class="row"><span>Способ захвата
-          <small>Если в клипе чёрный экран — попробуйте другой</small></span>
+          <small>Если в клипе чёрный экран или рывки — попробуйте другой</small></span>
           <select data-key="capture">
-            <option value="auto">Авто</option><option value="own">Движок MidnightClips</option>
+            <option value="auto">Авто</option>
+            <option value="enc">Движок MidnightClips, кодирование на видеокарте</option>
+            <option value="own">Движок MidnightClips, кодирует ffmpeg</option>
             <option value="owncpu">Движок MidnightClips, без обработки на видеокарте</option>
             <option value="dda">ffmpeg: Desktop Duplication</option>
             <option value="ddal">ffmpeg: Desktop Duplication, старый режим</option><option value="gdi">ffmpeg: GDI</option>

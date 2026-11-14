@@ -33,7 +33,8 @@ ENCODER_TITLES = {
     "h264_qsv": "Intel Quick Sync",
     "libx264": "процессор (x264)",
 }
-CAPTURE_TITLES = {"own": "движок MidnightClips", "owncpu": "движок MidnightClips (без обработки на видеокарте)", "dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
+ENGINE_KINDS = ("enc", "own", "owncpu")   # способы захвата через свой движок
+CAPTURE_TITLES = {"enc": "движок MidnightClips, кодирование на видеокарте", "own": "движок MidnightClips", "owncpu": "движок MidnightClips (без обработки на видеокарте)", "dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
                   "gdi": "GDI", "test": "тест"}
 
 
@@ -115,6 +116,8 @@ class Recorder:
         self._upgrades = 0                # сколько раз пробовали вернуться с запасного режима
         self._avoid_precise = False       # точный режим захвата здесь не работает
         self._stalls = []                 # когда запись «зависала» в точном режиме
+        self._avoid_enc = False           # кодирование в движке здесь не работает
+        self._enc_crashes = []            # когда оно падало
         self.fps_real = None              # сколько кадров в секунду реально успевает записываться
         self.fps_target = 0
         self.slow = False                 # захват не успевает за выбранной частотой
@@ -174,10 +177,10 @@ class Recorder:
             "fps_real": self.fps_real,
             "screen_fps": self.screen_fps,
             "fps_target": self.fps_target,
-            "slow": self.slow or (self.capture in ("own", "owncpu") and self.engine_trouble),
+            "slow": self.slow or (self.capture in ENGINE_KINDS and self.engine_trouble),
             "fallback": self.state == "on" and (
                 self.capture in ("gdi", "ddal") or self.encoder == "libx264"
-                or (self.capture not in ("own", "owncpu") and self.engine is not None and self.cfg["capture"] == "auto")),
+                or (self.capture not in ENGINE_KINDS and self.engine is not None and self.cfg["capture"] == "auto")),
             "capture_kind": self.capture,
             "recording": self.recording_since is not None,
             "recording_since": self.recording_since,
@@ -249,9 +252,11 @@ class Recorder:
                         reason = "изменилось разрешение экрана"
                     elif helper.returncode == 6:
                         reason = "окно программы закрыто — записываю весь монитор"
+                    elif helper.returncode == 9:
+                        reason = "кодировщик в движке отказал"
                     break
                 # Окно выбранной программы появилось (или режим сменили) — переключаемся на него.
-                if (helper is not None and self.capture == "own" and time.time() - self._window_check > 3
+                if (helper is not None and self.capture in ("enc", "own") and time.time() - self._window_check > 3
                         and self.recording_since is None):
                     self._window_check = time.time()
                     if bool(self._wanted_window()) and not self.window_active:
@@ -314,6 +319,15 @@ class Recorder:
                 # запись сохраняются, захват поднимается заново и продолжает с того же места.
                 crashed = True
                 self._log("%s — перезапускаю захват, буфер и запись сохранены" % reason)
+                if self.capture == "enc" and reason.startswith(("кодировщик в движке", "ffmpeg остановился", "запись зависла")):
+                    # Кодирование в движке падает раз за разом — значит, здесь оно не работает;
+                    # возвращаемся к проверенному способу (кодирует ffmpeg).
+                    now = time.time()
+                    self._enc_crashes = [t for t in self._enc_crashes if now - t < 180] + [now]
+                    if len(self._enc_crashes) >= 3:
+                        self._avoid_enc = True
+                        self._good = None
+                        self._log("кодирование в движке отключено до перезапуска программы: три сбоя за три минуты")
         self._set_state("off", "")
 
     def _on_fallback(self):
@@ -381,15 +395,25 @@ class Recorder:
         # gdi  — самый медленный запасной.
         # own  — свой движок: сам отмеряет кадры точным таймером и сам переживает потерю экрана;
         #        кадр готовится на видеокарте (курсор, уменьшение, NV12); owncpu — то же без видеокарты;
-        captures = {"own": ["own", "owncpu"], "owncpu": ["owncpu", "dda"], "dda": ["dda", "ddal"], "ddal": ["ddal"],
-                    "gdi": ["gdi"]}.get(capture, ["own", "owncpu", "dda", "ddal", "gdi"])
+        # enc  — тот же движок, но и кодирует сам: кадр вообще не покидает видеокарту;
+        captures = {"enc": ["enc", "own", "owncpu"], "own": ["own", "owncpu"], "owncpu": ["owncpu", "dda"],
+                    "dda": ["dda", "ddal"], "ddal": ["ddal"],
+                    "gdi": ["gdi"]}.get(capture, ["enc", "own", "owncpu", "dda", "ddal", "gdi"])
         if not self.engine:
-            captures = [c for c in captures if c not in ("own", "owncpu")] or ["dda", "ddal", "gdi"]
+            captures = [c for c in captures if c not in ENGINE_KINDS] or ["dda", "ddal", "gdi"]
+        if self._avoid_enc and "enc" in captures and len(captures) > 1:
+            captures.remove("enc")
         if self._avoid_precise and "dda" in captures and len(captures) > 1:
             captures.remove("dda")
         result = []
         for enc in encoders:
             for cap in captures:
+                if cap == "enc":
+                    if enc in ("h264_nvenc", "h264_amf"):
+                        result.append((cap, enc, True))   # движок кодирует сам, кадр остаётся на видеокарте
+                    elif capture == "enc":
+                        result.append((cap, enc, False))  # выбрано вручную: движок кодирует из обычной памяти
+                    continue
                 if cap == "own":
                     result.append((cap, enc, True))       # готовый NV12 сразу в кодировщик
                     continue
@@ -457,7 +481,7 @@ class Recorder:
         source = None
         self.audio_note = ""
         # Свой движок снимает звук сам, на тех же часах, что и кадры.
-        engine_audio = (capture in ("own", "owncpu") and self._degrade < 2
+        engine_audio = (capture in ENGINE_KINDS and self._degrade < 2
                         and bool(self.cfg["audio"] or self.cfg["mic"]))
         if self.cfg["audio"] and self._degrade < 2 and not engine_audio:
             source = audio_mod.FakeSource() if TEST else audio_mod.LoopbackSource()
@@ -468,8 +492,9 @@ class Recorder:
                 source.close()
                 source = None
         helper, own = None, None
-        if capture in ("own", "owncpu"):
-            helper, own = self._start_engine(gpu=capture == "own", audio=engine_audio)
+        if capture in ENGINE_KINDS:
+            helper, own = self._start_engine(gpu=capture != "owncpu", audio=engine_audio,
+                                             encode=(encoder, zero_copy) if capture == "enc" else None)
             if helper is None:
                 if source:
                     source.close()
@@ -571,7 +596,7 @@ class Recorder:
             return []
         return sorted({line[4:].strip() for line in out.splitlines() if line.startswith("APP ") and line[4:].strip()})
 
-    def _start_engine(self, gpu=True, audio=False, allow_window=True):
+    def _start_engine(self, gpu=True, audio=False, allow_window=True, encode=None):
         """Запустить mccap и дождаться строки «READY ширина высота fps»."""
         fps = max(15, min(240, int(self.cfg["fps"])))
         pipe = r"\\.\pipe\mccap_%d_%d" % (os.getpid(), self._session)
@@ -586,6 +611,9 @@ class Recorder:
             if self.cfg["mic"] and self._degrade < 1:
                 args += ["--mic", self.cfg["mic"],
                          "--vol-mic", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0)]
+        if encode:   # движок кодирует сам; в канал идёт уже сжатое видео
+            mbps = max(2, min(100, int(self.cfg["bitrate_mbps"])))
+            args += ["--encode", encode[0], "--bitrate", str(mbps), "--frames", "gpu" if encode[1] else "cpu"]
         self.window_active = False
         hwnd = self._wanted_window() if gpu and allow_window and not self.engine_test else None
         if hwnd:   # записывать только окно выбранной программы
@@ -619,11 +647,14 @@ class Recorder:
             code = helper.poll()
             self._log("движок захвата не готов (ответ: %r, код %s)" % (text, code))
             self._kill(helper)
+            if encode and code == 8:   # кодировщик в движке не запустился — больше не пробуем, кодирует ffmpeg
+                self._avoid_enc = True
+                self._log("кодирование в движке здесь недоступно — кодирует ffmpeg")
             if hwnd and code in (6, 7):   # окно не снимается (закрылось или захват окон недоступен) — пишем монитор
                 if code == 7:
                     self._window_failed = True
                     self._log("захват окна здесь недоступен — записываю весь монитор")
-                return self._start_engine(gpu, audio, allow_window=False)
+                return self._start_engine(gpu, audio, allow_window=False, encode=encode)
             return None, None
         return helper, (pipe, int(parts[1]), int(parts[2]), parts[4] if len(parts) > 4 else "bgra", audio_pipe)
 
@@ -701,6 +732,9 @@ class Recorder:
         # --- вход 0: экран
         if capture == "test":
             cmd += ["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=%d" % fps]
+        elif capture == "enc":
+            # Видео уже сжато движком, у каждого кадра своё точное время; ffmpeg его не трогает.
+            cmd += ["-analyzeduration", "1000000", "-f", "nut", "-i", own[0]]
         elif capture in ("own", "owncpu"):
             # Кадры приходят ровно с нужной частотой, по порядку — время кадра считается по номеру;
             # ffmpeg только кодирует и пишет.
@@ -756,29 +790,33 @@ class Recorder:
             audio_inputs.append(len(audio_inputs) + 1)
 
         # --- видео
-        if not zero_copy:
+        if capture == "enc":
+            cmd += ["-c:v", "copy"]
+        elif not zero_copy:
             if height:
                 scale = "scale=-2:'trunc(min(ih,%d)/2)*2'" % height
             else:
                 scale = "scale='trunc(iw/2)*2':'trunc(ih/2)*2'"
             pix = "yuv420p" if encoder == "libx264" else "nv12"
             cmd += ["-vf", "%s,format=%s" % (scale, pix)]
-        cmd += ["-r", str(fps), "-fps_mode", "cfr"]   # ровная частота кадров на выходе
-        if own and own[3] == "nv12":   # движок отдаёт цвет в стандарте BT.709 — подписываем, чтобы плееры не гадали
-            cmd += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
-        rate = ["-b:v", "%dM" % mbps, "-maxrate", "%dM" % int(mbps * 1.5),
-                "-bufsize", "%dM" % (mbps * 2), "-g", str(fps)]
-        if encoder == "h264_nvenc":
-            # при высокой частоте кадров берём более быстрый пресет, чтобы кодер успевал
-            cmd += ["-c:v", encoder, "-preset", "p4" if fps <= 60 else "p2", "-rc", "vbr"] + rate
-        elif encoder == "h264_amf":
-            cmd += ["-c:v", encoder, "-usage", "transcoding", "-quality", "balanced",
-                    "-rc", "vbr_peak"] + rate
-        elif encoder == "h264_qsv":
-            cmd += ["-c:v", encoder, "-preset", "veryfast"] + rate
-        else:
-            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"] + rate
-            cmd += ["-keyint_min", str(fps), "-sc_threshold", "0"]
+        if capture != "enc":
+            cmd += ["-r", str(fps), "-fps_mode", "cfr"]   # ровная частота кадров на выходе
+            if own and own[3] == "nv12":   # движок отдаёт цвет в стандарте BT.709 — подписываем, чтобы плееры не гадали
+                cmd += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
+            rate = ["-b:v", "%dM" % mbps, "-maxrate", "%dM" % int(mbps * 1.5),
+                    "-bufsize", "%dM" % (mbps * 2), "-g", str(fps)]
+            if encoder == "h264_nvenc":
+                # при высокой частоте кадров берём более быстрый пресет, чтобы кодер успевал
+                cmd += ["-c:v", encoder, "-preset", "p4" if fps <= 60 else "p2", "-rc", "vbr"] + rate
+            elif encoder == "h264_amf":
+                cmd += ["-c:v", encoder, "-usage", "transcoding", "-quality", "balanced",
+                        "-rc", "vbr_peak"] + rate
+            elif encoder == "h264_qsv":
+                cmd += ["-c:v", encoder, "-preset", "veryfast"] + rate
+            else:
+                cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"] + rate
+                cmd += ["-keyint_min", str(fps), "-sc_threshold", "0"]
+
 
         # --- звук
         # Громкость меняется только в записи: то, что слышит сам пользователь, не трогаем.

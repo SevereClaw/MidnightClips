@@ -8,3 +8,5 @@ ffmpeg_tmp/
 mccap.exe
 *.obj
 ffplay.exe
+*.dll
+ffmpeg_sdk/

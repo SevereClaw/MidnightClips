@@ -38,7 +38,7 @@ def frames(ffmpeg, path, vf=None):
     return (int(found[-1]) if found else 0), (info.group(0)[:110] if info else "")
 
 
-def main():
+def main(kind="own"):
     from midnightclips import recorder as rec, winutil
     from midnightclips.config import Config
 
@@ -50,7 +50,7 @@ def main():
     anim = subprocess.Popen([sys.executable, "-c", ANIMATION])
     tmp = tempfile.mkdtemp(prefix="mc_win_")
     cfg = Config(os.path.join(tmp, "settings.json"))
-    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 15, "fps": 60, "capture": "own"})
+    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 15, "fps": 60, "capture": kind})
     events = []
     log = os.path.join(tmp, "ffmpeg.log")
     r = rec.Recorder(cfg, ffmpeg, os.path.join(tmp, "buf"), log, lambda k, p: events.append((k, dict(p))),
@@ -67,7 +67,7 @@ def main():
         r.start()
         print("запуск за %.1f c: захват «%s», кодировщик «%s», звук: %s" % (
             wait_on(), r.capture, r.encoder, r.audio_note or "есть"), flush=True)
-        assert r.capture == "own", r.capture
+        assert r.capture == kind, r.capture
         time.sleep(12)
         print("экран обновляется %s раз/с, пишется %s из %s кадров/с" % (r.screen_fps, r.fps_real, r.fps_target), flush=True)
         assert r.fps_real and r.fps_real > 54, r.fps_real
@@ -92,7 +92,7 @@ def main():
         time.sleep(1.5)
         assert r.recording_since is not None, "запись оборвалась"
         print("после гибели движка восстановление за %.1f c" % wait_on(40), flush=True)
-        assert r.capture == "own"
+        assert r.capture == kind, r.capture
         time.sleep(4)
         # гибель ffmpeg
         r._proc.kill()
@@ -113,7 +113,7 @@ def main():
         print("журнал:\n  " + "\n  ".join(stars), flush=True)
         r.stop()
         assert r.state == "off"
-        print("ЗАПИСЬ ЦЕЛИКОМ: OK")
+        print("ЗАПИСЬ ЦЕЛИКОМ (%s): OK" % kind, flush=True)
     finally:
         anim.kill()
         if r.is_running():
@@ -124,4 +124,5 @@ if __name__ == "__main__":
     if sys.platform != "win32":
         print("только для Windows — пропуск")
         sys.exit(0)
-    main()
+    main("own")
+    main("enc")   # движок кодирует сам (на сервере — процессором: кодировщика видеокарты здесь нет)

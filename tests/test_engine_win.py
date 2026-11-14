@@ -293,6 +293,100 @@ def window_checks():
             cover.kill()
 
 
+def encode_case(name, fps, seconds, *args, expect_code=None):
+    """Движок сам кодирует (--encode): в канал идёт готовое видео, ffmpeg его только перекладывает.
+    Возвращает (файл, ширина, высота)."""
+    pipe = r"\\.\pipe\mccap_enc_%d_%d" % (os.getpid(), int(time.time() * 1000) % 100000)
+    helper = subprocess.Popen(
+        [MCCAP, "--fps", str(fps), "--seconds", str(seconds), "--pipe", pipe, "--parent", str(os.getpid()),
+         "--stat", "1", "--encode", "libx264", "--bitrate", "30", "--no-cursor", *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    ready = helper.stdout.readline().decode().strip()
+    if expect_code is not None:
+        err = helper.stderr.read().decode(errors="replace")
+        helper.wait(timeout=20)
+        print("%-34s код %s (ожидался %s) | %s" % (name, helper.returncode, expect_code, err.strip()[-160:]), flush=True)
+        assert helper.returncode == expect_code and not ready, (helper.returncode, ready, err[-500:])
+        return None
+    if not ready.startswith("READY"):
+        raise AssertionError((ready, helper.stderr.read().decode(errors="replace")[-1500:]))
+    w, h, f, fmt = ready.split()[1:5]
+    assert fmt == "h264" and int(f) == fps, ready
+    out = os.path.join(tempfile.gettempdir(), "mccap_enc_%d.ts" % (int(time.time() * 1000) % 100000))
+    ff = subprocess.run([FFMPEG, "-hide_banner", "-y", "-analyzeduration", "1000000", "-f", "nut", "-i", pipe,
+                         "-c", "copy", out], capture_output=True, text=True, errors="replace")
+    (frames, elapsed, late, over, wmax, hi, trimmed, overflow), err = finish_helper(helper)
+    assert ff.returncode == 0, ff.stderr[-1200:]
+    # время кадров: строго подряд, с шагом 1/fps
+    info = subprocess.run([FFMPEG, "-hide_banner", "-i", out, "-vf", "showinfo", "-f", "null", "-"],
+                          capture_output=True, text=True, errors="replace").stderr
+    times = [float(x) for x in re.findall(r"pts_time:\s*([\d.]+)", info)]
+    size = re.search(r"Video: h264.*?, (\d+)x(\d+)", info)
+    assert size and (int(size[1]), int(size[2])) == (int(w) & ~1, int(h) & ~1), (ready, size and size.groups())
+    steps = [b - a for a, b in zip(times, times[1:])]
+    worst = max(abs(d - 1.0 / fps) for d in steps) if steps else 9
+    enc_info = re.search(r"info: encoder .*", err)
+    print("%-34s %sx%s, отправлено %d кадров за %.2f c, в файле %d, шаг времени ±%.2f мс, кодирование кадра макс %.1f мс | %s" % (
+        name, w, h, frames, elapsed, len(times), worst * 1000, wmax, enc_info.group(0).strip() if enc_info else "?"), flush=True)
+    assert len(times) == frames, "в файле %d кадров из %d" % (len(times), frames)
+    assert abs(frames - fps * seconds) <= max(4, fps // 6) and overflow <= 3, (frames, overflow)
+    assert worst < 0.002, "кадры идут неровно: %.2f мс" % (worst * 1000)
+    assert "error:" not in err, err[-800:]
+    return out, int(w) & ~1, int(h) & ~1
+
+
+def decoded_frame(path, w, h, index=20):
+    """Один кадр из файла в BGRA."""
+    raw = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-i", path, "-vf", "select=eq(n\\,%d)" % index,
+                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"], capture_output=True).stdout
+    assert len(raw) == w * h * 4, (len(raw), w, h)
+    return raw
+
+
+def bgra_diff(a, b, w, h, step=7):
+    """Средняя разница двух кадров BGRA по сетке точек (по каналам B, G, R)."""
+    total, count = 0, 0
+    for y in range(4, h - 4, step):
+        for x in range(4, w - 4, step):
+            i = (y * w + x) * 4
+            total += abs(a[i] - b[i]) + abs(a[i + 1] - b[i + 1]) + abs(a[i + 2] - b[i + 2])
+            count += 3
+    return total / max(1, count)
+
+
+def encode_checks():
+    # 1. Тестовая картинка: перевод цвета на процессоре, время кадров, число кадров.
+    out, w, h = encode_case("тестовая картинка 720p 60", 60, 4, "--test", "--size", "1280x720")
+    frame = decoded_frame(out, w, h)
+    def pixel(x, y):
+        i = (y * w + x) * 4
+        return frame[i + 2], frame[i + 1], frame[i]   # R, G, B
+    for bar, want in ((0, (0xF4, 0xF4, 0xF4)), (1, (0xFF, 0xE1, 0x00)), (5, (0xE4, 0x00, 0x2B)), (6, (0x27, 0x43, 0xD8))):
+        got = pixel(int((bar + 0.5) * w / 7), 40)
+        assert all(abs(g - t) <= 14 for g, t in zip(got, want)), "цвет полосы %d: %s вместо %s" % (bar, got, want)
+    encode_case("тестовая картинка 1080p 60", 60, 4, "--test", "--size", "1920x1080")
+    print("  цвета тестовой картинки после кодирования совпадают", flush=True)
+
+    # 2. Настоящий экран. Кодировщика видеокарты на сервере нет, поэтому проверяем всё, кроме него самого:
+    #    кадр готовится в текстуре кодировщика так же, как для NVENC, но перед сжатием скачивается (download).
+    ref = dump("enc_ref", "--cpu", "--no-cursor")
+    sw, sh = ref[0] & ~1, ref[1] & ~1
+    crop = bytearray()
+    for y in range(sh):
+        crop += ref[3][y * ref[0] * 4:y * ref[0] * 4 + sw * 4]
+    for name, mode in (("экран: кадр через обычную память", "cpu"), ("экран: кадр в текстуре кодировщика", "download")):
+        out, w, h = encode_case(name, 60, 4, "--frames", mode)
+        assert (w, h) == (sw, sh), (w, h, sw, sh)
+        diff = bgra_diff(decoded_frame(out, w, h, 60), crop, w, h)
+        print("  отличие от эталона: %.2f" % diff, flush=True)
+        assert diff < 6.0, "картинка после кодирования не похожа на экран: %.2f" % diff
+    out, w, h = encode_case("экран: уменьшение до 480, текстура", 60, 3, "--frames", "download", "--height", "480")
+    assert h == 480, (w, h)
+    # 3. Кодировщик, которому нельзя отдать кадр видеокарты, должен отказаться сразу — программа возьмёт другой способ.
+    encode_case("отказ кодировщика (код 8)", 60, 2, "--frames", "gpu", expect_code=8)
+    encode_case("нет такого кодировщика (код 8)", 60, 2, "--test", "--encode", "h264_none", expect_code=8)
+
+
 if __name__ == "__main__":
     if sys.platform != "win32":
         print("только для Windows — пропуск")
@@ -322,6 +416,9 @@ if __name__ == "__main__":
 
     print("захват одного окна:", flush=True)
     window_checks()
+
+    print("кодирование в движке:", flush=True)
+    encode_checks()
 
     # Настоящий захват экрана: на сборочном сервере нет видеокарты, так что это только справка.
     probe = subprocess.run([MCCAP, "--probe", "--fps", "60", "--seconds", "3"], capture_output=True, text=True, errors="replace")

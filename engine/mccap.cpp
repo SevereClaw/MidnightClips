@@ -13,6 +13,10 @@
 //          mccap --cpu ...                     без обработки на видеокарте: кадры BGRA как есть
 // В stdout печатает одну строку «READY ширина высота fps формат», в stderr — статистику.
 //
+//          mccap --encode h264_nvenc --bitrate 12 ...   кодировать прямо здесь (нужна сборка с FFmpeg)
+// В режиме --encode в канал идёт уже сжатое видео (H.264 в контейнере NUT), а кадр экрана вообще
+// не покидает видеокарту: захват -> курсор и уменьшение -> кодировщик, всё в её памяти.
+//
 // Обычный режим: кадр экрана остаётся в памяти видеокарты, там же на него накладывается
 // курсор, картинка уменьшается и переводится в NV12 — и только готовый маленький кадр
 // (в 2,7 раза меньше BGRA) копируется в обычную память.
@@ -20,6 +24,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <d3d10.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
@@ -67,6 +72,20 @@
 #pragma comment(lib, "windowsapp.lib")
 #pragma comment(lib, "user32.lib")
 
+#ifdef MC_FFMPEG   // кодирование прямо в движке — через библиотеки FFmpeg
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/avutil.h>
+#include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
+}
+#pragma comment(lib, "avcodec.lib")
+#pragma comment(lib, "avformat.lib")
+#pragma comment(lib, "avutil.lib")
+#endif
+
 namespace wgc = winrt::Windows::Graphics::Capture;
 namespace wgd = winrt::Windows::Graphics::DirectX;
 
@@ -110,6 +129,10 @@ struct Args {
     std::map<std::wstring, float> appVol;   // своя громкость программ: имя exe (строчными) -> громкость
     bool listApps = false;     // вывести программы, у которых сейчас есть звук, и выйти
     HWND window = nullptr;     // записывать одно окно (а не весь монитор)
+    std::wstring encode;       // кодировать здесь же: h264_nvenc / h264_amf / h264_qsv / libx264
+    int bitrate = 12;          // Мбит/с
+    std::wstring frames;       // gpu — кадр остаётся на видеокарте; cpu — через обычную память;
+                               // download — как gpu, но кадр скачивается перед кодированием (для проверок)
 };
 
 static const char* kShaders = R"(
@@ -133,6 +156,7 @@ float2 chromaOf(float3 c) {
     return float2(0.5020 + dot(c, float3(-0.1006, -0.3386, 0.4392)), 0.5020 + dot(c, float3(0.4392, -0.3989, -0.0403)));
 }
 float4 psCopy(VSOut i) : SV_Target { return tex.Sample(smp, i.uv); }
+float4 psCopy4(VSOut i) : SV_Target { return float4(four(i.uv), 1); }
 float4 psY(VSOut i) : SV_Target { return float4(lumaOf(one(i.uv)), 0, 0, 1); }
 float4 psYs(VSOut i) : SV_Target { return float4(lumaOf(four(i.uv)), 0, 0, 1); }
 float4 psUV(VSOut i) : SV_Target { return float4(chromaOf(one(i.uv)), 0, 1); }
@@ -205,7 +229,7 @@ struct Capturer {
     ID3D11ShaderResourceView *deskSrv = nullptr, *stageSrv = nullptr, *curColorSrv = nullptr, *curInvertSrv = nullptr;
     ID3D11RenderTargetView *stageRtv = nullptr, *yRtv = nullptr, *uvRtv = nullptr;
     ID3D11VertexShader* vsFull = nullptr;
-    ID3D11PixelShader *psCopy = nullptr, *psY = nullptr, *psUV = nullptr;
+    ID3D11PixelShader *psCopy = nullptr, *psY = nullptr, *psUV = nullptr, *psOut = nullptr;
     ID3D11SamplerState *smpLinear = nullptr, *smpPoint = nullptr;
     ID3D11BlendState *blendAlpha = nullptr, *blendInvert = nullptr;
     ID3D11RasterizerState* raster = nullptr;
@@ -255,7 +279,8 @@ struct Capturer {
                 && SUCCEEDED(dev->CreateRenderTargetView(yTex, nullptr, &yRtv))
                 && SUCCEEDED(dev->CreateRenderTargetView(uvTex, nullptr, &uvRtv));
         ok = ok && compile("vs", "vs_4_0", &vsFull) && compile("psCopy", "ps_4_0", &psCopy)
-                && compile(scaled ? "psYs" : "psY", "ps_4_0", &psY) && compile(scaled ? "psUVs" : "psUV", "ps_4_0", &psUV);
+                && compile(scaled ? "psYs" : "psY", "ps_4_0", &psY) && compile(scaled ? "psUVs" : "psUV", "ps_4_0", &psUV)
+                && compile(scaled ? "psCopy4" : "psCopy", "ps_4_0", &psOut);
         if (ok) {
             D3D11_SAMPLER_DESC sd{};
             sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -427,8 +452,8 @@ struct Capturer {
         ctx->RSSetViewports(1, &vp);
     }
 
-    // Готовый кадр NV12: курсор, уменьшение и перевод цвета — на видеокарте, копируется только результат.
-    bool composeGpu(std::vector<uint8_t>& dst, bool drawCursor) {
+    // Общая часть: настройка конвейера и курсор поверх картинки. Возвращает, откуда брать картинку.
+    ID3D11ShaderResourceView* prepare(bool drawCursor) {
         ID3D11ShaderResourceView* nullSrv = nullptr;
         ID3D11ShaderResourceView* src = deskSrv;
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -459,16 +484,28 @@ struct Capturer {
         }
         ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
         ctx->PSSetSamplers(0, 1, &smpLinear);
-        float vx = 0, vy = 0, vw = (float)outW, vh = (float)outH;
-        if (windowMode && srcW > 0 && srcH > 0) {   // окно вписывается в кадр целиком, по краям — чёрные поля
-            const float k = std::min((float)outW / srcW, (float)outH / srcH);
-            vw = srcW * k; vh = srcH * k;
-            vx = (outW - vw) / 2; vy = (outH - vh) / 2;
-            if (vw < outW - 0.5f || vh < outH - 0.5f) {
-                const float blackY[4] = { 0.0627f, 0, 0, 1 }, blackUV[4] = { 0.502f, 0.502f, 0, 1 };
-                ctx->ClearRenderTargetView(yRtv, blackY);
-                ctx->ClearRenderTargetView(uvRtv, blackUV);
-            }
+        return src;
+    }
+
+    // Куда в кадре ложится картинка. Окно вписывается целиком, по краям — чёрные поля (true — поля есть).
+    bool placement(float& vx, float& vy, float& vw, float& vh) {
+        vx = 0; vy = 0; vw = (float)outW; vh = (float)outH;
+        if (!windowMode || srcW <= 0 || srcH <= 0) return false;
+        const float k = std::min((float)outW / srcW, (float)outH / srcH);
+        vw = srcW * k; vh = srcH * k;
+        vx = (outW - vw) / 2; vy = (outH - vh) / 2;
+        return vw < outW - 0.5f || vh < outH - 0.5f;
+    }
+
+    // Готовый кадр NV12: курсор, уменьшение и перевод цвета — на видеокарте, копируется только результат.
+    bool composeGpu(std::vector<uint8_t>& dst, bool drawCursor) {
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ID3D11ShaderResourceView* src = prepare(drawCursor);
+        float vx, vy, vw, vh;
+        if (placement(vx, vy, vw, vh)) {
+            const float blackY[4] = { 0.0627f, 0, 0, 1 }, blackUV[4] = { 0.502f, 0.502f, 0, 1 };
+            ctx->ClearRenderTargetView(yRtv, blackY);
+            ctx->ClearRenderTargetView(uvRtv, blackUV);
         }
         ctx->OMSetRenderTargets(1, &yRtv, nullptr);      // яркость
         viewport(vx, vy, vw, vh);
@@ -493,6 +530,25 @@ struct Capturer {
         for (int yy = 0; yy < outH / 2; yy++) memcpy(out + (size_t)yy * outW, (const uint8_t*)m.pData + (size_t)yy * m.RowPitch, (size_t)outW);
         ctx->Unmap(uvRead, 0);
         return true;
+    }
+
+    // Готовый кадр прямо в текстуру кодировщика: картинка так и остаётся в памяти видеокарты.
+    void composeTo(ID3D11RenderTargetView* target, bool drawCursor) {
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ID3D11ShaderResourceView* src = prepare(drawCursor);
+        float vx, vy, vw, vh;
+        if (placement(vx, vy, vw, vh)) {
+            const float black[4] = { 0, 0, 0, 1 };
+            ctx->ClearRenderTargetView(target, black);
+        }
+        ctx->OMSetRenderTargets(1, &target, nullptr);
+        viewport(vx, vy, vw, vh);
+        ctx->PSSetShader(psOut, nullptr, 0);
+        ctx->PSSetShaderResources(0, 1, &src);
+        ctx->Draw(3, 0);
+        ctx->PSSetShaderResources(0, 1, &nullSrv);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        ctx->Flush();   // кодировщик работает с текстурой сам — рисование должно быть уже отправлено
     }
 
     // Курсор-заглушка для проверок: рисование курсора должно совпадать на видеокарте и без неё.
@@ -709,7 +765,7 @@ struct Capturer {
         SafeRelease(curColorSrv); SafeRelease(curInvertSrv); SafeRelease(curColor); SafeRelease(curInvert);
         SafeRelease(deskSrv); SafeRelease(stageSrv); SafeRelease(stageRtv); SafeRelease(yRtv); SafeRelease(uvRtv);
         SafeRelease(desk); SafeRelease(stage); SafeRelease(yTex); SafeRelease(uvTex); SafeRelease(yRead); SafeRelease(uvRead);
-        SafeRelease(vsFull); SafeRelease(psCopy); SafeRelease(psY); SafeRelease(psUV);
+        SafeRelease(vsFull); SafeRelease(psCopy); SafeRelease(psY); SafeRelease(psUV); SafeRelease(psOut);
         SafeRelease(smpLinear); SafeRelease(smpPoint); SafeRelease(blendAlpha); SafeRelease(blendInvert); SafeRelease(raster);
         SafeRelease(staging); SafeRelease(dupl); SafeRelease(out1); SafeRelease(ctx); SafeRelease(dev);
     }
@@ -744,11 +800,17 @@ static void drawTest(std::vector<uint8_t>& f, int w, int h, double t) {
 // без очереди пришлось бы отдавать ему пачку одинаковых кадров.
 
 typedef std::shared_ptr<std::vector<uint8_t>> FramePtr;
+struct QItem {
+    FramePtr cpu;               // кадр в обычной памяти
+    std::shared_ptr<void> hw;   // кадр в памяти видеокарты (AVFrame) — при кодировании в движке
+    explicit operator bool() const { return cpu || hw; }
+    void reset() { cpu.reset(); hw.reset(); }
+};
 
 struct FrameQueue {
     CRITICAL_SECTION cs;
     CONDITION_VARIABLE cv;
-    std::deque<FramePtr> q;
+    std::deque<QItem> q;
     std::vector<std::vector<uint8_t>*> pool;
     size_t frameSize = 0, capacity = 8;
     bool stop = false;
@@ -769,7 +831,7 @@ struct FrameQueue {
             LeaveCriticalSection(&cs);
         });
     }
-    void push(const FramePtr& f) {
+    void push(const QItem& f) {
         EnterCriticalSection(&cs);
         if (q.size() >= capacity) {   // читатель совсем встал — старое не копим
             q.pop_front();
@@ -791,7 +853,7 @@ struct FrameQueue {
         while (count-- && !q.empty()) q.pop_front();
         LeaveCriticalSection(&cs);
     }
-    bool pop(FramePtr& out) {
+    bool pop(QItem& out) {
         EnterCriticalSection(&cs);
         while (q.empty() && !stop) SleepConditionVariableCS(&cv, &cs, 200);
         bool ok = !q.empty();
@@ -816,10 +878,10 @@ static volatile LONG g_writeMaxMicros = 0, g_writeMaxTotalMicros = 0;
 static bool writeAll(HANDLE h, const uint8_t* data, size_t size);
 
 static DWORD WINAPI writerThread(LPVOID) {
-    FramePtr item;
+    QItem item;
     while (g_queue.pop(item)) {
         const double w0 = now();
-        if (!writeAll(g_pipe, item->data(), item->size())) { InterlockedExchange(&g_writerFailed, 1); break; }
+        if (!writeAll(g_pipe, item.cpu->data(), item.cpu->size())) { InterlockedExchange(&g_writerFailed, 1); break; }
         const LONG us = (LONG)((now() - w0) * 1e6);
         if (us > g_writeMaxMicros) InterlockedExchange(&g_writeMaxMicros, us);
         if (us > g_writeMaxTotalMicros) InterlockedExchange(&g_writeMaxTotalMicros, us);
@@ -828,6 +890,297 @@ static DWORD WINAPI writerThread(LPVOID) {
     }
     return 0;
 }
+
+// ------------------------------------------------------------------ кодирование в движке
+//
+// Режим --encode: сжимаем видео прямо здесь. Кадр рисуется в текстуру, которую кодировщик
+// видеокарты (NVENC, AMF) читает напрямую, — в обычную память попадает уже сжатое видео.
+// В канал идёт H.264 в контейнере NUT с точным временем каждого кадра; ffmpeg только
+// добавляет звук и раскладывает запись по кусочкам буфера, ничего не перекодируя.
+
+static volatile LONG g_encFailed = 0;
+
+#ifdef MC_FFMPEG
+static void avLog(void*, int level, const char* fmt, va_list vl) {
+    if (level > AV_LOG_WARNING) return;
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), fmt, vl);
+    size_t n = strlen(buf);
+    while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    if (n) logf("info: av: %s", buf);
+}
+
+static std::string avErr(int code) {
+    char b[128] = { 0 };
+    av_strerror(code, b, sizeof(b));
+    return b;
+}
+
+// BGRA -> NV12 на процессоре (BT.709, 16..235). Нужен только там, где кадр и так в обычной памяти.
+static void bgraToNv12(const uint8_t* src, int stride, int w, int h, uint8_t* y, int ys, uint8_t* uv, int uvs) {
+    for (int yy = 0; yy < h; yy += 2) {
+        const uint8_t* rows[2] = { src + (size_t)yy * stride, src + (size_t)(yy + 1) * stride };
+        uint8_t* yout[2] = { y + (size_t)yy * ys, y + (size_t)(yy + 1) * ys };
+        uint8_t* c = uv + (size_t)(yy / 2) * uvs;
+        for (int xx = 0; xx < w; xx += 2) {
+            int sb = 0, sg = 0, sr = 0;
+            for (int k = 0; k < 4; k++) {
+                const uint8_t* px = rows[k >> 1] + (size_t)(xx + (k & 1)) * 4;
+                const int b = px[0], g = px[1], r = px[2];
+                sb += b; sg += g; sr += r;
+                yout[k >> 1][xx + (k & 1)] = (uint8_t)(((16 << 16) + 32768 + 11967 * r + 40252 * g + 4063 * b) >> 16);
+            }
+            c[xx] = (uint8_t)(((128 << 18) + (1 << 17) - 6593 * sr - 22190 * sg + 28783 * sb) >> 18);
+            c[xx + 1] = (uint8_t)(((128 << 18) + (1 << 17) + 28783 * sr - 26142 * sg - 2641 * sb) >> 18);
+        }
+    }
+}
+
+struct Encoder {
+    enum { CPU = 0, GPU = 1, DOWNLOAD = 2 };
+    int mode = CPU;
+    bool srcNv12 = false;
+    int w = 0, h = 0, fps = 60, srcStride = 0;
+    AVCodecContext* enc = nullptr;
+    AVFormatContext* oc = nullptr;
+    AVStream* st = nullptr;
+    AVIOContext* io = nullptr;
+    AVBufferRef *hwDevice = nullptr, *hwFrames = nullptr;
+    AVPacket* pkt = nullptr;
+    AVFrame *nv = nullptr, *sw = nullptr;
+    const void* lastSrc = nullptr;
+    long long pts = 0, bytes = 0, packets = 0;
+    volatile LONG ioFailed = 0;
+    ID3D11Device* dev = nullptr;
+    std::map<ID3D11Texture2D*, ID3D11RenderTargetView*> views;
+
+    static int writeCb(void* opaque, const uint8_t* buf, int size) {
+        Encoder* e = (Encoder*)opaque;
+        if (!e->ioFailed && !writeAll(g_pipe, buf, (size_t)size)) InterlockedExchange(&e->ioFailed, 1);   // читатель закрылся
+        e->bytes += size;
+        return size;
+    }
+
+    // Кодировщик будет брать кадры из нашего же устройства Direct3D — того, которым снимается экран.
+    bool initHw(ID3D11Device* device, ID3D11DeviceContext* context) {
+        dev = device;
+        hwDevice = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+        if (!hwDevice) return false;
+        AVHWDeviceContext* dc = (AVHWDeviceContext*)hwDevice->data;
+        AVD3D11VADeviceContext* d3d = (AVD3D11VADeviceContext*)dc->hwctx;
+        device->AddRef();
+        d3d->device = device;
+        context->AddRef();
+        d3d->device_context = context;
+        // FFmpeg требует ещё и видеоинтерфейсы устройства, хотя кодировщику они не нужны. У программной
+        // видеокарты (сервер сборки) их нет — подставляем само устройство: с ним только вызовут Release.
+        if (FAILED(device->QueryInterface(__uuidof(ID3D11VideoDevice), (void**)&d3d->video_device))) {
+            device->AddRef();
+            d3d->video_device = (ID3D11VideoDevice*)device;
+            logf("info: encoder: no video device interface here");
+        }
+        if (FAILED(context->QueryInterface(__uuidof(ID3D11VideoContext), (void**)&d3d->video_context))) {
+            context->AddRef();
+            d3d->video_context = (ID3D11VideoContext*)context;
+        }
+        ID3D10Multithread* mt = nullptr;   // устройством теперь пользуются два потока
+        if (SUCCEEDED(device->QueryInterface(__uuidof(ID3D10Multithread), (void**)&mt))) {
+            mt->SetMultithreadProtected(TRUE);
+            mt->Release();
+        }
+        int ret = av_hwdevice_ctx_init(hwDevice);
+        if (ret < 0) { logf("error: encoder: device: %s", avErr(ret).c_str()); return false; }
+        hwFrames = av_hwframe_ctx_alloc(hwDevice);
+        if (!hwFrames) return false;
+        AVHWFramesContext* fc = (AVHWFramesContext*)hwFrames->data;
+        fc->format = AV_PIX_FMT_D3D11;
+        fc->sw_format = AV_PIX_FMT_BGRA;
+        fc->width = w;
+        fc->height = h;
+        fc->initial_pool_size = 0;
+        AVD3D11VAFramesContext* f3 = (AVD3D11VAFramesContext*)fc->hwctx;
+        f3->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        ret = av_hwframe_ctx_init(hwFrames);
+        if (ret < 0) { logf("error: encoder: frames: %s", avErr(ret).c_str()); return false; }
+        return true;
+    }
+
+    bool init(const std::string& name, int width, int height, int rate, int mbps, int wantMode, bool nv12Source,
+              int sourceStride, ID3D11Device* device, ID3D11DeviceContext* context) {
+        av_log_set_callback(avLog);
+        const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
+        if (!codec) { logf("error: encoder %s not found", name.c_str()); return false; }
+        mode = wantMode;
+        w = width & ~1; h = height & ~1; fps = rate;
+        srcNv12 = nv12Source; srcStride = sourceStride;
+        enc = avcodec_alloc_context3(codec);
+        if (!enc) return false;
+        enc->width = w;
+        enc->height = h;
+        enc->time_base = AVRational{ 1, fps };
+        enc->framerate = AVRational{ fps, 1 };
+        enc->bit_rate = (int64_t)mbps * 1000000;
+        enc->rc_max_rate = (int64_t)mbps * 1500000;
+        enc->rc_buffer_size = mbps * 2000000;
+        enc->gop_size = fps;       // опорный кадр раз в секунду: по ним режутся кусочки буфера
+        enc->max_b_frames = 0;
+        if (mode != CPU && !initHw(device, context)) return false;
+        if (mode == GPU) {
+            enc->pix_fmt = AV_PIX_FMT_D3D11;
+            enc->hw_frames_ctx = av_buffer_ref(hwFrames);
+        } else {
+            enc->pix_fmt = AV_PIX_FMT_NV12;
+            enc->colorspace = AVCOL_SPC_BT709;
+            enc->color_primaries = AVCOL_PRI_BT709;
+            enc->color_trc = AVCOL_TRC_BT709;
+            enc->color_range = AVCOL_RANGE_MPEG;
+            nv = av_frame_alloc();
+            sw = av_frame_alloc();
+            if (!nv || !sw) return false;
+            nv->format = AV_PIX_FMT_NV12;
+            nv->width = w;
+            nv->height = h;
+            if (av_frame_get_buffer(nv, 0) < 0) return false;
+        }
+        AVDictionary* opts = nullptr;
+        if (name == "h264_nvenc") {
+            av_dict_set(&opts, "preset", fps <= 60 ? "p4" : "p2", 0);   // при высокой частоте — пресет побыстрее
+            av_dict_set(&opts, "rc", "vbr", 0);
+        } else if (name == "h264_amf") {
+            av_dict_set(&opts, "usage", "transcoding", 0);
+            av_dict_set(&opts, "quality", "balanced", 0);
+            av_dict_set(&opts, "rc", "vbr_peak", 0);
+        } else if (name == "h264_qsv") {
+            av_dict_set(&opts, "preset", "veryfast", 0);
+        } else {
+            av_dict_set(&opts, "preset", "ultrafast", 0);
+            av_dict_set(&opts, "tune", "zerolatency", 0);
+            av_dict_set(&opts, "sc_threshold", "0", 0);
+            enc->keyint_min = fps;
+        }
+        const int ret = avcodec_open2(enc, codec, &opts);
+        av_dict_free(&opts);
+        if (ret < 0) { logf("error: encoder %s: %s", name.c_str(), avErr(ret).c_str()); return false; }
+        pkt = av_packet_alloc();
+        logf("info: encoder %s %dx%d %d fps %d Mbit/s frames=%s", name.c_str(), w, h, fps, mbps,
+             mode == GPU ? "gpu" : (mode == DOWNLOAD ? "download" : "cpu"));
+        return pkt != nullptr;
+    }
+
+    // Начать поток в канал (канал к этому моменту уже открыт читателем).
+    bool open() {
+        int ret = avformat_alloc_output_context2(&oc, nullptr, "nut", nullptr);
+        if (ret < 0 || !oc) { logf("error: encoder: muxer: %s", avErr(ret).c_str()); return false; }
+        unsigned char* buf = (unsigned char*)av_malloc(1 << 16);
+        io = avio_alloc_context(buf, 1 << 16, 1, this, nullptr, writeCb, nullptr);
+        if (!io) return false;
+        oc->pb = io;
+        oc->flags |= AVFMT_FLAG_CUSTOM_IO | AVFMT_FLAG_FLUSH_PACKETS;
+        st = avformat_new_stream(oc, nullptr);
+        if (!st) return false;
+        avcodec_parameters_from_context(st->codecpar, enc);
+        st->time_base = enc->time_base;
+        st->avg_frame_rate = st->r_frame_rate = enc->framerate;
+        ret = avformat_write_header(oc, nullptr);
+        if (ret < 0) { logf("error: encoder: header: %s", avErr(ret).c_str()); return false; }
+        avio_flush(io);
+        return true;
+    }
+
+    // Свободная текстура под новый кадр (текстуры переиспользуются) и «холст» для рисования в неё.
+    std::shared_ptr<void> newFrame(ID3D11RenderTargetView** view) {
+        AVFrame* f = av_frame_alloc();
+        if (!f) return nullptr;
+        const int ret = av_hwframe_get_buffer(hwFrames, f, 0);
+        if (ret < 0) { logf("error: encoder: frame: %s", avErr(ret).c_str()); av_frame_free(&f); return nullptr; }
+        ID3D11Texture2D* tex = (ID3D11Texture2D*)f->data[0];
+        auto it = views.find(tex);
+        if (it == views.end()) {
+            ID3D11RenderTargetView* v = nullptr;
+            const HRESULT hr = dev->CreateRenderTargetView(tex, nullptr, &v);
+            if (FAILED(hr)) { logf("error: encoder: render target 0x%08lx", hr); av_frame_free(&f); return nullptr; }
+            it = views.emplace(tex, v).first;
+        }
+        *view = it->second;
+        return std::shared_ptr<void>(f, [](void* p) { AVFrame* fr = (AVFrame*)p; av_frame_free(&fr); });
+    }
+
+    bool drain() {
+        for (;;) {
+            int ret = avcodec_receive_packet(enc, pkt);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) return true;
+            if (ret < 0) { logf("error: encoder: receive: %s", avErr(ret).c_str()); return false; }
+            pkt->stream_index = 0;
+            if (pkt->duration <= 0) pkt->duration = 1;
+            av_packet_rescale_ts(pkt, enc->time_base, st->time_base);
+            ret = av_write_frame(oc, pkt);
+            av_packet_unref(pkt);
+            if (ret < 0) { logf("error: encoder: write: %s", avErr(ret).c_str()); return false; }
+            avio_flush(io);
+            packets++;
+        }
+    }
+
+    bool encode(const QItem& item) {
+        AVFrame* f = nullptr;
+        if (mode == GPU) {
+            f = (AVFrame*)item.hw.get();
+        } else {
+            const void* key = mode == DOWNLOAD ? (const void*)item.hw.get() : (const void*)item.cpu.get();
+            if (key != lastSrc) {   // повтор прошлого кадра заново не готовим
+                if (av_frame_make_writable(nv) < 0) return false;
+                if (mode == DOWNLOAD) {
+                    av_frame_unref(sw);
+                    const int ret = av_hwframe_transfer_data(sw, (AVFrame*)item.hw.get(), 0);
+                    if (ret < 0) { logf("error: encoder: download: %s", avErr(ret).c_str()); return false; }
+                    if (sw->format != AV_PIX_FMT_BGRA) { logf("error: encoder: download format %d", sw->format); return false; }
+                    bgraToNv12(sw->data[0], sw->linesize[0], w, h, nv->data[0], nv->linesize[0], nv->data[1], nv->linesize[1]);
+                } else if (srcNv12) {
+                    const uint8_t* src = item.cpu->data();
+                    for (int yy = 0; yy < h; yy++) memcpy(nv->data[0] + (size_t)yy * nv->linesize[0], src + (size_t)yy * w, (size_t)w);
+                    src += (size_t)w * h;
+                    for (int yy = 0; yy < h / 2; yy++) memcpy(nv->data[1] + (size_t)yy * nv->linesize[1], src + (size_t)yy * w, (size_t)w);
+                } else {
+                    bgraToNv12(item.cpu->data(), srcStride, w, h, nv->data[0], nv->linesize[0], nv->data[1], nv->linesize[1]);
+                }
+                lastSrc = key;
+            }
+            f = nv;
+        }
+        if (!f) return false;
+        f->pts = pts++;   // время кадра — по его номеру: кадры идут ровно с заданной частотой
+        const int ret = avcodec_send_frame(enc, f);
+        if (ret < 0) { logf("error: encoder: send: %s", avErr(ret).c_str()); return false; }
+        return drain();
+    }
+
+    void finish() {
+        if (!enc || !oc) return;
+        if (avcodec_send_frame(enc, nullptr) >= 0) drain();
+        av_write_trailer(oc);
+        avio_flush(io);
+    }
+};
+
+static Encoder g_enc;
+
+static DWORD WINAPI encodeThread(LPVOID) {
+    QItem item;
+    while (g_queue.pop(item)) {
+        const double w0 = now();
+        if (!g_enc.encode(item)) { InterlockedExchange(&g_encFailed, 1); break; }
+        if (g_enc.ioFailed) { InterlockedExchange(&g_writerFailed, 1); break; }
+        const LONG us = (LONG)((now() - w0) * 1e6);
+        if (us > g_writeMaxMicros) InterlockedExchange(&g_writeMaxMicros, us);
+        if (us > g_writeMaxTotalMicros) InterlockedExchange(&g_writeMaxTotalMicros, us);
+        InterlockedIncrement64(&g_written);
+        item.reset();
+    }
+    item.reset();
+    if (!g_encFailed && !g_enc.ioFailed) g_enc.finish();
+    return 0;
+}
+#endif
 
 // ------------------------------------------------------------------ звук
 //
@@ -1326,6 +1679,9 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--mic") a.mic = next();
         else if (k == L"--list-audio-apps") a.listApps = true;
         else if (k == L"--window") a.window = (HWND)(INT_PTR)_wtoi64(next());
+        else if (k == L"--encode") a.encode = next();
+        else if (k == L"--bitrate") a.bitrate = std::max(1, std::min(200, _wtoi(next())));
+        else if (k == L"--frames") a.frames = next();
         else if (k == L"--app-vol") {   // имя.exe=громкость
             std::wstring spec = next();
             const size_t eq = spec.rfind(L'=');
@@ -1417,6 +1773,19 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     if (a.pipe.empty()) { logf("error: --pipe required"); return 2; }
+    const bool encoding = !a.encode.empty();
+    bool hwFrames = false;   // кадры для кодировщика остаются в памяти видеокарты
+    if (encoding) {
+#ifdef MC_FFMPEG
+        int mode = Encoder::CPU;
+        if (!a.test && cap.gpu && a.frames != L"cpu") mode = a.frames == L"download" ? Encoder::DOWNLOAD : Encoder::GPU;
+        if (!g_enc.init(narrow(a.encode), w, h, a.fps, a.bitrate, mode, nv12, w * 4, cap.dev, cap.ctx)) return 8;
+        hwFrames = mode != Encoder::CPU;
+#else
+        logf("error: this build has no encoder");
+        return 8;   // программа перейдёт на кодирование через ffmpeg
+#endif
+    }
     g_queue.frameSize = frameSize;
     g_queue.capacity = (size_t)std::max(8, (int)(a.fps * 0.25));   // до четверти секунды кадров
     HANDLE pipe = CreateNamedPipeW(a.pipe.c_str(), PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1,
@@ -1428,14 +1797,22 @@ int wmain(int argc, wchar_t** argv) {
         g_audioPipe = CreateNamedPipeW(a.audioPipe.c_str(), PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 1 << 16, 0, 0, nullptr);
         if (g_audioPipe == INVALID_HANDLE_VALUE) { logf("error: CreateNamedPipe(audio) %lu", GetLastError()); return 2; }
     }
-    printf("READY %d %d %d %s\n", w, h, a.fps, nv12 ? "nv12" : "bgra");
+    printf("READY %d %d %d %s\n", w, h, a.fps, encoding ? "h264" : (nv12 ? "nv12" : "bgra"));
     fflush(stdout);
 
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
         logf("error: ConnectNamedPipe %lu", GetLastError());
         return 2;
     }
-    HANDLE writer = CreateThread(nullptr, 0, writerThread, nullptr, 0, nullptr);
+    HANDLE writer = nullptr;
+    if (encoding) {
+#ifdef MC_FFMPEG
+        if (!g_enc.open()) return 8;
+        writer = CreateThread(nullptr, 0, encodeThread, nullptr, 0, nullptr);
+#endif
+    } else {
+        writer = CreateThread(nullptr, 0, writerThread, nullptr, 0, nullptr);
+    }
 
     const bool audio = !a.audioPipe.empty();
     HANDLE audioWorker = nullptr;
@@ -1454,7 +1831,7 @@ int wmain(int argc, wchar_t** argv) {
     const double t0 = now();
     g_t0 = t0;   // с этого момента идёт общий отсчёт кадров и звука
     long long n = 0, produced = 0, trimmed = 0, lateOver2 = 0;
-    FramePtr cur;
+    QItem cur;
     double statT = t0, maxLate = 0, totalMaxLate = 0;
     long long statWritten = 0, statTrimmed = 0, statOverflow = 0;
     unsigned statImages = 0;
@@ -1471,21 +1848,32 @@ int wmain(int argc, wchar_t** argv) {
         if (late > 0.25) n = (long long)((now() - t0) * a.fps);   // система подвисала — не догоняем пачкой
 
         if (a.test) {
-            cur = g_queue.acquire();
-            drawTest(*cur, w, h, now() - t0);
+            FramePtr fresh = g_queue.acquire();
+            drawTest(*fresh, w, h, now() - t0);
             const long long stamp[2] = { produced, epochMicros() };   // номер и время кадра — для проверок
-            memcpy(cur->data(), stamp, sizeof(stamp));
+            memcpy(fresh->data(), stamp, sizeof(stamp));
+            cur.cpu = fresh;
         } else {
             int r = cap.windowMode ? cap.pollWindow() : cap.poll();
             if (r == -2) { logf("info: window closed"); code = 6; break; }   // окно закрыли
             if (r < 0) { code = 3; break; }
-            if (r > 0 || !cur) {
-                cur = g_queue.acquire();
+            if ((r > 0 || !cur) && hwFrames) {
+#ifdef MC_FFMPEG
+                // Рисуем кадр сразу в текстуру кодировщика — в обычную память он не попадает.
+                ID3D11RenderTargetView* view = nullptr;
+                std::shared_ptr<void> fresh = g_enc.newFrame(&view);
+                if (!fresh) { code = 9; break; }
+                cap.composeTo(view, a.cursor && !cap.windowMode);
+                cur.hw = fresh;
+#endif
+            } else if (r > 0 || !cur) {
+                FramePtr fresh = g_queue.acquire();
                 if (nv12) {
-                    if (!cap.composeGpu(*cur, a.cursor && !cap.windowMode)) { logf("error: gpu readback failed"); code = 5; break; }
+                    if (!cap.composeGpu(*fresh, a.cursor && !cap.windowMode)) { logf("error: gpu readback failed"); code = 5; break; }
                 } else {
-                    cap.compose(*cur, a.cursor);
+                    cap.compose(*fresh, a.cursor);
                 }
+                cur.cpu = fresh;
             }
         }
 
@@ -1504,6 +1892,7 @@ int wmain(int argc, wchar_t** argv) {
         g_queue.push(cur);   // нового кадра нет — повторяется прошлый, без копирования
         n++;
         produced++;
+        if (g_encFailed) { code = 9; break; }          // кодировщик отказал — программа выберет другой способ
         if (g_writerFailed || g_audioFailed) break;   // читатель (ffmpeg) закрылся
 
         const double t = now();
