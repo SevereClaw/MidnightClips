@@ -23,10 +23,11 @@ def probe(path):
     return json.loads(out)
 
 
-def main():
+def main(storage="disk"):
+    print("=== буфер: %s" % storage)
     tmp = tempfile.mkdtemp(prefix="mc_test_")
     cfg = Config(os.path.join(tmp, "settings.json"))
-    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 6, "fps": 30})
+    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 6, "fps": 30, "buffer_storage": storage})
     events = []
     r = rec.Recorder(cfg, rec.find_ffmpeg("/nonexistent"), os.path.join(tmp, "buf"),
                      os.path.join(tmp, "ffmpeg.log"), lambda k, p: events.append((k, dict(p))))
@@ -40,7 +41,11 @@ def main():
     time.sleep(13)
     n_seg = len(r._segments())
     assert n_seg <= 6 / rec.SEGMENT + 6, "старые кусочки не удаляются: %d" % n_seg
-    print("кусочков в буфере:", n_seg)
+    on_disk = [f for f in os.listdir(os.path.join(tmp, "buf")) if f.endswith(".ts")]
+    print("кусочков в буфере: %d, из них файлами на диске: %d, в памяти: %d (%.1f МБ)" % (
+        n_seg, len(on_disk), len(r._mem), sum(len(v) for v in r._mem.values()) / 1048576))
+    assert r.in_memory == (storage == "memory")
+    assert (not on_disk) if storage == "memory" else (len(on_disk) == n_seg and not r._mem)
 
     # 1) клип из буфера
     r.save_clip("Тест: Игра?")
@@ -48,6 +53,10 @@ def main():
     time.sleep(4)
     assert r.start_recording("Запись теста")
     time.sleep(5)
+    spilled = [f for f in os.listdir(os.path.join(tmp, "buf")) if f.endswith(".ts")]
+    if storage == "memory":
+        print("во время записи сброшено на диск кусочков:", len(spilled))
+        assert spilled, "идущая запись должна уходить на диск, а не копиться в памяти"
     r.stop_recording()
     time.sleep(6)
 
@@ -94,10 +103,11 @@ def main():
     r.stop()
     assert r.state == "off"
     left = os.listdir(os.path.join(tmp, "buf"))
-    assert not left, left
+    assert not left and not r._mem, (left, list(r._mem))
     print("остановка: ok, временные файлы убраны")
     print("ВСЁ ПРОШЛО")
 
 
 if __name__ == "__main__":
-    main()
+    main("memory")
+    main("disk")

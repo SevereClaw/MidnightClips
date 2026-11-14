@@ -9,6 +9,7 @@ import glob
 import math
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -18,6 +19,7 @@ from datetime import datetime
 from . import audio as audio_mod
 
 SEGMENT = 2  # секунд в одном кусочке
+MEMORY_LIMIT_MB = 768   # буфер больше этого в режиме «авто» держим на диске
 CONCAT_LIMIT = 24000  # длиннее — склеиваем через общий файл
 TEST = bool(os.environ.get("MC_TEST_SOURCE"))  # проверка без Windows
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -92,6 +94,11 @@ class Recorder:
         self._encoders = None
         self._good = None                 # последний сработавший вариант захвата
         self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
+        self._mem = {}                    # буфер в памяти: имя кусочка -> байты
+        self._mem_dur = {}                # сколько секунд в каждом кусочке из памяти
+        self._mem_lock = threading.Lock()
+        self._mem_epoch = 0               # растёт при полной очистке буфера
+        self.in_memory = False            # где сейчас лежит буфер повтора
         self._soft = False                # мягкий перезапуск: буфер не стирать
         self.engine = engine              # путь к mccap.exe или None
         self.engine_test = bool(os.environ.get("MC_ENGINE_TEST"))   # тестовая картинка вместо экрана
@@ -154,6 +161,8 @@ class Recorder:
             "encoder": ENCODER_TITLES.get(self.encoder, self.encoder),
             "capture": CAPTURE_TITLES.get(self.capture, self.capture),
             "audio_note": self.audio_note,
+            "buffer_in_memory": self.in_memory,
+            "buffer_mb": self.buffer_megabytes(),
             "fps_real": self.fps_real,
             "screen_fps": self.screen_fps,
             "fps_target": self.fps_target,
@@ -278,8 +287,10 @@ class Recorder:
             if deliberate:
                 # Настройки могли измениться — старые кусочки с новыми не склеить.
                 with self._save_lock:
-                    for path in glob.glob(os.path.join(self.work_dir, "*.ts")):
-                        self._remove(path)
+                    with self._mem_lock:
+                        self._mem_epoch += 1   # читатель старого потока больше ничего не добавит
+                    for path in self._segments():
+                        self._drop(path)
                 crashed = False
             else:
                 # Сбой (игра сменила режим экрана, UAC, сон монитора…): буфер и идущая
@@ -306,7 +317,7 @@ class Recorder:
         if not current:
             return None
         try:
-            return current[-1], os.path.getsize(current[-1])
+            return current[-1], self._seg_size(current[-1])
         except OSError:
             return current[-1], -1
 
@@ -443,7 +454,19 @@ class Recorder:
                 if source:
                     source.close()
                 return None
-        cmd = self._build_cmd(capture, encoder, zero_copy, source, prefix, own)
+        server, port = None, 0
+        self.in_memory = self._use_memory()
+        if self.in_memory:
+            try:
+                server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                server.bind(("127.0.0.1", 0))
+                server.listen(1)
+                port = server.getsockname()[1]
+                threading.Thread(target=self._mem_reader, args=(server, prefix), daemon=True, name="buffer").start()
+            except OSError as exc:
+                self._log("буфер в памяти недоступен (%s) — пишу на диск" % exc)
+                server, port, self.in_memory = None, 0, False
+        cmd = self._build_cmd(capture, encoder, zero_copy, source, prefix, own, port)
         try:
             log = open(self.log_path, "a", encoding="utf-8", errors="replace")
             log.write("\n=== %s | %s + %s%s ===\n%s\n" % (
@@ -476,10 +499,9 @@ class Recorder:
             pump.start()
         # Успех = появился первый кусочек с данными.
         deadline = time.time() + 12
-        pattern = os.path.join(self.work_dir, prefix + "*.ts")
         while time.time() < deadline and proc.poll() is None and not self._stop.is_set():
-            files = glob.glob(pattern)
-            if files and max(os.path.getsize(f) for f in files) > 0:
+            files = self._segments(prefix)
+            if files and max(self._seg_size(f) for f in files) > 0:
                 self._proc = proc
                 self._format_changed((encoder, own[1:] if own else None, self.fps_target,
                                       int(self.cfg["height"])), prefix)
@@ -497,8 +519,8 @@ class Recorder:
             why = "за 12 секунд не пришло ни одного кадра"
         self._log("вариант %s + %s не запустился: %s. %s" % (capture, encoder, why, self._diag()))
         self._shutdown(proc, source, pump)
-        for path in glob.glob(pattern):
-            self._remove(path)
+        for path in self._segments(prefix):
+            self._drop(path)
         return None
 
     def _start_engine(self, gpu=True):
@@ -580,11 +602,11 @@ class Recorder:
             with self._save_lock:
                 for path in self._segments():
                     if not os.path.basename(path).startswith(keep_prefix):
-                        self._remove(path)
+                        self._drop(path)
             self._log("формат записи изменился — буфер начат заново")
         self._format = key
 
-    def _build_cmd(self, capture, encoder, zero_copy, source, prefix, own=None):
+    def _build_cmd(self, capture, encoder, zero_copy, source, prefix, own=None, memory_port=0):
         cfg = self.cfg
         fps = max(15, min(240, int(cfg["fps"])))
         height = int(cfg["height"])
@@ -685,9 +707,164 @@ class Recorder:
         if audio_inputs:
             cmd += ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
 
-        cmd += ["-f", "segment", "-segment_time", str(SEGMENT), "-segment_format", "mpegts",
-                prefix + "%06d.ts"]
+        if memory_port:
+            # Буфер в оперативной памяти: поток уходит программе по локальному соединению,
+            # на диск ничего не пишется, пока клип не сохраняют.
+            cmd += ["-f", "mpegts", "-flush_packets", "1", "tcp://127.0.0.1:%d" % memory_port]
+        else:
+            cmd += ["-f", "segment", "-segment_time", str(SEGMENT), "-segment_format", "mpegts",
+                    prefix + "%06d.ts"]
         return cmd
+
+    # --------------------------------------------------- буфер в памяти
+
+    def buffer_megabytes(self):
+        """Сколько примерно занимает буфер повтора при текущих настройках."""
+        seconds = int(self.cfg["buffer_seconds"]) if self.cfg["buffer_enabled"] else 8
+        mbps = max(2, min(100, int(self.cfg["bitrate_mbps"]))) + 0.2
+        return int(mbps * (seconds + 8) / 8)
+
+    def _use_memory(self):
+        mode = self.cfg["buffer_storage"]
+        if mode == "memory":
+            return True
+        if mode == "disk":
+            return False
+        return self.buffer_megabytes() <= MEMORY_LIMIT_MB
+
+    def _mem_reader(self, server, prefix):
+        """Принимает поток от ffmpeg и режет его на кусочки по SEGMENT секунд — в памяти.
+        Пока идёт обычная запись, готовые кусочки сбрасываются на диск: запись может быть
+        многочасовой, в памяти её держать нельзя."""
+        try:
+            server.settimeout(25)
+            conn, _addr = server.accept()
+        except OSError:
+            server.close()
+            return
+        server.close()
+        index, started, scan = 0, time.monotonic(), 0
+        name = prefix + "%06d.ts" % index
+        buf = bytearray()
+        with self._mem_lock:
+            epoch = self._mem_epoch
+            self._mem[name] = buf
+        try:
+            conn.settimeout(5)
+            while True:
+                try:
+                    data = conn.recv(262144)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not data:
+                    break
+                with self._mem_lock:
+                    if epoch != self._mem_epoch:
+                        break   # буфер очистили (смена настроек) — этот поток больше не нужен
+                    buf += data
+                # Резать поток можно только перед опорным кадром: тогда любой кусочек начинается
+                # с целой картинки. Опорный кадр виден по пометке в заголовке пакета (188 байт).
+                elapsed = time.monotonic() - started
+                limit = len(buf) - len(buf) % 188
+                cut = None
+                if elapsed >= SEGMENT - 0.5:
+                    while scan < limit:
+                        if (scan > 0 and buf[scan] == 0x47 and buf[scan + 3] & 0x20 and buf[scan + 4] > 0
+                                and buf[scan + 5] & 0x40 and ((buf[scan + 1] & 0x1F) << 8 | buf[scan + 2]) == 0x100):
+                            cut = scan
+                            break
+                        scan += 188
+                    if cut is None and elapsed > SEGMENT * 4 and limit:
+                        cut = limit   # опорных кадров не видно — режем как есть
+                else:
+                    scan = max(188, limit)
+                if cut is None:
+                    continue
+                while cut >= 188:   # служебные таблицы перед опорным кадром уходят в новый кусочек вместе с ним
+                    pid = (buf[cut - 187] & 0x1F) << 8 | buf[cut - 186]
+                    if pid not in (0x0000, 0x0011, 0x1000):
+                        break
+                    cut -= 188
+                if cut <= 0:
+                    scan += 188
+                    continue
+                with self._mem_lock:
+                    done, rest = bytes(buf[:cut]), bytearray(buf[cut:])
+                    index += 1
+                    new_name = prefix + "%06d.ts" % index
+                    if name in self._mem:          # кусочек могли уже стереть (перезапуск)
+                        self._mem[name] = done
+                        self._mem_dur[name] = elapsed
+                        spill = self._rec_first is not None
+                    else:
+                        spill = False
+                    self._mem[new_name] = rest
+                if spill:
+                    self._spill(name, done)
+                name, buf, started, scan = new_name, rest, time.monotonic(), 0
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            with self._mem_lock:
+                if name in self._mem and epoch == self._mem_epoch:
+                    self._mem[name] = bytes(buf)
+                    self._mem_dur[name] = time.monotonic() - started
+                elif epoch != self._mem_epoch:
+                    self._mem.pop(name, None)
+
+    def _spill(self, name, data):
+        try:
+            with open(os.path.join(self.work_dir, name), "wb") as f:
+                f.write(data)
+        except OSError as exc:
+            self._log("не удалось сбросить кусочек записи на диск: %s" % exc)
+            return
+        with self._mem_lock:
+            self._mem.pop(name, None)
+
+    def _seg_size(self, path):
+        with self._mem_lock:
+            data = self._mem.get(os.path.basename(path))
+            if data is not None:
+                return len(data)
+        return os.path.getsize(path)
+
+    def _seg_write(self, path, dst):
+        """Дописать содержимое кусочка (из памяти или с диска) в открытый файл."""
+        with self._mem_lock:
+            data = self._mem.get(os.path.basename(path))
+            if data is not None:
+                data = bytes(data)
+        if data is not None:
+            dst.write(data)
+        else:
+            with open(path, "rb") as src:
+                shutil.copyfileobj(src, dst, 4 * 1024 * 1024)
+
+    def _drop(self, path):
+        with self._mem_lock:
+            self._mem.pop(os.path.basename(path), None)
+            self._mem_dur.pop(os.path.basename(path), None)
+        self._remove(path)
+
+    def _tail(self, closed, seconds):
+        """Последние кусочки общей длиной не меньше seconds и то, сколько срезать с начала."""
+        chosen, total = [], 0.0
+        for path in reversed(closed):
+            chosen.append(path)
+            total += self._mem_dur.get(os.path.basename(path), SEGMENT)
+            if total >= seconds + 0.5:
+                break
+        chosen.reverse()
+        extra = total - seconds
+        # срезаем целое число секунд (опорные кадры идут раз в секунду) и чуть меньше — чтобы
+        # клип начался точно с опорного кадра, а звук не убежал вперёд картинки
+        skip = max(0.0, round(extra) - 0.02) if extra >= 0.5 else 0.0
+        return chosen, skip, min(seconds, total)
 
     def _watch_progress(self, proc, target):
         """Читает отчёт ffmpeg раз в 2 секунды и считает, сколько кадров реально пишется."""
@@ -745,12 +922,18 @@ class Recorder:
 
     # ------------------------------------------------------ кусочки
 
-    def _segments(self):
-        """Все кусочки по порядку, включая оставшиеся от прошлых запусков захвата."""
-        return sorted(glob.glob(os.path.join(self.work_dir, "s[0-9][0-9][0-9][0-9]_*.ts")))
+    def _segments(self, prefix=None):
+        """Все кусочки по порядку (и в памяти, и на диске), включая оставшиеся от прошлых запусков захвата."""
+        pattern = (prefix + "*.ts") if prefix else "s[0-9][0-9][0-9][0-9]_*.ts"
+        found = set(glob.glob(os.path.join(self.work_dir, pattern)))
+        with self._mem_lock:
+            for name in self._mem:
+                if prefix is None or name.startswith(prefix):
+                    found.add(os.path.join(self.work_dir, name))
+        return sorted(found)
 
     def _current_segments(self):
-        return sorted(glob.glob(os.path.join(self.work_dir, "s%04d_*.ts" % self._session)))
+        return self._segments("s%04d_" % self._session)
 
     def _prune(self):
         if not self._save_lock.acquire(False):
@@ -764,7 +947,7 @@ class Recorder:
             if self._rec_first:
                 old = [p for p in old if os.path.basename(p) < self._rec_first]
             for path in old:
-                self._remove(path)
+                self._drop(path)
         finally:
             self._save_lock.release()
 
@@ -853,14 +1036,18 @@ class Recorder:
     def _mux_run(self, segments, out_path, skip=0.0, faststart=True):
         names = [os.path.basename(p) for p in segments]
         joined = None
-        if sum(len(n) + 1 for n in names) < CONCAT_LIMIT:
+        with self._mem_lock:
+            in_memory = any(n in self._mem for n in names)
+        if not in_memory and sum(len(n) + 1 for n in names) < CONCAT_LIMIT:
             source = "concat:" + "|".join(names)
-        else:  # очень длинная запись: командная строка Windows ограничена
+        else:  # кусочки в памяти (или их очень много) — собираем во временный файл
             joined = os.path.join(self.work_dir, "joined_%d.tmp" % int(time.time() * 1000))
             with open(joined, "wb") as dst:
                 for path in segments:
-                    with open(path, "rb") as src:
-                        shutil.copyfileobj(src, dst, 4 * 1024 * 1024)
+                    try:
+                        self._seg_write(path, dst)
+                    except OSError:
+                        pass   # кусочек успели убрать — пропускаем
             source = os.path.basename(joined)
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", source]
         if skip > 0.05:
@@ -901,16 +1088,15 @@ class Recorder:
         self.on_event("saving", {})
         with self._save_lock:
             closed = self._closed_segments()
-            chosen = closed[-(math.ceil(seconds / SEGMENT) + 1):]
+            chosen, skip, length = self._tail(closed, seconds)
             if not chosen:
                 self.on_event("error", {"text": "В буфере пока пусто, подождите пару секунд."})
                 return
-            skip = max(0.0, len(chosen) * SEGMENT - seconds)
             out_path = self._output_path(title, "Клип")
             ok = self._mux(chosen, out_path, skip)
         if ok:
             self.on_event("saved", {"path": out_path, "kind": "clip",
-                                    "seconds": min(seconds, len(chosen) * SEGMENT)})
+                                    "seconds": length})
         else:
             self._remove(out_path)
             self.on_event("error", {"text": "Не получилось сохранить клип. Подробности — в журнале."})

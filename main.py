@@ -262,6 +262,9 @@ class Api:
             winutil.set_autostart(app.cfg["autostart"])
         if changed & CAPTURE_KEYS and app.ffmpeg:
             capture_changed = (changed & CAPTURE_KEYS) - {"buffer_seconds", "buffer_enabled"}   # длина буфера меняется на лету
+            if app.recorder.is_running() and app.recorder._use_memory() != app.recorder.in_memory \
+                    and app.recorder.recording_since is None:
+                capture_changed.add("buffer_storage")   # буфер переезжает из памяти на диск или обратно
             if capture_changed:
                 # громкость в записи применяется без потери буфера и идущей записи
                 app.recorder.restart(soft=capture_changed <= {"rec_volume_system", "rec_volume_mic"})

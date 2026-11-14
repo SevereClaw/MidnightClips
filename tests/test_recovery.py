@@ -32,10 +32,11 @@ def wait_on(r, seconds=25):
     return time.time() - t0
 
 
-def main():
+def main(storage="disk"):
+    print("=== буфер: %s" % storage)
     tmp = tempfile.mkdtemp(prefix="mc_rec_")
     cfg = Config(os.path.join(tmp, "settings.json"))
-    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 30, "fps": 30})
+    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 30, "fps": 30, "buffer_storage": storage})
     events = []
     log = os.path.join(tmp, "ffmpeg.log")
     r = rec.Recorder(cfg, rec.find_ffmpeg("/nonexistent"), os.path.join(tmp, "buf"), log,
@@ -99,4 +100,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main("memory")
+    main("disk")

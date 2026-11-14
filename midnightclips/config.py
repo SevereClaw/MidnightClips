@@ -36,6 +36,7 @@ DEFAULTS = {
     "clips_dir": "",            # пусто = Видео/MidnightClips
     "buffer_enabled": True,     # постоянная запись в буфер повтора
     "buffer_seconds": 60,       # сколько секунд сохраняет клип
+    "buffer_storage": "auto",   # где держать буфер: auto / memory / disk
     "fps": 60,
     "height": 0,                # 0 = как на экране, иначе 1080 / 720
     "bitrate_mbps": 12,
@@ -70,7 +71,7 @@ DEFAULTS = {
 # Изменение этих ключей требует перезапуска захвата.
 CAPTURE_KEYS = {
     "buffer_enabled", "buffer_seconds", "fps", "height", "bitrate_mbps", "monitor",
-    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic",
+    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage",
 }
 
 
