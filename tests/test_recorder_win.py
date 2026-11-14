@@ -72,12 +72,19 @@ def main(kind="own"):
         print("экран обновляется %s раз/с, пишется %s из %s кадров/с" % (r.screen_fps, r.fps_real, r.fps_target), flush=True)
         assert r.fps_real and r.fps_real > 54, r.fps_real
 
-        r.save_clip("Проверка")
         t0 = time.time()
+        r.save_clip("Проверка")
         while not [1 for k, _ in events if k in ("saved", "error")] and time.time() - t0 < 30:
-            time.sleep(0.3)
+            time.sleep(0.02)
+        took = time.time() - t0
         saved = [p for k, p in events if k == "saved"]
         assert saved, events
+        # клип берёт и кусочек, который ещё пишется: ждать его закрытия не нужно, битых кадров в конце нет
+        broken = subprocess.run([ffmpeg, "-v", "error", "-i", saved[0]["path"], "-f", "null", "-"],
+                                capture_output=True, text=True, errors="replace").stderr.strip()
+        print("клип сохранён за %.2f c после нажатия; ошибок при чтении: %s" % (took, broken[-300:] or "нет"), flush=True)
+        assert took < 1.5, "сохранение клипа ждёт: %.2f c" % took
+        assert not broken, broken[-600:]
         total, info = frames(ffmpeg, saved[0]["path"])
         unique, _ = frames(ffmpeg, saved[0]["path"], "mpdecimate=hi=256:lo=64:frac=0.005")
         print("клип: %d кадров (%.1f c), из них разных %d (%.0f в секунду) | %s" % (

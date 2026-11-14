@@ -48,7 +48,13 @@ def main(storage="disk"):
     assert (not on_disk) if storage == "memory" else (len(on_disk) == n_seg and not r._mem)
 
     # 1) клип из буфера
+    t_save = time.time()
     r.save_clip("Тест: Игра?")
+    while not [1 for k, _ in events if k in ("saved", "error")] and time.time() - t_save < 10:
+        time.sleep(0.02)
+    took = time.time() - t_save
+    print("клип сохранён за %.2f c после нажатия" % took)
+    assert took < 1.5, "сохранение клипа ждёт закрытия кусочка: %.2f c" % took
     # 2) обычная запись ~5 секунд
     time.sleep(4)
     assert r.start_recording("Запись теста")

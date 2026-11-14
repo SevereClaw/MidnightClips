@@ -38,6 +38,17 @@ CAPTURE_TITLES = {"enc": "движок MidnightClips, кодирование н�
                   "gdi": "GDI", "test": "тест"}
 
 
+def whole_frames(data):
+    """Кусочек потока MPEG-TS, который ещё пишется: отрезать хвост по началу последнего видеокадра —
+    тот может быть записан не целиком. Всё, что до него, — целые кадры."""
+    i = len(data) - len(data) % 188 - 188
+    while i >= 0:
+        if data[i] == 0x47 and data[i + 1] & 0x40 and ((data[i + 1] & 0x1F) << 8 | data[i + 2]) == 0x100:
+            return data[:i]
+        i -= 188
+    return data[:0]
+
+
 def find_ffmpeg(resource_dir):
     name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
     places = [resource_dir, os.path.join(resource_dir, "bin")]
@@ -99,6 +110,9 @@ class Recorder:
         self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
         self._mem = {}                    # буфер в памяти: имя кусочка -> байты
         self._mem_dur = {}                # сколько секунд в каждом кусочке из памяти
+        self._mem_started = {}            # когда начат кусочек, который сейчас пишется в память
+        self._partial = None              # кусочек, который ещё пишется: в клип идёт то, что уже готово
+        self._partial_dur = 0.0
         self._mem_lock = threading.Lock()
         self._mem_epoch = 0               # растёт при полной очистке буфера
         self.in_memory = False            # где сейчас лежит буфер повтора
@@ -845,7 +859,7 @@ class Recorder:
             # на диск ничего не пишется, пока клип не сохраняют.
             cmd += ["-f", "mpegts", "-flush_packets", "1", "tcp://127.0.0.1:%d" % memory_port]
         else:
-            cmd += ["-f", "segment", "-segment_time", str(SEGMENT), "-segment_format", "mpegts",
+            cmd += ["-flush_packets", "1", "-f", "segment", "-segment_time", str(SEGMENT), "-segment_format", "mpegts",
                     prefix + "%06d.ts"]
         return cmd
 
@@ -882,6 +896,7 @@ class Recorder:
         with self._mem_lock:
             epoch = self._mem_epoch
             self._mem[name] = buf
+            self._mem_started = {name: started}
         try:
             conn.settimeout(5)
             while True:
@@ -934,6 +949,7 @@ class Recorder:
                     else:
                         spill = False
                     self._mem[new_name] = rest
+                    self._mem_started = {new_name: time.monotonic()}
                 if spill:
                     self._spill(name, done)
                 name, buf, started, scan = new_name, rest, time.monotonic(), 0
@@ -966,14 +982,18 @@ class Recorder:
                 return len(data)
         return os.path.getsize(path)
 
-    def _seg_write(self, path, dst):
-        """Дописать содержимое кусочка (из памяти или с диска) в открытый файл."""
+    def _seg_write(self, path, dst, partial=False):
+        """Дописать содержимое кусочка (из памяти или с диска) в открытый файл.
+        partial — кусочек ещё пишется: берём из него только целые кадры."""
         with self._mem_lock:
             data = self._mem.get(os.path.basename(path))
             if data is not None:
                 data = bytes(data)
+        if data is None and partial:
+            with open(path, "rb") as src:
+                data = src.read()
         if data is not None:
-            dst.write(data)
+            dst.write(whole_frames(data) if partial else data)
         else:
             with open(path, "rb") as src:
                 shutil.copyfileobj(src, dst, 4 * 1024 * 1024)
@@ -989,7 +1009,10 @@ class Recorder:
         chosen, total = [], 0.0
         for path in reversed(closed):
             chosen.append(path)
-            total += self._mem_dur.get(os.path.basename(path), SEGMENT)
+            if path == self._partial:
+                total += self._partial_dur
+            else:
+                total += self._mem_dur.get(os.path.basename(path), SEGMENT)
             if total >= seconds + 0.5:
                 break
         chosen.reverse()
@@ -1092,21 +1115,29 @@ class Recorder:
             pass
 
     def _closed_segments(self, wait_next=True):
-        """Дождаться, пока текущий кусочек допишется, и вернуть все готовые."""
+        """Все кусочки для клипа или записи — вместе с тем, что пишется прямо сейчас: из него берётся
+        уже готовая часть, так что ждать его закрытия не нужно и запись кончается в момент нажатия."""
+        segments = self._segments()
+        self._partial, self._partial_dur = None, 0.0
         current_list = self._current_segments()
         alive = self._proc is not None and self._proc.poll() is None
         if not wait_next or not current_list or not alive:
-            return self._segments()   # захват перезапускается — берём всё, что есть
+            return segments   # захват перезапускается — берём всё, что есть
         current = current_list[-1]
-        deadline = time.time() + SEGMENT + 3
-        while time.time() < deadline:
-            latest = self._current_segments()
-            if latest and latest[-1] != current:
-                return [p for p in self._segments() if p <= current]
-            if self._proc is None or self._proc.poll() is not None:
-                break
-            time.sleep(0.1)
-        return self._segments()
+        name = os.path.basename(current)
+        with self._mem_lock:
+            started = self._mem_started.get(name)
+        if started is not None:
+            elapsed = time.monotonic() - started
+        else:   # кусочек — файл на диске: он начат, когда закрылся предыдущий
+            try:
+                before = current_list[-2] if len(current_list) > 1 else None
+                elapsed = time.time() - (os.path.getmtime(before) if before else os.path.getctime(current))
+            except OSError:
+                elapsed = SEGMENT
+        self._partial = current
+        self._partial_dur = max(0.0, min(SEGMENT + 1.0, elapsed))
+        return segments
 
     def _output_path(self, title, kind):
         folder = self.cfg.clips_dir()
@@ -1171,14 +1202,15 @@ class Recorder:
         joined = None
         with self._mem_lock:
             in_memory = any(n in self._mem for n in names)
-        if not in_memory and sum(len(n) + 1 for n in names) < CONCAT_LIMIT:
+        partial = self._partial if self._partial in segments else None
+        if not in_memory and not partial and sum(len(n) + 1 for n in names) < CONCAT_LIMIT:
             source = "concat:" + "|".join(names)
         else:  # кусочки в памяти (или их очень много) — собираем во временный файл
             joined = os.path.join(self.work_dir, "joined_%d.tmp" % int(time.time() * 1000))
             with open(joined, "wb") as dst:
                 for path in segments:
                     try:
-                        self._seg_write(path, dst)
+                        self._seg_write(path, dst, partial=path == partial)
                     except OSError:
                         pass   # кусочек успели убрать — пропускаем
             source = os.path.basename(joined)
