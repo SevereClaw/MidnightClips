@@ -24,7 +24,6 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#include <d3d10.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
