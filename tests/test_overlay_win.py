@@ -40,14 +40,21 @@ if __name__ == "__main__":
     flags = {"rec": False}
 
     def model():
-        return {"status": "Проверка", "hint": "Esc — закрыть",
-                "tiles": [{"id": "clip", "title": "Сохранить клип", "sub": "Последние 60 с", "active": True},
+        return {"status": "Идёт запись  00:12" if flags["rec"] else "Клипы включены — в буфере последние 60 с",
+                "recording": flags["rec"], "hint": "Цифры 1–9, стрелки с Enter или мышь — выбрать.   Alt+Z или Esc — закрыть",
+                "last": "Проверка 2026-11-16  ·  3 мин назад  ·  48 МБ",
+                "chips": [{"text": "game.exe", "accent": True}, {"text": "NVIDIA NVENC"}, {"text": "60 кадров/с"},
+                          {"text": "Свободно 212 ГБ"}],
+                "tiles": [{"id": "clip", "title": "Сохранить клип", "sub": "Последние 60 с", "active": True, "key": "Alt+F10", "icon": "clip"},
+                          {"id": "clip_a", "title": "Клип: 30 с", "sub": "Последние 30 с", "active": True, "key": "Alt+F8", "icon": "short"},
+                          {"id": "clip_b", "title": "Клип: 15 с", "sub": "Последние 15 с", "active": True, "key": "Alt+F7", "icon": "short"},
                           {"id": "record", "title": "Остановить запись" if flags["rec"] else "Начать запись", "sub": "Alt+F9",
-                           "active": True, "alert": flags["rec"]},
-                          {"id": "buffer", "title": "Буфер повтора", "sub": "Включён", "active": True},
-                          {"id": "mic", "title": "Микрофон", "sub": "Не записывается", "active": False},
-                          {"id": "clips", "title": "Клипы", "sub": "Открыть галерею", "active": True},
-                          {"id": "settings", "title": "Настройки", "sub": "", "active": True}]}
+                           "active": True, "alert": flags["rec"], "key": "Alt+F9", "icon": "stop" if flags["rec"] else "rec"},
+                          {"id": "buffer", "title": "Клипы", "sub": "Буфер повтора работает, клавиши клипов заняты", "active": True, "switch": True},
+                          {"id": "mic", "title": "Микрофон", "sub": "Не записывается", "active": False, "switch": False},
+                          {"id": "copy", "title": "Скопировать клип", "sub": "Последний клип — и Ctrl+V в Discord", "active": True, "icon": "copy"},
+                          {"id": "clips", "title": "Галерея", "sub": "Сегодня клипов: 4", "active": True, "icon": "grid"},
+                          {"id": "settings", "title": "Настройки", "sub": "Открыть настройки программы", "active": True, "icon": "gear"}]}
 
     def action(ident):
         pressed.append(ident)

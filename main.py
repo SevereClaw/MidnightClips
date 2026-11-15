@@ -1,6 +1,7 @@
 """MidnightClips — запись клипов с экрана (буфер повтора) для Windows."""
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -112,11 +113,15 @@ class App:
         return True
 
     def bind_hotkeys(self):
-        self.hotkeys.bind("clip", self.cfg["hotkey_clip"], self.save_clip)
+        # Клипы выключены (буфер повтора) — их клавиши освобождаются: не срабатывают и достаются другим программам.
+        clips = bool(self.cfg["buffer_enabled"])
+        self.hotkeys.bind("clip", self.cfg["hotkey_clip"] if clips else "", self.save_clip)
         self.hotkeys.bind("record", self.cfg["hotkey_record"], self.toggle_record)
         self.hotkeys.bind("overlay", self.cfg["hotkey_overlay"], self.toggle_overlay)
-        self.hotkeys.bind("clip_a", self.cfg["hotkey_clip_a"], lambda: self.save_clip(int(self.cfg["clip_a_seconds"])))
-        self.hotkeys.bind("clip_b", self.cfg["hotkey_clip_b"], lambda: self.save_clip(int(self.cfg["clip_b_seconds"])))
+        self.hotkeys.bind("clip_a", self.cfg["hotkey_clip_a"] if clips else "",
+                          lambda: self.save_clip(int(self.cfg["clip_a_seconds"])))
+        self.hotkeys.bind("clip_b", self.cfg["hotkey_clip_b"] if clips else "",
+                          lambda: self.save_clip(int(self.cfg["clip_b_seconds"])))
         time.sleep(0.15)  # дать потоку клавиш применить изменения
         self.push("hotkeys", dict(self.hotkeys.status))
 
@@ -248,56 +253,114 @@ class App:
     def toggle_overlay(self):
         self.toast.toggle_menu(self.monitor_rect(), self.overlay_model, self.overlay_action)
 
+    def overlay_facts(self):
+        """Последний клип, клипы за сегодня и свободное место — для меню. Папку перечитываем не чаще раза в 4 секунды."""
+        now = time.time()
+        cached = getattr(self, "_overlay_facts", None)
+        if cached and now - cached[0] < 4:
+            return cached[1]
+        facts = {"last": None, "today": 0, "free_gb": None}
+        try:
+            clips = self.library.list()
+            midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+            facts["today"] = sum(1 for c in clips if c["mtime"] >= midnight)
+            facts["last"] = clips[0] if clips else None
+        except Exception:
+            pass
+        try:
+            facts["free_gb"] = shutil.disk_usage(self.cfg.clips_dir()).free / 1024 ** 3
+        except OSError:
+            pass
+        self._overlay_facts = (now, facts)
+        return facts
+
     def overlay_model(self):
         cfg, rec = self.cfg, self.recorder
         recording = rec.recording_since is not None
-        buffer_on = bool(cfg["buffer_enabled"])
+        clips_on = bool(cfg["buffer_enabled"])
+        ready = rec.state == "on"
         seconds = int(cfg["buffer_seconds"])
-        length = "%d мин" % (seconds // 60) if seconds >= 120 and seconds % 60 == 0 else "%d с" % seconds
+
+        def span(value):
+            return "%d мин" % (value // 60) if value >= 60 and value % 60 == 0 else "%d с" % value
+
+        length = span(seconds)
         if recording:
             passed = int(time.time() - rec.recording_since)
             status = "Идёт запись  %02d:%02d" % (passed // 60, passed % 60)
-        elif rec.state == "on":
-            status = ("Буфер повтора работает — последние %s" % length) if buffer_on else "Захват работает, буфер повтора выключен"
+        elif ready:
+            status = ("Клипы включены — в буфере последние %s" % length) if clips_on else "Клипы выключены — работает только запись"
         else:
             status = rec.message or "Захват запускается…"
         mic_on = bool(cfg["mic"]) and bool(cfg["mic_on"])
+        facts = self.overlay_facts()
+        last = facts["last"]
 
-        def short(ident):   # плитка «клип покороче»
-            want = int(cfg["%s_seconds" % ident])
-            key = cfg["hotkey_%s" % ident] or "без клавиши"
-            name = "%d мин" % (want // 60) if want >= 60 and want % 60 == 0 else "%d с" % want
-            if not buffer_on:
-                sub = "Буфер повтора выключен"
+        def clip_tile(ident, want, key):
+            if not clips_on:
+                sub = "Клипы выключены"
             elif want > seconds:
-                sub = "Буфер короче — сохранится %s  ·  %s" % (length, key)
+                sub = "Буфер короче — сохранится %s" % length
             else:
-                sub = key
-            return {"id": ident, "title": "Клип: последние %s" % name, "active": buffer_on and rec.state == "on", "sub": sub}
+                sub = "Последние %s" % span(want)
+            return {"id": ident, "title": "Сохранить клип" if ident == "clip" else "Клип: %s" % span(want),
+                    "active": clips_on and ready, "sub": sub, "key": (key or "без клавиши") if clips_on else "",
+                    "icon": "clip" if ident == "clip" else "short"}
 
         tiles = [
-            {"id": "clip", "title": "Сохранить клип", "active": buffer_on and rec.state == "on",
-             "sub": ("Последние %s  ·  %s" % (length, cfg["hotkey_clip"] or "без клавиши")) if buffer_on else "Буфер повтора выключен"},
-            short("clip_a"), short("clip_b"),
+            clip_tile("clip", seconds, cfg["hotkey_clip"]),
+            clip_tile("clip_a", int(cfg["clip_a_seconds"]), cfg["hotkey_clip_a"]),
+            clip_tile("clip_b", int(cfg["clip_b_seconds"]), cfg["hotkey_clip_b"]),
             {"id": "record", "title": "Остановить запись" if recording else "Начать запись", "active": True, "alert": recording,
-             "sub": cfg["hotkey_record"] or "без клавиши"},
-            {"id": "buffer", "title": "Буфер повтора", "active": buffer_on, "sub": "Включён — нажмите, чтобы выключить" if buffer_on else "Выключен — нажмите, чтобы включить"},
-            {"id": "mic", "title": "Микрофон", "active": mic_on,
-             "sub": "Записывается" if mic_on else ("Не записывается" if cfg["mic"] else "Устройство не выбрано в настройках")},
-            {"id": "clips", "title": "Клипы", "active": True, "sub": "Открыть галерею"},
-            {"id": "settings", "title": "Настройки", "active": True, "sub": "Открыть настройки программы"},
+             "sub": "Идёт %02d:%02d" % divmod(int(time.time() - rec.recording_since), 60) if recording else "Пишет, пока не остановите",
+             "key": cfg["hotkey_record"] or "без клавиши", "icon": "stop" if recording else "rec"},
+            {"id": "buffer", "title": "Клипы", "active": clips_on, "switch": clips_on,
+             "sub": "Буфер повтора работает, клавиши клипов заняты" if clips_on else "Буфер повтора остановлен, клавиши клипов свободны"},
+            {"id": "mic", "title": "Микрофон", "active": mic_on, "switch": mic_on,
+             "sub": "Попадает в клипы и записи" if mic_on else ("Не записывается" if cfg["mic"] else "Устройство не выбрано в настройках")},
+            {"id": "copy", "title": "Скопировать клип", "active": bool(last), "icon": "copy",
+             "sub": "Последний клип — и Ctrl+V в Discord" if last else "Клипов пока нет"},
+            {"id": "clips", "title": "Галерея", "active": True, "icon": "grid",
+             "sub": "Сегодня клипов: %d" % facts["today"] if facts["today"] else "Все клипы и записи"},
+            {"id": "settings", "title": "Настройки", "active": True, "sub": "Открыть настройки программы", "icon": "gear"},
         ]
-        hint = "Цифры 1–8 или мышь — выбрать.  %s или Esc — закрыть" % (cfg["hotkey_overlay"] or "Esc")
-        return {"status": status, "tiles": tiles, "hint": hint}
+
+        snap = rec.snapshot()
+        chips = []
+        if snap.get("window_name") and cfg["capture_target"] in ("game", "window"):
+            chips.append({"text": snap["window_name"], "accent": True})
+        if ready:
+            if snap.get("encoder"):
+                chips.append({"text": str(snap["encoder"])})
+            fps = snap.get("fps_real") or snap.get("fps_target") or int(cfg["fps"])
+            height = int(cfg["height"])
+            chips.append({"text": "%s%d кадров/с" % ("%dp · " % height if height else "", round(fps))})
+            if clips_on:
+                chips.append({"text": "Буфер ~%d МБ %s" % (snap.get("buffer_mb") or 0, "в памяти" if snap.get("buffer_in_memory") else "на диске")})
+        if facts["free_gb"] is not None:
+            chips.append({"text": "Свободно %d ГБ" % facts["free_gb"], "accent": facts["free_gb"] < 5})
+
+        last_text = ""
+        if last:
+            ago = max(0, int(time.time() - last["mtime"]))
+            when = "только что" if ago < 60 else "%d мин назад" % (ago // 60) if ago < 3600 else \
+                "%d ч назад" % (ago // 3600) if ago < 86400 else "%d дн назад" % (ago // 86400)
+            last_text = "%s  ·  %s  ·  %.0f МБ" % (last["name"][:48], when, last["size"] / 1048576)
+        hint = "Цифры 1–9, стрелки с Enter или мышь — выбрать.   %s или Esc — закрыть" % (cfg["hotkey_overlay"] or "Esc")
+        return {"status": status, "recording": recording, "tiles": tiles, "chips": chips, "last": last_text, "hint": hint}
 
     def overlay_action(self, ident):
         """Нажатие плитки. True — меню после этого закрыть."""
         if ident == "clip":
-            self.save_clip()
-            return True
+            if self.cfg["buffer_enabled"]:
+                self.save_clip()
+                return True
+            return False
         if ident in ("clip_a", "clip_b"):
-            self.save_clip(int(self.cfg["%s_seconds" % ident]))
-            return True
+            if self.cfg["buffer_enabled"]:
+                self.save_clip(int(self.cfg["%s_seconds" % ident]))
+                return True
+            return False
         if ident == "record":
             self.toggle_record()
             return False
@@ -307,6 +370,12 @@ class App:
         if ident == "mic":
             if self.cfg["mic"]:
                 self.apply_settings({"mic_on": not self.cfg["mic_on"]})
+            return False
+        if ident == "copy":
+            last = self.overlay_facts()["last"]
+            if last and os.path.isfile(last["path"]) and winutil.copy_file_to_clipboard(last["path"]):
+                self.toast.show("Клип скопирован", "Вставьте в Discord: Ctrl+V")
+                return True
             return False
         if ident in ("clips", "settings"):
             self.show_window()
@@ -389,7 +458,7 @@ class Api:
     def set_settings(self, values):
         app = self._app
         changed = app.cfg.update(values or {})
-        if changed & {"hotkey_clip", "hotkey_record", "hotkey_overlay", "hotkey_clip_a", "hotkey_clip_b"}:
+        if changed & {"hotkey_clip", "hotkey_record", "hotkey_overlay", "hotkey_clip_a", "hotkey_clip_b", "buffer_enabled"}:
             app.bind_hotkeys()
         if changed & {"cleanup_days", "cleanup_gb", "clips_dir"}:
             threading.Thread(target=app.run_cleanup, daemon=True).start()
