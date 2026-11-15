@@ -424,7 +424,7 @@ def mux_check():
     assert not reader.is_alive(), "поток движка не закрылся"
     info = subprocess.run([FFMPEG, "-hide_banner", "-i", out, "-map", "0", "-f", "null", "-"],
                           capture_output=True, text=True, errors="replace").stderr
-    streams = re.findall(r"Stream #0:\d+.*?: (Video|Audio): (\w+)", info)
+    streams = re.findall(r"Stream #0:\d+.*?: (Video|Audio): (\w+)", info.split("Output #0")[0])
     starts = re.findall(r"start: ([\d.]+)", info)
     decoded = [int(x) for x in re.findall(r"frame=\s*(\d+)", info)]
     audio_len = subprocess.run([FFMPEG, "-v", "error", "-i", out, "-map", "0:a:0", "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
