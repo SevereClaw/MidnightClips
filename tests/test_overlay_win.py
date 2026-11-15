@@ -62,6 +62,14 @@ if __name__ == "__main__":
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     subprocess.run([os.path.join(root_dir, "ffmpeg.exe"), "-hide_banner", "-loglevel", "error", "-y", "-f", "gdigrab",
                     "-i", "desktop", "-frames:v", "1", os.path.join(root_dir, "overlay_menu.png")])   # снимок — посмотреть глазами
+    import base64
+    small = os.path.join(root_dir, "overlay_menu.jpg")
+    subprocess.run([os.path.join(root_dir, "ffmpeg.exe"), "-hide_banner", "-loglevel", "error", "-y", "-i",
+                    os.path.join(root_dir, "overlay_menu.png"), "-q:v", "6", small])
+    if os.path.isfile(small):
+        data = base64.b64encode(open(small, "rb").read()).decode()
+        for i in range(0, len(data), 3000):
+            print("SHOT:" + data[i:i + 3000], flush=True)
     toast.menu_press("record")
     time.sleep(1.0)
     assert toast.menu_open and flags["rec"], "после «записи» меню должно остаться открытым"
