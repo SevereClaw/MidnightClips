@@ -48,6 +48,7 @@ const demoApi = {
   set_tags: async (p, tags) => { demo.clips.find((c) => c.path === p).tags = tags; return true; },
   cleanup_preview: async (days, gb) => ({ count: days || gb ? 3 : 0, bytes: 1.25e9 }),
   media_url: async () => window.DEMO_VIDEO || "",
+  clip_tracks: async () => ["Всё вместе", "Микрофон", "Игра", "Discord", "Остальное"],
   clip_action: async (p, action) => {
     let n = 0;
     const timer = setInterval(() => {
@@ -497,7 +498,9 @@ function drawTrim() {
   $("trimText").textContent = whole
     ? "Весь клип, " + fmtTime(dur)
     : "Отрезок " + fmtTime(a) + " – " + fmtTime(b) + ", длина " + fmtTime(b - a);
-  $("edTrim").disabled = whole || edBusy;
+  const picked = pickedTracks() !== null;
+  $("edTrim").disabled = (whole && !picked) || edBusy;
+  $("edTrim").textContent = whole && picked ? "Сохранить с этими дорожками" : "Сохранить обрезку";
 }
 function setTrim(a, b) {
   const dur = video.duration || 0;
@@ -507,6 +510,12 @@ function setTrim(a, b) {
   $("trimEnd").value = b;
   drawTrim();
 }
+let edTracks = [];
+// Номера оставленных дорожек; null — все на месте (звук как есть).
+function pickedTracks() {
+  if (!edTracks.length || edTracks.every((b) => b.checked)) return null;
+  return edTracks.filter((b) => b.checked).map((b) => parseInt(b.dataset.track, 10));
+}
 async function openEditor(clip) {
   edClip = clip;
   $("edName").textContent = clip.name;
@@ -515,6 +524,25 @@ async function openEditor(clip) {
   $("trimText").textContent = "Загружаю клип…";
   video.src = await api.media_url(clip.path);
   $("edClose").focus();
+  // отдельные звуковые дорожки: галочками выбирается, что останется в сохранённом или отправленном клипе
+  edTracks = [];
+  $("edTracks").hidden = true;
+  const names = (await api.clip_tracks(clip.path)) || [];
+  if (edClip !== clip || names.length < 2) return;
+  const list = $("edTrackList");
+  list.innerHTML = "";
+  names.slice(1).forEach((name, i) => {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.checked = true; box.dataset.track = String(i + 1);
+    box.onchange = () => { const [a, b] = trimValues(); setTrim(a, b); };
+    label.append(box, document.createTextNode(name));
+    list.appendChild(label);
+    edTracks.push(box);
+  });
+  $("edTracks").hidden = false;
+  const [a, b] = trimValues();
+  setTrim(a, b);
 }
 function closeEditor() {
   if (edBusy) api.cancel_job();
@@ -566,7 +594,7 @@ async function runAction(action) {
   video.pause();
   setEditorBusy(true);
   showJob({ stage: "Начинаю…", percent: null });
-  if (!(await api.clip_action(edClip.path, action, a, b))) {
+  if (!(await api.clip_action(edClip.path, action, a, b, pickedTracks()))) {
     finishJob({ ok: false, text: "Сейчас занято другой задачей — подождите." });
   }
 }

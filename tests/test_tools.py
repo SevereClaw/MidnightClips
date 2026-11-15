@@ -54,6 +54,60 @@ def main():
     done, _ = run("trim")
     assert not done["ok"] and "ползунками" in done["text"]
 
+    # ---- клип с отдельными дорожками: общая (оба тона), «Микрофон» (440 Гц), «Игра» (1000 Гц)
+    os.makedirs(os.path.join(tmp, "tracks"), exist_ok=True)
+    multi = os.path.join(tmp, "tracks", "Дорожки.mp4")
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440", "-f", "lavfi", "-i", "sine=frequency=1000",
+                    "-filter_complex", "[1:a][2:a]amix=inputs=2:normalize=0[m]", "-map", "0:v", "-map", "[m]", "-map", "1:a",
+                    "-map", "2:a", "-t", "8", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-c:a", "aac",
+                    "-metadata:s:a:0", "handler_name=Всё вместе", "-metadata:s:a:1", "handler_name=Микрофон",
+                    "-metadata:s:a:2", "handler_name=Игра", multi], check=True)
+    names = tools.audio_tracks(FFMPEG, multi)
+    print("дорожки клипа:", names)
+    assert names == ["Всё вместе", "Микрофон", "Игра"], names
+
+    def tones(path):
+        import math
+        raw = subprocess.run([FFMPEG, "-v", "error", "-i", path, "-map", "0:a:0", "-ss", "2", "-t", "1", "-f", "s16le",
+                              "-ac", "1", "-ar", "48000", "-"], capture_output=True).stdout
+        data = [int.from_bytes(raw[i:i + 2], "little", signed=True) for i in range(0, len(raw) - 1, 2)]
+        out = []
+        for freq in (440, 1000):
+            re_, im_ = 0.0, 0.0
+            for n, v in enumerate(data):
+                angle = 2 * math.pi * freq * n / 48000
+                re_ += v * math.cos(angle)
+                im_ += v * math.sin(angle)
+            out.append(2 * math.hypot(re_, im_) / max(1, len(data)))
+        return out
+
+    def run_multi(action, picked, start=None, end=None):
+        events.clear()
+        assert t.start(multi, action, start, end, picked)
+        while t.busy:
+            time.sleep(0.2)
+        done = [p for k, p in events if k == "job_done"][-1]
+        assert done["ok"], done
+        return done["path"], len(tools.audio_tracks(FFMPEG, done["path"])), tones(done["path"])
+
+    for label, action, picked, want in (("только «Игра»", "trim", [2], (False, True)),
+                                        ("только «Микрофон», с обрезкой", "trim", [1], (True, False)),
+                                        ("обе дорожки (это общая)", "compress", [1, 2], (True, True)),
+                                        ("сжатие только «Игры»", "compress", [2], (False, True)),
+                                        ("без звука", "trim", [], (False, False))):
+        path, count, (low, high) = run_multi(action, picked, 1.0 if "обрезк" in label else None, 6.0 if "обрезк" in label else None)
+        print("%-32s дорожек в файле %d, 440 Гц %5.0f, 1000 Гц %5.0f (%s)" % (label, count, low, high, os.path.basename(path)))
+        assert count == (0 if picked == [] else 1), count
+        assert (low > 800) == want[0] and (high > 800) == want[1], (label, low, high)
+    path, count, _ = run_multi("trim", None, 1.0, 6.0)
+    assert count == 3, "без выбора дорожек обрезка должна сохранить все: %d" % count
+    events.clear()
+    assert t.start(multi, "trim", None, None, [1, 2])   # всё выбрано и отрезка нет — сохранять нечего
+    while t.busy:
+        time.sleep(0.2)
+    assert not [p for k, p in events if k == "job_done"][-1]["ok"]
+
     done, percents = run("compress")
     assert done["ok"], done
     size = os.path.getsize(done["path"]) / 1048576

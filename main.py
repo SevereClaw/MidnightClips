@@ -14,6 +14,7 @@ from midnightclips.media import MediaServer
 from midnightclips.presets import KEYS as PRESET_KEYS, VIDEO_KEYS, Presets
 from midnightclips.sounds import EVENTS as SOUND_EVENTS, SoundBank
 from midnightclips.toast import Toast
+from midnightclips import tools as clip_tools
 from midnightclips.tools import ClipTools
 from midnightclips.updater import Updater
 
@@ -460,11 +461,17 @@ class Api:
             return self._app.media.url(path)
         return ""
 
-    def clip_action(self, path, action, start=None, end=None):
+    def clip_tracks(self, path):
+        """Звуковые дорожки клипа — для галочек в окне клипа."""
+        if not (self._app.library.inside(path) and os.path.isfile(path) and self._app.ffmpeg):
+            return []
+        return clip_tools.audio_tracks(self._app.ffmpeg, path)
+
+    def clip_action(self, path, action, start=None, end=None, tracks=None):
         """action: trim — сохранить обрезку, compress — сжать под лимит, send — отправить в Discord."""
         if not (self._app.library.inside(path) and os.path.isfile(path)):
             return False
-        return self._app.tools.start(path, action, start, end)
+        return self._app.tools.start(path, action, start, end, tracks)
 
     def cancel_job(self):
         self._app.tools.cancel()

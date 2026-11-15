@@ -48,6 +48,43 @@ def video_codec(ffmpeg, path):
     return found.group(1).lower() if found else ""
 
 
+def audio_tracks(ffmpeg, path):
+    """Названия звуковых дорожек файла по порядку. У клипа с отдельными дорожками первая — «всё вместе»."""
+    try:
+        text = subprocess.run([ffmpeg, "-hide_banner", "-i", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, timeout=30, creationflags=NO_WINDOW).stderr.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names, current = [], None
+    for line in text.splitlines():
+        if re.match(r"\s*Stream #0:\d+", line):
+            current = None
+            if "Audio:" in line:
+                names.append("")
+                current = len(names) - 1
+        elif current is not None and not names[current]:
+            found = re.match(r"\s*(?:handler_name|title)\s*:\s*(.+)", line)
+            if found and found.group(1).strip() not in ("SoundHandler", ""):
+                names[current] = found.group(1).strip()
+    return [name or "Дорожка %d" % (i + 1) for i, name in enumerate(names)]
+
+
+def audio_choice(tracks, total):
+    """Какой звук положить в готовый файл. tracks — номера выбранных отдельных дорожек (1..total-1) или None.
+    Возвращает (доп. параметры ffmpeg перед выходным файлом, копируется ли звук без перекодирования)."""
+    if tracks is None or total < 2:
+        return ["-map", "0:v", "-map", "0:a?"], True
+    chosen = sorted({int(t) for t in tracks if 1 <= int(t) < total})
+    if not chosen:
+        return ["-map", "0:v", "-an"], True
+    if len(chosen) == total - 1:
+        return ["-map", "0:v", "-map", "0:a:0"], True          # выбрано всё — это и есть общая дорожка
+    if len(chosen) == 1:
+        return ["-map", "0:v", "-map", "0:a:%d" % chosen[0]], True
+    mix = "".join("[0:a:%d]" % i for i in chosen) + "amix=inputs=%d:normalize=0[mcaudio]" % len(chosen)
+    return ["-filter_complex", mix, "-map", "0:v", "-map", "[mcaudio]"], False
+
+
 def plan(limit_mb, duration):
     """Подобрать битрейт, разрешение и кадры под нужный размер файла."""
     total = limit_mb * 8 * 1024 * 1024 / duration / 1000 * 0.955   # кбит/с, с запасом на контейнер
@@ -122,14 +159,16 @@ class ClipTools:
         self.busy = False
         self._cancel = False
         self._proc = None
+        self._audio, self._audio_copy = ["-map", "0:v", "-map", "0:a?"], True
         os.makedirs(tmp_dir, exist_ok=True)
 
-    def start(self, path, action, start=None, end=None):
+    def start(self, path, action, start=None, end=None, tracks=None):
+        """tracks — номера отдельных звуковых дорожек, которые оставить (None — звук как есть)."""
         if self.busy or action not in ("trim", "compress", "send"):
             return False
         self.busy = True
         self._cancel = False
-        threading.Thread(target=self._run, args=(path, action, start, end), daemon=True, name="clip-tools").start()
+        threading.Thread(target=self._run, args=(path, action, start, end, tracks), daemon=True, name="clip-tools").start()
         return True
 
     def cancel(self):
@@ -146,7 +185,7 @@ class ClipTools:
     def _stage(self, text, percent=None):
         self.on_event("job", {"stage": text, "percent": percent})
 
-    def _run(self, path, action, start, end):
+    def _run(self, path, action, start, end, tracks=None):
         temps = []
         try:
             if not self.ffmpeg:
@@ -157,16 +196,19 @@ class ClipTools:
             if e - s < 0.3:
                 raise Fail("Отрезок слишком короткий.")
             ranged = s > 0.05 or e < duration - 0.05
+            total = len(audio_tracks(self.ffmpeg, path)) if tracks is not None else 0
+            self._audio, self._audio_copy = audio_choice(tracks, total)
+            picked = tracks is not None and total >= 2 and len({int(t) for t in tracks if 1 <= int(t) < total}) < total - 1
             base = os.path.splitext(path)[0]
             limit = max(1, int(self.cfg["discord_limit_mb"]))
             limit_bytes = limit * 1024 * 1024
 
             if action == "trim":
-                if not ranged:
-                    raise Fail("Сначала выберите отрезок ползунками под видео.")
-                out = unique(base + " (обрезка).mp4")
+                if not ranged and not picked:
+                    raise Fail("Сначала выберите отрезок ползунками под видео или снимите галочки с дорожек.")
+                out = unique(base + (" (обрезка).mp4" if ranged else " (дорожки).mp4"))
                 self._trim(path, out, s, e)
-                self._done(action, "Обрезка сохранена", out)
+                self._done(action, "Обрезка сохранена" if ranged else "Клип с выбранными дорожками сохранён", out)
             elif action == "compress":
                 out = unique("%s (%d МБ).mp4" % (base, limit))
                 temps.append(out)
@@ -178,7 +220,7 @@ class ClipTools:
                 if not WEBHOOK_RE.match(url):
                     raise Fail("Сначала вставьте ссылку вебхука: Настройки → Discord.")
                 source = path
-                if ranged:
+                if ranged or picked:
                     source = os.path.join(self.tmp_dir, "send_trim.mp4")
                     temps.append(source)
                     self._trim(path, source, s, e)
@@ -250,7 +292,8 @@ class ClipTools:
     def _trim(self, src, out, s, e):
         """Быстрая обрезка без перекодирования (начало встаёт на ближайший опорный кадр, до секунды раньше)."""
         self._stage("Обрезаю…")
-        self._ffmpeg(["-ss", "%.3f" % s, "-i", src, "-t", "%.3f" % (e - s), "-map", "0:v", "-map", "0:a?", "-c", "copy",
+        codecs = ["-c", "copy"] if self._audio_copy else ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k"]
+        self._ffmpeg(["-ss", "%.3f" % s, "-i", src, "-t", "%.3f" % (e - s)] + self._audio + codecs + [
                       "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out])
         if not os.path.isfile(out) or os.path.getsize(out) == 0:
             raise Fail("Обрезка не получилась.")
@@ -264,12 +307,13 @@ class ClipTools:
             filters = "scale=-2:'trunc(min(ih,%d)/2)*2'" % height
             if src_fps > fps + 1:
                 filters += ",fps=%d" % fps
+            sound = [] if self._audio == ["-map", "0:v", "-map", "0:a?"] else self._audio   # по умолчанию — первая дорожка
             common = ["-ss", "%.3f" % s, "-i", src, "-t", "%.3f" % duration, "-vf", filters,
                       "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                       "-b:v", "%dk" % video, "-passlogfile", passlog]
             label = "Сжимаю до %d МБ…" % limit_mb
             self._ffmpeg(common + ["-pass:v", "1", "-an", "-f", "null", "-"], duration, 0, 45, label)
-            self._ffmpeg(common + ["-pass:v", "2", "-c:a", "aac", "-b:a", "%dk" % audio, "-ac", "2",
+            self._ffmpeg(common + sound + ["-pass:v", "2", "-c:a", "aac", "-b:a", "%dk" % audio, "-ac", "2",
                                    "-movflags", "+faststart", out], duration, 45, 55, label)
             size = os.path.getsize(out)
             if size <= limit_bytes:
