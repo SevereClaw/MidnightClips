@@ -52,7 +52,7 @@ if __name__ == "__main__":
                            "active": True, "alert": flags["rec"], "key": "Alt+F9", "icon": "stop" if flags["rec"] else "rec"},
                           {"id": "buffer", "title": "Клипы", "sub": "Буфер повтора работает, клавиши клипов заняты", "active": True, "switch": True},
                           {"id": "mic", "title": "Микрофон", "sub": "Не записывается", "active": False, "switch": False},
-                          {"id": "copy", "title": "Скопировать клип", "sub": "Последний клип — и Ctrl+V в Discord", "active": True, "icon": "copy"},
+                          {"id": "copy", "title": "Скопировать", "sub": "Последний клип — и Ctrl+V в Discord", "active": True, "icon": "copy"},
                           {"id": "clips", "title": "Галерея", "sub": "Сегодня клипов: 4", "active": True, "icon": "grid"},
                           {"id": "settings", "title": "Настройки", "sub": "Открыть настройки программы", "active": True, "icon": "gear"}]}
 

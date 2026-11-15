@@ -318,7 +318,7 @@ class App:
              "sub": "Буфер повтора работает, клавиши клипов заняты" if clips_on else "Буфер повтора остановлен, клавиши клипов свободны"},
             {"id": "mic", "title": "Микрофон", "active": mic_on, "switch": mic_on,
              "sub": "Попадает в клипы и записи" if mic_on else ("Не записывается" if cfg["mic"] else "Устройство не выбрано в настройках")},
-            {"id": "copy", "title": "Скопировать клип", "active": bool(last), "icon": "copy",
+            {"id": "copy", "title": "Скопировать", "active": bool(last), "icon": "copy",
              "sub": "Последний клип — и Ctrl+V в Discord" if last else "Клипов пока нет"},
             {"id": "clips", "title": "Галерея", "active": True, "icon": "grid",
              "sub": "Сегодня клипов: %d" % facts["today"] if facts["today"] else "Все клипы и записи"},

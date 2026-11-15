@@ -336,9 +336,9 @@ class Toast(threading.Thread):
                                        font=("Segoe UI", S(11), "bold"))
                 room = tw - S(170)
                 canvas.create_text(x + S(44), y + S(82), text=tile.get("title", ""), anchor="w", fill=ink,
-                                   font=("Arial Black", S(18), "italic"), width=room + S(40))
+                                   font=("Arial Black", S(18), "italic"), width=room + S(20))
                 canvas.create_text(x + S(30), y + S(128), text=tile.get("sub", ""), anchor="w", fill=ink,
-                                   font=("Segoe UI", S(11)), width=room)
+                                   font=("Segoe UI", S(12)), width=room)
                 if "switch" in tile:   # выключатель
                     on = bool(tile["switch"])
                     pw, ph = S(66), S(32)
