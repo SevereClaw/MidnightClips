@@ -38,16 +38,44 @@ def has_audio_device():
         return False
 
 
-def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True, side=None, encode=False):
+def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True, side=None, encode=False, mux=False):
     """Движок (+звук) -> ffmpeg -> файл с несжатым звуком. Возвращает (путь, сообщения движка)."""
     pipe = r"\\.\pipe\mccap_au_%d_%d" % (os.getpid(), int(time.time() * 1000) % 100000)
     args = [MCCAP, "--fps", "60", "--seconds", str(seconds), "--pipe", pipe, "--audio-pipe", pipe + "_a",
             "--parent", str(os.getpid()), "--stat", "2"] + (["--test", "--size", "640x360"] if test_pattern else []) + engine_args
     if encode:   # движок кодирует сам; кадр готовится в текстуре кодировщика
         args += ["--encode", "libx264", "--bitrate", "20", "--frames", "download"]
+    if mux:   # движок записывает сам: кодирует звук и упаковывает, ffmpeg не участвует
+        i = args.index("--audio-pipe")
+        args[i:i + 2] = ["--mux-audio"]
+        args += ["--encode", "libx264", "--bitrate", "20", "--frames", "download", "--mux"]
     helper = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     ready = helper.stdout.readline().decode().strip().split()
     assert ready and ready[0] == "READY", ready
+    if mux:
+        import threading
+        out = os.path.join(TMP, "mccap_audio_%s.ts" % name)
+        t0 = time.time()
+
+        def copy():
+            with open(pipe, "rb", buffering=0) as src, open(out, "wb") as dst:
+                while True:
+                    try:
+                        data = src.read(262144)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    dst.write(data)
+        reader = threading.Thread(target=copy, daemon=True)
+        reader.start()
+        if side:
+            side(t0)
+        err = helper.stderr.read().decode(errors="replace")
+        helper.wait(timeout=30)
+        reader.join(20)
+        assert not reader.is_alive() and os.path.getsize(out) > 0, err[-1500:]
+        return out, err
     n_tracks = int(engine_args[engine_args.index("--tracks") + 1]) if "--tracks" in engine_args else 0
     track_in, track_map = [], []
     for k in range(1, n_tracks + 1):   # отдельные дорожки — свои каналы
@@ -155,11 +183,11 @@ root.mainloop()
 """
 
 
-def sync_check(beep, encode=False):
+def sync_check(beep, encode=False, mux=False):
     """Вспышка на экране и щелчок в один момент — в записи они должны совпасть, оба раза одинаково."""
     def side(t0):
         subprocess.Popen([sys.executable, "-c", FLASH, repr(t0), beep])
-    path, err = record("sync", 9, [], test_pattern=False, side=side, encode=encode)
+    path, err = record("sync", 9, [], test_pattern=False, side=side, encode=encode, mux=mux)
     raw = subprocess.run([FFMPEG, "-v", "error", "-i", path, "-map", "0:v", "-vf", "crop=400:300:160:140,scale=4:4,format=gray",
                           "-f", "rawvideo", "-"], capture_output=True).stdout
     bright = [sum(raw[i:i + 16]) / 16.0 for i in range(0, len(raw) - 15, 16)]
@@ -281,6 +309,8 @@ if __name__ == "__main__":
     sync_check(make_wav("beep.wav", 0.12, 1000, 14000))
     print("то же, когда движок кодирует сам:", flush=True)
     sync_check(make_wav("beep.wav", 0.12, 1000, 14000), encode=True)
+    print("то же, когда движок записывает сам, без ffmpeg:", flush=True)
+    sync_check(make_wav("beep.wav", 0.12, 1000, 14000), mux=True)
     if os.path.isfile(FFPLAY):
         app_checks()
     else:

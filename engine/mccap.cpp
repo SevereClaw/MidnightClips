@@ -77,6 +77,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/opt.h>
+#include <libavutil/channel_layout.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
 }
@@ -135,6 +136,9 @@ struct Args {
     int frameW = 0, frameH = 0; // размер кадра на выходе задан снаружи (окно вписывается в него с полями)
     std::wstring encode;       // кодировать здесь же: h264_nvenc / h264_amf / h264_qsv / libx264
     int bitrate = 12;          // Мбит/с
+    bool mux = false;          // (с --encode) упаковывать самим: в канал идёт готовый поток MPEG-TS, ffmpeg не нужен
+    bool muxAudio = false;     // ... и кодировать в него звук (AAC)
+    int audioOffset = 0;       // сдвиг звука относительно картинки, мс
     std::wstring frames;       // gpu — кадр остаётся на видеокарте; cpu — через обычную память;
                                // download — как gpu, но кадр скачивается перед кодированием (для проверок)
 };
@@ -1093,6 +1097,93 @@ struct Encoder {
     ID3D11Device* dev = nullptr;
     std::map<ID3D11Texture2D*, ID3D11RenderTargetView*> views;
 
+    // Режим «без ffmpeg»: звук кодируется здесь же (AAC), всё упаковывается в MPEG-TS.
+    struct AudioEnc {
+        AVCodecContext* ctx = nullptr;
+        AVStream* st = nullptr;
+        AVFrame* frame = nullptr;
+        AVPacket* pkt = nullptr;
+        std::vector<float> fifo;
+        long long pts = 0;
+    };
+    bool mux = false;
+    std::vector<AudioEnc> audio;   // 0 — общая дорожка, дальше отдельные
+    long long audioShift = 0;      // сдвиг звука, в отсчётах
+    std::mutex muxLock;
+    volatile LONG muxReady = 0;
+
+    bool initAudio(int count, int offsetMs) {
+        audioShift = (long long)offsetMs * 48;
+        const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+        if (!codec) { logf("error: encoder: no aac"); return false; }
+        audio.resize((size_t)count);
+        for (AudioEnc& a : audio) {
+            a.ctx = avcodec_alloc_context3(codec);
+            if (!a.ctx) return false;
+            a.ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+            a.ctx->sample_rate = 48000;
+            a.ctx->bit_rate = 160000;
+            a.ctx->time_base = AVRational{ 1, 48000 };
+            av_channel_layout_default(&a.ctx->ch_layout, 2);
+            const int ret = avcodec_open2(a.ctx, codec, nullptr);
+            if (ret < 0) { logf("error: encoder: aac: %s", avErr(ret).c_str()); return false; }
+            a.frame = av_frame_alloc();
+            a.pkt = av_packet_alloc();
+            if (!a.frame || !a.pkt) return false;
+            a.frame->format = AV_SAMPLE_FMT_FLTP;
+            a.frame->nb_samples = a.ctx->frame_size > 0 ? a.ctx->frame_size : 1024;
+            a.frame->sample_rate = 48000;
+            av_channel_layout_copy(&a.frame->ch_layout, &a.ctx->ch_layout);
+            if (av_frame_get_buffer(a.frame, 0) < 0) return false;
+        }
+        return true;
+    }
+
+    // Пакет — в общий поток. Видео и звук пишут два разных потока программы.
+    bool writePacket(AVPacket* p) {
+        std::lock_guard<std::mutex> lock(muxLock);
+        if (!muxReady) { av_packet_unref(p); return true; }
+        const int ret = mux ? av_interleaved_write_frame(oc, p) : av_write_frame(oc, p);
+        av_packet_unref(p);
+        if (ret < 0) { logf("error: encoder: write: %s", avErr(ret).c_str()); return false; }
+        avio_flush(io);
+        return true;
+    }
+
+    // Очередная порция сведённого звука одной дорожки (стерео, вперемежку).
+    bool feedAudio(size_t track, const float* samples, long long frames) {
+        if (track >= audio.size() || !muxReady) return true;
+        AudioEnc& a = audio[track];
+        a.fifo.insert(a.fifo.end(), samples, samples + frames * 2);
+        const int n = a.frame->nb_samples;
+        size_t used = 0;
+        while (a.fifo.size() - used >= (size_t)n * 2) {
+            if (av_frame_make_writable(a.frame) < 0) return false;
+            float* left = (float*)a.frame->data[0];
+            float* right = (float*)a.frame->data[1];
+            for (int i = 0; i < n; i++) {
+                const float l = a.fifo[used + (size_t)i * 2], r = a.fifo[used + (size_t)i * 2 + 1];
+                left[i] = l > 1.0f ? 1.0f : (l < -1.0f ? -1.0f : l);
+                right[i] = r > 1.0f ? 1.0f : (r < -1.0f ? -1.0f : r);
+            }
+            used += (size_t)n * 2;
+            a.frame->pts = a.pts + audioShift;
+            a.pts += n;
+            int ret = avcodec_send_frame(a.ctx, a.frame);
+            if (ret < 0) { logf("error: encoder: aac send: %s", avErr(ret).c_str()); return false; }
+            for (;;) {
+                ret = avcodec_receive_packet(a.ctx, a.pkt);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+                if (ret < 0) { logf("error: encoder: aac receive: %s", avErr(ret).c_str()); return false; }
+                a.pkt->stream_index = a.st->index;
+                av_packet_rescale_ts(a.pkt, a.ctx->time_base, a.st->time_base);
+                if (!writePacket(a.pkt)) return false;
+            }
+        }
+        a.fifo.erase(a.fifo.begin(), a.fifo.begin() + (ptrdiff_t)used);
+        return true;
+    }
+
     static int writeCb(void* opaque, const uint8_t* buf, int size) {
         Encoder* e = (Encoder*)opaque;
         if (!e->ioFailed && !writeAll(g_pipe, buf, (size_t)size)) InterlockedExchange(&e->ioFailed, 1);   // читатель закрылся
@@ -1225,7 +1316,7 @@ struct Encoder {
 
     // Начать поток в канал (канал к этому моменту уже открыт читателем).
     bool open() {
-        int ret = avformat_alloc_output_context2(&oc, nullptr, "nut", nullptr);
+        int ret = avformat_alloc_output_context2(&oc, nullptr, mux ? "mpegts" : "nut", nullptr);
         if (ret < 0 || !oc) { logf("error: encoder: muxer: %s", avErr(ret).c_str()); return false; }
         unsigned char* buf = (unsigned char*)av_malloc(1 << 16);
         io = avio_alloc_context(buf, 1 << 16, 1, this, nullptr, writeCb, nullptr);
@@ -1237,9 +1328,16 @@ struct Encoder {
         avcodec_parameters_from_context(st->codecpar, enc);
         st->time_base = enc->time_base;
         st->avg_frame_rate = st->r_frame_rate = enc->framerate;
+        for (AudioEnc& a : audio) {
+            a.st = avformat_new_stream(oc, nullptr);
+            if (!a.st) return false;
+            avcodec_parameters_from_context(a.st->codecpar, a.ctx);
+            a.st->time_base = a.ctx->time_base;
+        }
         ret = avformat_write_header(oc, nullptr);
         if (ret < 0) { logf("error: encoder: header: %s", avErr(ret).c_str()); return false; }
         avio_flush(io);
+        InterlockedExchange(&muxReady, 1);
         return true;
     }
 
@@ -1269,10 +1367,7 @@ struct Encoder {
             pkt->stream_index = 0;
             if (pkt->duration <= 0) pkt->duration = 1;
             av_packet_rescale_ts(pkt, enc->time_base, st->time_base);
-            ret = av_write_frame(oc, pkt);
-            av_packet_unref(pkt);
-            if (ret < 0) { logf("error: encoder: write: %s", avErr(ret).c_str()); return false; }
-            avio_flush(io);
+            if (!writePacket(pkt)) return false;
             packets++;
         }
     }
@@ -1324,6 +1419,8 @@ struct Encoder {
     void finish() {
         if (!enc || !oc) return;
         if (avcodec_send_frame(enc, nullptr) >= 0) drain();
+        std::lock_guard<std::mutex> lock(muxLock);
+        InterlockedExchange(&muxReady, 0);   // звук после этого уже не пишется
         av_write_trailer(oc);
         avio_flush(io);
     }
@@ -1687,6 +1784,7 @@ static float g_volSystem = 1.0f;
 static DWORD g_parentPid = 0;
 static bool g_perApp = false;
 
+static bool g_muxAudio = false;
 static std::map<std::wstring, int> g_appTrack;
 static int g_tracks = 0, g_trackOther = 0;
 static bool g_includeParent = false;
@@ -1791,8 +1889,12 @@ static DWORD WINAPI audioThread(LPVOID) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     for (TrackPipe* t : g_trackPipes) CloseHandle(CreateThread(nullptr, 0, trackConnect, t, 0, nullptr));
-    std::vector<std::vector<float>> trackMix(g_trackPipes.size());
-    if (!ConnectNamedPipe(g_audioPipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
+    std::vector<std::vector<float>> trackMix((size_t)(g_muxAudio ? g_tracks : (int)g_trackPipes.size()));
+    if (g_muxAudio) {   // звук кодируется и упаковывается здесь же — ждём, пока откроется общий поток
+#ifdef MC_FFMPEG
+        while (!g_enc.muxReady && !g_audioStop) Sleep(2);
+#endif
+    } else if (!ConnectNamedPipe(g_audioPipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
         logf("error: audio pipe %lu", GetLastError());
         InterlockedExchange(&g_audioFailed, 1);
         return 0;
@@ -1827,6 +1929,17 @@ static DWORD WINAPI audioThread(LPVOID) {
                 for (auto& t : trackMix) t.assign((size_t)due * 2, 0.0f);
                 for (AudioSource* s : g_sources)
                     s->mixInto(mix, s->track > 0 && s->track <= (int)trackMix.size() ? &trackMix[(size_t)s->track - 1] : nullptr, outPos, due);
+#ifdef MC_FFMPEG
+                if (g_muxAudio) {
+                    bool ok = g_enc.feedAudio(0, mix.data(), due);
+                    for (size_t k = 0; k < trackMix.size() && ok; k++) ok = g_enc.feedAudio(k + 1, trackMix[k].data(), due);
+                    if (!ok) { InterlockedExchange(&g_encFailed, 1); break; }
+                    outPos += due;
+                    InterlockedAdd64(&g_audioWritten, due);
+                    Sleep(5);
+                    continue;
+                }
+#endif
                 pcm.resize((size_t)due * 2);
                 bool tracksOk = true;
                 for (size_t k = 0; k < trackMix.size() && tracksOk; k++) {   // отдельные дорожки
@@ -1926,6 +2039,9 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--frame") swscanf_s(next(), L"%dx%d", &a.frameW, &a.frameH);
         else if (k == L"--bitrate") a.bitrate = std::max(1, std::min(200, _wtoi(next())));
         else if (k == L"--frames") a.frames = next();
+        else if (k == L"--mux") a.mux = true;
+        else if (k == L"--mux-audio") a.muxAudio = true;
+        else if (k == L"--audio-offset") a.audioOffset = _wtoi(next());
         else if (k == L"--tracks") a.tracks = std::max(0, std::min(8, _wtoi(next())));
         else if (k == L"--track-mic") a.trackMic = _wtoi(next());
         else if (k == L"--track-other") a.trackOther = _wtoi(next());
@@ -2038,7 +2154,9 @@ int wmain(int argc, wchar_t** argv) {
 #ifdef MC_FFMPEG
         int mode = Encoder::CPU;
         if (!a.test && cap.gpu && a.frames != L"cpu") mode = a.frames == L"download" ? Encoder::DOWNLOAD : Encoder::GPU;
+        g_enc.mux = a.mux;
         if (!g_enc.init(narrow(a.encode), w, h, a.fps, a.bitrate, mode, nv12, w * 4, cap.dev, cap.ctx)) return 8;
+        if (a.mux && a.muxAudio && !g_enc.initAudio(1 + a.tracks, a.audioOffset)) return 8;
         hwFrames = mode != Encoder::CPU;
 #else
         logf("error: this build has no encoder");
@@ -2063,7 +2181,7 @@ int wmain(int argc, wchar_t** argv) {
             g_trackPipes.push_back(t);
         }
     }
-    printf("READY %d %d %d %s\n", w, h, a.fps, encoding ? "coded" : (nv12 ? "nv12" : "bgra"));
+    printf("READY %d %d %d %s\n", w, h, a.fps, encoding ? (a.mux ? "ts" : "coded") : (nv12 ? "nv12" : "bgra"));
     fflush(stdout);
 
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
@@ -2080,7 +2198,8 @@ int wmain(int argc, wchar_t** argv) {
         writer = CreateThread(nullptr, 0, writerThread, nullptr, 0, nullptr);
     }
 
-    const bool audio = !a.audioPipe.empty();
+    g_muxAudio = encoding && a.mux && a.muxAudio;
+    const bool audio = !a.audioPipe.empty() || g_muxAudio;
     HANDLE audioWorker = nullptr;
     if (audio) {
         g_fps = a.fps;

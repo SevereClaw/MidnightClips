@@ -395,6 +395,49 @@ def encode_checks():
     encode_case("нет такого кодировщика (код 8)", 60, 2, "--test", "--encode", "h264_none", expect_code=8)
 
 
+def mux_check():
+    """Движок сам кодирует видео и звук и упаковывает их: читаем его поток как есть и проверяем файл."""
+    import threading
+    pipe = r"\\.\pipe\mccap_mux_%d" % os.getpid()
+    out = os.path.join(tempfile.gettempdir(), "mccap_mux_%d.ts" % os.getpid())
+    helper = subprocess.Popen(
+        [MCCAP, "--fps", "60", "--seconds", "6", "--pipe", pipe, "--parent", str(os.getpid()), "--stat", "1", "--test",
+         "--size", "1280x720", "--encode", "libx264", "--bitrate", "20", "--mux", "--mux-audio", "--tracks", "1",
+         "--track-other", "1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    ready = helper.stdout.readline().decode().strip()
+    assert ready.startswith("READY") and ready.split()[4] == "ts", (ready, helper.stderr.read().decode(errors="replace")[-1500:])
+
+    def copy():
+        with open(pipe, "rb", buffering=0) as src, open(out, "wb") as dst:
+            while True:
+                try:
+                    data = src.read(262144)
+                except OSError:
+                    break
+                if not data:
+                    break
+                dst.write(data)
+    reader = threading.Thread(target=copy, daemon=True)
+    reader.start()
+    (frames, elapsed, late, over, wmax, hi, trimmed, overflow), err = finish_helper(helper)
+    reader.join(20)
+    assert not reader.is_alive(), "поток движка не закрылся"
+    info = subprocess.run([FFMPEG, "-hide_banner", "-i", out, "-map", "0", "-f", "null", "-"],
+                          capture_output=True, text=True, errors="replace").stderr
+    streams = re.findall(r"Stream #0:\d+.*?: (Video|Audio): (\w+)", info)
+    starts = re.findall(r"start: ([\d.]+)", info)
+    decoded = [int(x) for x in re.findall(r"frame=\s*(\d+)", info)]
+    audio_len = subprocess.run([FFMPEG, "-v", "error", "-i", out, "-map", "0:a:0", "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
+                               capture_output=True).stdout
+    seconds = len(audio_len) / 2 / 48000.0
+    print("потоки: %s; кадров отправлено %d, в файле %d; звука %.2f c; файл %d КБ" % (
+        ", ".join("%s %s" % s for s in streams), frames, decoded[-1] if decoded else 0, seconds, os.path.getsize(out) // 1024), flush=True)
+    assert [s[0] for s in streams] == ["Video", "Audio", "Audio"] and streams[1][1] == "aac", streams
+    assert decoded and abs(decoded[-1] - frames) <= 2 and abs(frames - 360) <= 10, (decoded[-1:], frames)
+    assert abs(seconds - 6.0) < 0.35, "звук не той длины: %.2f c" % seconds
+    assert "error:" not in err, err[-800:]
+
+
 # ---- смена разрешения и поворот экрана во время записи
 
 class DEVMODE(ctypes.Structure):
@@ -523,6 +566,9 @@ if __name__ == "__main__":
 
     print("кодирование в движке:", flush=True)
     encode_checks()
+
+    print("запись одним движком (без ffmpeg):", flush=True)
+    mux_check()
 
     print("смена разрешения и поворот экрана:", flush=True)
     display_checks()

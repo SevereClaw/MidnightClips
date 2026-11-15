@@ -45,8 +45,9 @@ SOFTWARE = ("libx264", "libx265")
 def vendor(encoder):
     """nvenc / amf / qsv / cpu — чей это кодировщик, независимо от формата."""
     return encoder.rsplit("_", 1)[-1] if "_" in encoder else "cpu"
-ENGINE_KINDS = ("enc", "own", "owncpu")   # способы захвата через свой движок
-CAPTURE_TITLES = {"enc": "движок MidnightClips, кодирование на видеокарте", "own": "движок MidnightClips", "owncpu": "движок MidnightClips (без обработки на видеокарте)", "dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
+ENGINE_KINDS = ("mux", "enc", "own", "owncpu")   # способы захвата через свой движок
+ENCODING_KINDS = ("mux", "enc")                  # ... в которых движок сам и кодирует
+CAPTURE_TITLES = {"mux": "движок MidnightClips, без ffmpeg", "enc": "движок MidnightClips, кодирование на видеокарте", "own": "движок MidnightClips", "owncpu": "движок MidnightClips (без обработки на видеокарте)", "dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
                   "gdi": "GDI", "test": "тест"}
 
 
@@ -59,6 +60,22 @@ def whole_frames(data):
             return data[:i]
         i -= 188
     return data[:0]
+
+
+class _PipeReader:
+    """Чтение потока движка из именованного канала — с тем же видом, что и у сетевого соединения."""
+
+    def __init__(self, path):
+        self._file = open(path, "rb", buffering=0)
+
+    def settimeout(self, _seconds):
+        pass
+
+    def recv(self, size):
+        return self._file.read(size) or b""
+
+    def close(self):
+        self._file.close()
 
 
 def find_ffmpeg(resource_dir):
@@ -149,6 +166,8 @@ class Recorder:
         self._stalls = []                 # когда запись «зависала» в точном режиме
         self._avoid_enc = False           # кодирование в движке здесь не работает
         self._enc_crashes = []            # когда оно падало
+        self._avoid_mux = False           # запись одним движком (без ffmpeg) здесь не работает
+        self._mux_crashes = []
         self.fps_real = None              # сколько кадров в секунду реально успевает записываться
         self.fps_target = 0
         self.slow = False                 # захват не успевает за выбранной частотой
@@ -288,7 +307,7 @@ class Recorder:
                         reason = "кодировщик в движке отказал"
                     break
                 # Окно выбранной программы появилось (или режим сменили) — переключаемся на него.
-                if (helper is not None and self.capture in ("enc", "own") and time.time() - self._window_check > 3
+                if (helper is not None and self.capture in ("mux", "enc", "own") and time.time() - self._window_check > 3
                         and self.recording_since is None):
                     self._window_check = time.time()
                     if bool(self._wanted_window()) and not self.window_active:
@@ -351,6 +370,13 @@ class Recorder:
                 # запись сохраняются, захват поднимается заново и продолжает с того же места.
                 crashed = True
                 self._log("%s — перезапускаю захват, буфер и запись сохранены" % reason)
+                if self.capture == "mux" and reason.startswith(("кодировщик в движке", "движок захвата остановился", "запись зависла")):
+                    now = time.time()
+                    self._mux_crashes = [t for t in self._mux_crashes if now - t < 180] + [now]
+                    if len(self._mux_crashes) >= 3:
+                        self._avoid_mux = True
+                        self._good = None
+                        self._log("запись одним движком отключена до перезапуска программы: три сбоя за три минуты")
                 if self.capture == "enc" and reason.startswith(("кодировщик в движке", "ffmpeg остановился", "запись зависла")):
                     # Кодирование в движке падает раз за разом — значит, здесь оно не работает;
                     # возвращаемся к проверенному способу (кодирует ffmpeg).
@@ -443,22 +469,26 @@ class Recorder:
         # own  — свой движок: сам отмеряет кадры точным таймером и сам переживает потерю экрана;
         #        кадр готовится на видеокарте (курсор, уменьшение, NV12); owncpu — то же без видеокарты;
         # enc  — тот же движок, но и кодирует сам: кадр вообще не покидает видеокарту;
-        captures = {"enc": ["enc", "own", "owncpu"], "own": ["own", "owncpu"], "owncpu": ["owncpu", "dda"],
+        # mux  — движок делает всё сам: кодирует видео и звук и упаковывает, ffmpeg при записи не нужен;
+        captures = {"mux": ["mux", "enc", "own", "owncpu"], "enc": ["enc", "own", "owncpu"], "own": ["own", "owncpu"],
+                    "owncpu": ["owncpu", "dda"],
                     "dda": ["dda", "ddal"], "ddal": ["ddal"],
-                    "gdi": ["gdi"]}.get(capture, ["enc", "own", "owncpu", "dda", "ddal", "gdi"])
+                    "gdi": ["gdi"]}.get(capture, ["mux", "enc", "own", "owncpu", "dda", "ddal", "gdi"])
         if not self.engine:
             captures = [c for c in captures if c not in ENGINE_KINDS] or ["dda", "ddal", "gdi"]
         if self._avoid_enc and "enc" in captures and len(captures) > 1:
             captures.remove("enc")
+        if (self._avoid_mux or self._avoid_enc) and "mux" in captures and len(captures) > 1:
+            captures.remove("mux")
         if self._avoid_precise and "dda" in captures and len(captures) > 1:
             captures.remove("dda")
         result = []
         for enc in encoders:
             for cap in captures:
-                if cap == "enc":
+                if cap in ENCODING_KINDS:
                     if vendor(enc) in ("nvenc", "amf"):
                         result.append((cap, enc, True))   # движок кодирует сам, кадр остаётся на видеокарте
-                    elif capture == "enc":
+                    elif capture in ENCODING_KINDS:
                         result.append((cap, enc, False))  # выбрано вручную: движок кодирует из обычной памяти
                     continue
                 if cap == "own":
@@ -541,13 +571,29 @@ class Recorder:
         helper, own = None, None
         if capture in ENGINE_KINDS:
             helper, own = self._start_engine(gpu=capture != "owncpu", audio=engine_audio,
-                                             encode=(encoder, zero_copy) if capture == "enc" else None)
+                                             encode=(encoder, zero_copy) if capture in ENCODING_KINDS else None,
+                                             mux=capture == "mux")
             if helper is None:
                 if source:
                     source.close()
                 return None
         server, port = None, 0
         self.in_memory = self._use_memory()
+        if capture == "mux":
+            # Движок отдаёт готовый поток — программа сама режет его на кусочки буфера. ffmpeg не запускается.
+            try:
+                with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
+                    log.write("\n=== %s | %s + %s%s ===\n%s\n" % (
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), capture, encoder,
+                        " (zero-copy)" if zero_copy else "", "движок записывает сам, без ffmpeg"))
+            except OSError:
+                pass
+            proc = helper
+            proc.mc_helper = helper
+            self.fps_real, self.slow = None, False
+            self.fps_target = max(15, min(240, int(self.cfg["fps"])))
+            threading.Thread(target=self._mem_reader, args=(None, prefix, own[0]), daemon=True, name="buffer").start()
+            return self._await_first(proc, helper, None, None, own, capture, encoder, prefix)
         if self.in_memory:
             try:
                 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -589,6 +635,9 @@ class Recorder:
         if source:
             pump = audio_mod.AudioPump(source, proc.stdin)
             pump.start()
+        return self._await_first(proc, helper, source, pump, own, capture, encoder, prefix)
+
+    def _await_first(self, proc, helper, source, pump, own, capture, encoder, prefix):
         # Успех = появился первый кусочек с данными.
         deadline = time.time() + 12
         while time.time() < deadline and proc.poll() is None and not self._stop.is_set():
@@ -723,7 +772,7 @@ class Recorder:
             return []
         return sorted({line[4:].strip() for line in out.splitlines() if line.startswith("APP ") and line[4:].strip()})
 
-    def _start_engine(self, gpu=True, audio=False, allow_window=True, encode=None):
+    def _start_engine(self, gpu=True, audio=False, allow_window=True, encode=None, mux=False):
         """Запустить mccap и дождаться строки «READY ширина высота fps»."""
         fps = max(15, min(240, int(self.cfg["fps"])))
         pipe = r"\\.\pipe\mccap_%d_%d" % (os.getpid(), self._session)
@@ -731,10 +780,12 @@ class Recorder:
         audio_pipe = ""
         tracks = ["Всё вместе"]
         if audio:
-            audio_pipe = pipe + "_a"
+            audio_pipe = "" if mux else pipe + "_a"
             plan = self.audio_plan()
             tracks = plan["names"]
-            args += ["--audio-pipe", audio_pipe, "--audio-system", "1" if self.cfg["audio"] else "0",
+            args += (["--mux-audio", "--audio-offset", str(int(self.cfg["audio_offset_ms"]))] if mux
+                     else ["--audio-pipe", audio_pipe])
+            args += ["--audio-system", "1" if self.cfg["audio"] else "0",
                      "--vol-system", "%.2f" % plan["default"]]
             for exe, gain in sorted(plan["gains"].items()):   # своя громкость программ; 0 — в запись не идёт
                 args += ["--app-vol", "%s=%.2f" % (exe, gain)]
@@ -753,6 +804,8 @@ class Recorder:
         if encode:   # движок кодирует сам; в канал идёт уже сжатое видео
             mbps = max(2, min(100, int(self.cfg["bitrate_mbps"])))
             args += ["--encode", encode[0], "--bitrate", str(mbps), "--frames", "gpu" if encode[1] else "cpu"]
+            if mux:   # ... и сам упаковывает вместе со звуком
+                args.append("--mux")
         self.window_active = False
         hwnd = self._wanted_window() if gpu and allow_window and not self.engine_test else None
         if hwnd:   # записывать только окно выбранной программы
@@ -785,6 +838,7 @@ class Recorder:
         except OSError as exc:
             self._log("движок захвата не запустился: %s" % exc)
             return None, None
+        helper.mc_mux = mux
         threading.Thread(target=self._watch_engine, args=(helper, fps), daemon=True, name="engine-log").start()
         line = []
         reader = threading.Thread(target=lambda: line.append(helper.stdout.readline()), daemon=True)
@@ -797,7 +851,7 @@ class Recorder:
             self._log("движок захвата не готов (ответ: %r, код %s)" % (text, code))
             self._kill(helper)
             if encode and code == 8:   # кодировщик в движке не запустился — больше не пробуем, кодирует ffmpeg
-                self._avoid_enc = True
+                self._avoid_enc = self._avoid_mux = True
                 self._log("кодирование в движке здесь недоступно — кодирует ffmpeg")
             if hwnd and code in (6, 7):   # окно не снимается (закрылось или захват окон недоступен) — пишем монитор
                 if self._game_exe:        # найденную игру записать не вышло — больше на неё не переключаемся
@@ -806,7 +860,7 @@ class Recorder:
                 if code == 7:
                     self._window_failed = True
                     self._log("захват окна здесь недоступен — записываю весь монитор")
-                return self._start_engine(gpu, audio, allow_window=False, encode=encode)
+                return self._start_engine(gpu, audio, allow_window=False, encode=encode, mux=mux)
             return None, None
         return helper, (pipe, int(parts[1]), int(parts[2]), parts[4] if len(parts) > 4 else "bgra", audio_pipe, tracks)
 
@@ -824,6 +878,11 @@ class Recorder:
                     except ValueError:
                         continue
                     count += 1
+                    if getattr(helper, "mc_mux", False):   # ffmpeg не участвует — частоту записи сообщает сам движок
+                        try:
+                            self.fps_real = round(float(values.get("out", "0")), 1)
+                        except ValueError:
+                            pass
                     try:   # кодировщик не успевает: очередь переполняется или кадров уходит меньше нужного
                         trouble = (int(values.get("overflow", "0")) > 0
                                    or float(values.get("out", "0")) < fps * 0.9)
@@ -1028,17 +1087,26 @@ class Recorder:
             return False
         return self.buffer_megabytes() <= MEMORY_LIMIT_MB
 
-    def _mem_reader(self, server, prefix):
+    def _mem_reader(self, server, prefix, pipe=None):
         """Принимает поток от ffmpeg и режет его на кусочки по SEGMENT секунд — в памяти.
         Пока идёт обычная запись, готовые кусочки сбрасываются на диск: запись может быть
         многочасовой, в памяти её держать нельзя."""
-        try:
-            server.settimeout(25)
-            conn, _addr = server.accept()
-        except OSError:
+        spill_all = False
+        if pipe:   # поток приходит прямо от движка (он пишет сам, без ffmpeg)
+            try:
+                conn = _PipeReader(pipe)
+            except OSError as exc:
+                self._log("не удалось открыть поток движка: %s" % exc)
+                return
+            spill_all = not self.in_memory   # буфер на диске: готовые кусочки сразу уходят в файлы
+        else:
+            try:
+                server.settimeout(25)
+                conn, _addr = server.accept()
+            except OSError:
+                server.close()
+                return
             server.close()
-            return
-        server.close()
         index, started, scan = 0, time.monotonic(), 0
         name = prefix + "%06d.ts" % index
         buf = bytearray()
@@ -1094,7 +1162,7 @@ class Recorder:
                     if name in self._mem:          # кусочек могли уже стереть (перезапуск)
                         self._mem[name] = done
                         self._mem_dur[name] = elapsed
-                        spill = self._rec_first is not None
+                        spill = spill_all or self._rec_first is not None
                     else:
                         spill = False
                     self._mem[new_name] = rest
