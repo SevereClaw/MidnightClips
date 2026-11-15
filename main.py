@@ -39,6 +39,7 @@ class App:
         self.window = None
         self.tray = None
         self.quitting = False
+        self.api = None
         self.visible = True
         self.updater = Updater(data_dir(), lambda kind, data: self.push(kind, data))
         self.hotkeys = Hotkeys()
@@ -112,6 +113,7 @@ class App:
     def bind_hotkeys(self):
         self.hotkeys.bind("clip", self.cfg["hotkey_clip"], self.save_clip)
         self.hotkeys.bind("record", self.cfg["hotkey_record"], self.toggle_record)
+        self.hotkeys.bind("overlay", self.cfg["hotkey_overlay"], self.toggle_overlay)
         time.sleep(0.15)  # дать потоку клавиш применить изменения
         self.push("hotkeys", dict(self.hotkeys.status))
 
@@ -237,6 +239,66 @@ class App:
         idx = self.cfg["monitor"]
         return mons[idx] if 0 <= idx < len(mons) else (mons[0] if mons else None)
 
+    # ------------------------------------------------ меню поверх игры (Alt+Z)
+
+    def toggle_overlay(self):
+        self.toast.toggle_menu(self.monitor_rect(), self.overlay_model, self.overlay_action)
+
+    def overlay_model(self):
+        cfg, rec = self.cfg, self.recorder
+        recording = rec.recording_since is not None
+        buffer_on = bool(cfg["buffer_enabled"])
+        seconds = int(cfg["buffer_seconds"])
+        length = "%d мин" % (seconds // 60) if seconds >= 120 and seconds % 60 == 0 else "%d с" % seconds
+        if recording:
+            passed = int(time.time() - rec.recording_since)
+            status = "Идёт запись  %02d:%02d" % (passed // 60, passed % 60)
+        elif rec.state == "on":
+            status = ("Буфер повтора работает — последние %s" % length) if buffer_on else "Захват работает, буфер повтора выключен"
+        else:
+            status = rec.message or "Захват запускается…"
+        mic_on = bool(cfg["mic"]) and bool(cfg["mic_on"])
+        tiles = [
+            {"id": "clip", "title": "Сохранить клип", "active": buffer_on and rec.state == "on",
+             "sub": ("Последние %s  ·  %s" % (length, cfg["hotkey_clip"] or "без клавиши")) if buffer_on else "Буфер повтора выключен"},
+            {"id": "record", "title": "Остановить запись" if recording else "Начать запись", "active": True, "alert": recording,
+             "sub": cfg["hotkey_record"] or "без клавиши"},
+            {"id": "buffer", "title": "Буфер повтора", "active": buffer_on, "sub": "Включён — нажмите, чтобы выключить" if buffer_on else "Выключен — нажмите, чтобы включить"},
+            {"id": "mic", "title": "Микрофон", "active": mic_on,
+             "sub": "Записывается" if mic_on else ("Не записывается" if cfg["mic"] else "Устройство не выбрано в настройках")},
+            {"id": "clips", "title": "Клипы", "active": True, "sub": "Открыть галерею"},
+            {"id": "settings", "title": "Настройки", "active": True, "sub": "Открыть настройки программы"},
+        ]
+        hint = "Цифры 1–6 или мышь — выбрать.  %s или Esc — закрыть" % (cfg["hotkey_overlay"] or "Esc")
+        return {"status": status, "tiles": tiles, "hint": hint}
+
+    def overlay_action(self, ident):
+        """Нажатие плитки. True — меню после этого закрыть."""
+        if ident == "clip":
+            self.save_clip()
+            return True
+        if ident == "record":
+            self.toggle_record()
+            return False
+        if ident == "buffer":
+            self.apply_settings({"buffer_enabled": not self.cfg["buffer_enabled"]})
+            return False
+        if ident == "mic":
+            if self.cfg["mic"]:
+                self.apply_settings({"mic_on": not self.cfg["mic_on"]})
+            return False
+        if ident in ("clips", "settings"):
+            self.show_window()
+            self.push("open", {"view": ident})
+            return True
+        return False
+
+    def apply_settings(self, values):
+        """Поменять настройки не из окна программы (меню поверх игры) и обновить окно."""
+        if self.api is not None:
+            self.api.set_settings(values)
+            self.push("settings", {})
+
     def sync_overlays(self):
         """Точка записи и «метроном» точного захвата — по текущему состоянию."""
         rec = self.recorder
@@ -306,7 +368,7 @@ class Api:
     def set_settings(self, values):
         app = self._app
         changed = app.cfg.update(values or {})
-        if changed & {"hotkey_clip", "hotkey_record"}:
+        if changed & {"hotkey_clip", "hotkey_record", "hotkey_overlay"}:
             app.bind_hotkeys()
         if changed & {"cleanup_days", "cleanup_gb", "clips_dir"}:
             threading.Thread(target=app.run_cleanup, daemon=True).start()
@@ -519,8 +581,9 @@ def main():
         winutil.set_autostart(True)  # обновить путь, если программу перенесли
     minimized = "--minimized" in sys.argv
     app.visible = not minimized
+    app.api = Api(app)
     app.window = webview.create_window(
-        "MidnightClips", os.path.join(app.res, "ui", "index.html"), js_api=Api(app),
+        "MidnightClips", os.path.join(app.res, "ui", "index.html"), js_api=app.api,
         width=1180, height=760, min_size=(940, 620), background_color="#FFE100",
         hidden=minimized)
     app.window.events.closing += app.on_closing

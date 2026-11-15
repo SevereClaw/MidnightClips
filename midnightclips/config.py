@@ -58,6 +58,7 @@ DEFAULTS = {
     "audio_offset_ms": 0,       # сдвиг звука, если он отстаёт или спешит
     "hotkey_clip": "Alt+F10",
     "hotkey_record": "Alt+F9",
+    "hotkey_overlay": "Alt+Z",  # меню поверх игры
     "folder_per_game": True,
     "sound": True,
     "toast": True,

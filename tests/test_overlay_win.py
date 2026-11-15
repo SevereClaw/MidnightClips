@@ -16,6 +16,7 @@ if __name__ == "__main__":
     winutil.precise_timers()
     rect = (winutil.monitors() or [{"x": 0, "y": 0, "w": 1024, "h": 768}])[0]
     print("монитор:", rect)
+    os.environ["MC_MENU_IN_CAPTURE"] = "1"
     toast = Toast()
     toast.start()
     assert toast.ready.wait(15), "поток окон не запустился: %s" % toast.errors
@@ -34,6 +35,45 @@ if __name__ == "__main__":
     time.sleep(0.6)
     stopped = toast.ticks
     time.sleep(0.5)
+    # меню поверх игры (Alt+Z): открывается, плитки нажимаются, закрывается
+    pressed = []
+    flags = {"rec": False}
+
+    def model():
+        return {"status": "Проверка", "hint": "Esc — закрыть",
+                "tiles": [{"id": "clip", "title": "Сохранить клип", "sub": "Последние 60 с", "active": True},
+                          {"id": "record", "title": "Остановить запись" if flags["rec"] else "Начать запись", "sub": "Alt+F9",
+                           "active": True, "alert": flags["rec"]},
+                          {"id": "buffer", "title": "Буфер повтора", "sub": "Включён", "active": True},
+                          {"id": "mic", "title": "Микрофон", "sub": "Не записывается", "active": False},
+                          {"id": "clips", "title": "Клипы", "sub": "Открыть галерею", "active": True},
+                          {"id": "settings", "title": "Настройки", "sub": "", "active": True}]}
+
+    def action(ident):
+        pressed.append(ident)
+        if ident == "record":
+            flags["rec"] = not flags["rec"]
+        return ident == "clip"
+
+    toast.toggle_menu(rect, model, action)
+    time.sleep(1.0)
+    assert toast.menu_open, "меню не открылось: %s" % toast.errors
+    import subprocess
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    subprocess.run([os.path.join(root_dir, "ffmpeg.exe"), "-hide_banner", "-loglevel", "error", "-y", "-f", "gdigrab",
+                    "-i", "desktop", "-frames:v", "1", os.path.join(root_dir, "overlay_menu.png")])   # снимок — посмотреть глазами
+    toast.menu_press("record")
+    time.sleep(1.0)
+    assert toast.menu_open and flags["rec"], "после «записи» меню должно остаться открытым"
+    toast.menu_press("clip")
+    time.sleep(1.0)
+    assert not toast.menu_open, "после «сохранить клип» меню должно закрыться"
+    toast.toggle_menu(rect, model, action)
+    time.sleep(0.7)
+    toast.toggle_menu(rect, model, action)   # повторное нажатие Alt+Z закрывает
+    time.sleep(0.7)
+    assert not toast.menu_open and pressed == ["record", "clip"], (toast.menu_open, pressed)
+    print("меню поверх игры: открытие, нажатия и закрытие — ok", flush=True)
     print("ошибки:", toast.errors)
     assert not toast.errors, toast.errors
     assert rate >= 55, "метроном слишком редкий: %.0f/с" % rate

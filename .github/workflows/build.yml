@@ -66,6 +66,13 @@ jobs:
         run: python tests/test_overlay_win.py
         env:
           PYTHONUTF8: "1"
+      - name: Снимок меню поверх игры
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: overlay-menu
+          path: overlay_menu.png
+          if-no-files-found: ignore
       - name: Собрать exe
         shell: cmd
         run: build.bat
