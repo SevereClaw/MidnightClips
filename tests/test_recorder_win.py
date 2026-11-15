@@ -38,7 +38,7 @@ def frames(ffmpeg, path, vf=None):
     return (int(found[-1]) if found else 0), (info.group(0)[:110] if info else "")
 
 
-def main(kind="own"):
+def main(kind="own", hevc=False):
     from midnightclips import recorder as rec, winutil
     from midnightclips.config import Config
 
@@ -50,7 +50,8 @@ def main(kind="own"):
     anim = subprocess.Popen([sys.executable, "-c", ANIMATION])
     tmp = tempfile.mkdtemp(prefix="mc_win_")
     cfg = Config(os.path.join(tmp, "settings.json"))
-    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 15, "fps": 60, "capture": kind})
+    cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 15, "fps": 60, "capture": kind,
+                "codec": "hevc" if hevc else "h264", "encoder": "libx264" if hevc else "auto"})
     events = []
     log = os.path.join(tmp, "ffmpeg.log")
     r = rec.Recorder(cfg, ffmpeg, os.path.join(tmp, "buf"), log, lambda k, p: events.append((k, dict(p))),
@@ -89,6 +90,7 @@ def main(kind="own"):
         unique, _ = frames(ffmpeg, saved[0]["path"], "mpdecimate=hi=256:lo=64:frac=0.005")
         print("клип: %d кадров (%.1f c), из них разных %d (%.0f в секунду) | %s" % (
             total, total / 60.0, unique, unique / (total / 60.0), info), flush=True)
+        assert ("hevc" in info) == hevc, info
         assert total >= 60 * 9, total
         assert unique >= total * 0.2, "в клипе почти нет движения: %d из %d" % (unique, total)
 
@@ -120,7 +122,7 @@ def main(kind="own"):
         print("журнал:\n  " + "\n  ".join(stars), flush=True)
         r.stop()
         assert r.state == "off"
-        print("ЗАПИСЬ ЦЕЛИКОМ (%s): OK" % kind, flush=True)
+        print("ЗАПИСЬ ЦЕЛИКОМ (%s%s): OK" % (kind, ", HEVC" if hevc else ""), flush=True)
     finally:
         anim.kill()
         if r.is_running():
@@ -210,4 +212,5 @@ if __name__ == "__main__":
         sys.exit(0)
     main("own")
     game_mode()
+    main("own", hevc=True)   # HEVC (на сервере — процессором)
     main("enc")   # движок кодирует сам (на сервере — процессором: кодировщика видеокарты здесь нет)

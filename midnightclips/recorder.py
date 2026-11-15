@@ -27,12 +27,24 @@ NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 ABOVE_NORMAL = 0x00008000 if sys.platform == "win32" else 0   # приоритет процесса «выше среднего»
 
 HW_ENCODERS = ["h264_nvenc", "h264_amf", "h264_qsv"]
+# Тот же кодировщик в формате HEVC (H.265): файл заметно меньше при том же качестве.
+HEVC_TWIN = {"h264_nvenc": "hevc_nvenc", "h264_amf": "hevc_amf", "h264_qsv": "hevc_qsv", "libx264": "libx265"}
 ENCODER_TITLES = {
     "h264_nvenc": "NVIDIA NVENC",
     "h264_amf": "AMD AMF",
     "h264_qsv": "Intel Quick Sync",
     "libx264": "процессор (x264)",
+    "hevc_nvenc": "NVIDIA NVENC, HEVC",
+    "hevc_amf": "AMD AMF, HEVC",
+    "hevc_qsv": "Intel Quick Sync, HEVC",
+    "libx265": "процессор (x265), HEVC",
 }
+SOFTWARE = ("libx264", "libx265")
+
+
+def vendor(encoder):
+    """nvenc / amf / qsv / cpu — чей это кодировщик, независимо от формата."""
+    return encoder.rsplit("_", 1)[-1] if "_" in encoder else "cpu"
 ENGINE_KINDS = ("enc", "own", "owncpu")   # способы захвата через свой движок
 CAPTURE_TITLES = {"enc": "движок MidnightClips, кодирование на видеокарте", "own": "движок MidnightClips", "owncpu": "движок MidnightClips (без обработки на видеокарте)", "dda": "Desktop Duplication", "ddal": "Desktop Duplication (старый режим)",
                   "gdi": "GDI", "test": "тест"}
@@ -106,6 +118,7 @@ class Recorder:
         self._rec_first = None            # имя первого кусочка обычной записи
         self._rec_title = ""
         self._encoders = None
+        self._hevc = set()
         self._good = None                 # последний сработавший вариант захвата
         self._degrade = 0                 # 0 — всё, 1 — без микрофона, 2 — без звука
         self._mem = {}                    # буфер в памяти: имя кусочка -> байты
@@ -198,7 +211,7 @@ class Recorder:
             "fps_target": self.fps_target,
             "slow": self.slow or (self.capture in ENGINE_KINDS and self.engine_trouble),
             "fallback": self.state == "on" and (
-                self.capture in ("gdi", "ddal") or self.encoder == "libx264"
+                self.capture in ("gdi", "ddal") or self.encoder in SOFTWARE
                 or (self.capture not in ENGINE_KINDS and self.engine is not None and self.cfg["capture"] == "auto")),
             "capture_kind": self.capture,
             "recording": self.recording_since is not None,
@@ -382,7 +395,10 @@ class Recorder:
         if TEST:
             return ["libx264"]
         found = []
-        for enc in HW_ENCODERS:
+        self._hevc = {"libx265"}
+        for enc in HW_ENCODERS + [HEVC_TWIN[e] for e in HW_ENCODERS]:
+            if enc.startswith("hevc_") and enc.replace("hevc_", "h264_") not in found:
+                continue   # этой видеокарты нет — её HEVC и пробовать незачем
             cmd = [
                 self.ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
                 "-i", "color=c=black:s=640x360:r=30", "-frames:v", "10",
@@ -395,7 +411,9 @@ class Recorder:
                 ).returncode == 0
             except (OSError, subprocess.SubprocessError):
                 ok = False
-            if ok:
+            if ok and enc.startswith("hevc_"):
+                self._hevc.add(enc)
+            elif ok:
                 found.append(enc)
         return found + ["libx264"]
 
@@ -408,6 +426,16 @@ class Recorder:
             encoders = [wanted] + (["libx264"] if wanted != "libx264" else [])
         else:
             encoders = list(self._encoders)
+        if self.cfg["codec"] == "hevc":
+            # HEVC — тем же кодировщиком, если он умеет; следом остаётся H.264 как запасной вариант.
+            # На процессоре HEVC слишком тяжёл для записи на лету — только если процессор выбран явно.
+            twins = []
+            for enc in encoders:
+                twin = HEVC_TWIN.get(enc)
+                if twin in self._hevc and (enc != "libx264" or wanted == "libx264"):
+                    twins.append(twin)
+                twins.append(enc)
+            encoders = twins
         capture = self.cfg["capture"]
         # dda  — точный режим: кадр берётся в момент обновления экрана, без неточного Sleep;
         # ddal — старый режим: ffmpeg сам отмеряет кадры (на Windows получается с рывками);
@@ -428,7 +456,7 @@ class Recorder:
         for enc in encoders:
             for cap in captures:
                 if cap == "enc":
-                    if enc in ("h264_nvenc", "h264_amf"):
+                    if vendor(enc) in ("nvenc", "amf"):
                         result.append((cap, enc, True))   # движок кодирует сам, кадр остаётся на видеокарте
                     elif capture == "enc":
                         result.append((cap, enc, False))  # выбрано вручную: движок кодирует из обычной памяти
@@ -437,11 +465,11 @@ class Recorder:
                     result.append((cap, enc, True))       # готовый NV12 сразу в кодировщик
                     continue
                 if cap == "owncpu":
-                    if enc == "h264_nvenc" and not self._needs_scaling():
+                    if vendor(enc) == "nvenc" and not self._needs_scaling():
                         result.append((cap, enc, True))   # кадр BGRA сразу в кодировщик видеокарты
                     result.append((cap, enc, False))
                     continue
-                if cap in ("dda", "ddal") and enc in ("h264_nvenc", "h264_amf") and not self.cfg["height"]:
+                if cap in ("dda", "ddal") and vendor(enc) in ("nvenc", "amf") and not self.cfg["height"]:
                     result.append((cap, enc, True))   # кадры не покидают видеокарту
                 result.append((cap, enc, False))
         if prefer_good and self._good in result:
@@ -539,7 +567,7 @@ class Recorder:
             log.flush()
             # Кодирование видеокартой почти не грузит процессор, поэтому ему можно дать
             # приоритет повыше — тогда игра не «выдавливает» запись и в клипе меньше рывков.
-            priority = ABOVE_NORMAL if encoder != "libx264" else 0
+            priority = ABOVE_NORMAL if encoder not in SOFTWARE else 0
             proc = subprocess.Popen(
                 cmd, cwd=self.work_dir, bufsize=0,
                 stdin=subprocess.PIPE if source else subprocess.DEVNULL,
@@ -927,7 +955,7 @@ class Recorder:
                 scale = "scale=-2:'trunc(min(ih,%d)/2)*2'" % height
             else:
                 scale = "scale='trunc(iw/2)*2':'trunc(ih/2)*2'"
-            pix = "yuv420p" if encoder == "libx264" else "nv12"
+            pix = "yuv420p" if encoder in SOFTWARE else "nv12"
             cmd += ["-vf", "%s,format=%s" % (scale, pix)]
         if capture != "enc":
             cmd += ["-r", str(fps), "-fps_mode", "cfr"]   # ровная частота кадров на выходе
@@ -935,14 +963,19 @@ class Recorder:
                 cmd += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
             rate = ["-b:v", "%dM" % mbps, "-maxrate", "%dM" % int(mbps * 1.5),
                     "-bufsize", "%dM" % (mbps * 2), "-g", str(fps)]
-            if encoder == "h264_nvenc":
+            if vendor(encoder) == "nvenc":
                 # при высокой частоте кадров берём более быстрый пресет, чтобы кодер успевал
                 cmd += ["-c:v", encoder, "-preset", "p4" if fps <= 60 else "p2", "-rc", "vbr"] + rate
-            elif encoder == "h264_amf":
+            elif vendor(encoder) == "amf":
                 cmd += ["-c:v", encoder, "-usage", "transcoding", "-quality", "balanced",
                         "-rc", "vbr_peak"] + rate
-            elif encoder == "h264_qsv":
+                if encoder == "hevc_amf":   # служебные заголовки — в каждом опорном кадре: по ним режется буфер
+                    cmd += ["-header_insertion_mode", "idr"]
+            elif vendor(encoder) == "qsv":
                 cmd += ["-c:v", encoder, "-preset", "veryfast"] + rate
+            elif encoder == "libx265":
+                cmd += ["-c:v", "libx265", "-preset", "ultrafast", "-tune", "zerolatency", "-x265-params",
+                        "keyint=%d:min-keyint=%d:scenecut=0:repeat-headers=1:log-level=error" % (fps, fps)] + rate
             else:
                 cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"] + rate
                 cmd += ["-keyint_min", str(fps), "-sc_threshold", "0"]
@@ -1335,6 +1368,8 @@ class Recorder:
         if skip > 0.05:
             cmd += ["-ss", "%.3f" % skip]
         cmd += ["-map", "0:v", "-map", "0:a?", "-c", "copy"] + self._track_titles()
+        if self.encoder in HEVC_TWIN.values():
+            cmd += ["-tag:v", "hvc1"]   # так HEVC открывают и плееры Apple
         if faststart:
             cmd += ["-movflags", "+faststart"]
         cmd += [out_path]

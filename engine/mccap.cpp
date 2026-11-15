@@ -1086,7 +1086,7 @@ struct Encoder {
     AVIOContext* io = nullptr;
     AVBufferRef *hwDevice = nullptr, *hwFrames = nullptr;
     AVPacket* pkt = nullptr;
-    AVFrame *nv = nullptr, *sw = nullptr;
+    AVFrame *nv = nullptr, *sw = nullptr, *planar = nullptr;   // planar — для кодировщиков, не принимающих NV12 (x265)
     const void* lastSrc = nullptr;
     long long pts = 0, bytes = 0, packets = 0;
     volatile LONG ioFailed = 0;
@@ -1180,17 +1180,34 @@ struct Encoder {
             nv->width = w;
             nv->height = h;
             if (av_frame_get_buffer(nv, 0) < 0) return false;
+            if (name == "libx265") {
+                enc->pix_fmt = AV_PIX_FMT_YUV420P;
+                planar = av_frame_alloc();
+                if (!planar) return false;
+                planar->format = AV_PIX_FMT_YUV420P;
+                planar->width = w;
+                planar->height = h;
+                if (av_frame_get_buffer(planar, 0) < 0) return false;
+            }
         }
         AVDictionary* opts = nullptr;
-        if (name == "h264_nvenc") {
+        const auto has = [&](const char* part) { return name.find(part) != std::string::npos; };
+        if (has("_nvenc")) {
             av_dict_set(&opts, "preset", fps <= 60 ? "p4" : "p2", 0);   // при высокой частоте — пресет побыстрее
             av_dict_set(&opts, "rc", "vbr", 0);
-        } else if (name == "h264_amf") {
+        } else if (has("_amf")) {
             av_dict_set(&opts, "usage", "transcoding", 0);
             av_dict_set(&opts, "quality", "balanced", 0);
             av_dict_set(&opts, "rc", "vbr_peak", 0);
-        } else if (name == "h264_qsv") {
+            if (name == "hevc_amf") av_dict_set(&opts, "header_insertion_mode", "idr", 0);
+        } else if (has("_qsv")) {
             av_dict_set(&opts, "preset", "veryfast", 0);
+        } else if (name == "libx265") {
+            char params[160];
+            snprintf(params, sizeof(params), "keyint=%d:min-keyint=%d:scenecut=0:repeat-headers=1:log-level=error", fps, fps);
+            av_dict_set(&opts, "preset", "ultrafast", 0);
+            av_dict_set(&opts, "tune", "zerolatency", 0);
+            av_dict_set(&opts, "x265-params", params, 0);
         } else {
             av_dict_set(&opts, "preset", "ultrafast", 0);
             av_dict_set(&opts, "tune", "zerolatency", 0);
@@ -1282,9 +1299,20 @@ struct Encoder {
                 } else {
                     bgraToNv12(item.cpu->data(), srcStride, w, h, nv->data[0], nv->linesize[0], nv->data[1], nv->linesize[1]);
                 }
+                if (planar) {   // NV12 -> три отдельные плоскости
+                    if (av_frame_make_writable(planar) < 0) return false;
+                    for (int yy = 0; yy < h; yy++)
+                        memcpy(planar->data[0] + (size_t)yy * planar->linesize[0], nv->data[0] + (size_t)yy * nv->linesize[0], (size_t)w);
+                    for (int yy = 0; yy < h / 2; yy++) {
+                        const uint8_t* uv = nv->data[1] + (size_t)yy * nv->linesize[1];
+                        uint8_t* u = planar->data[1] + (size_t)yy * planar->linesize[1];
+                        uint8_t* v = planar->data[2] + (size_t)yy * planar->linesize[2];
+                        for (int xx = 0; xx < w / 2; xx++) { u[xx] = uv[xx * 2]; v[xx * 2 / 2] = uv[xx * 2 + 1]; }
+                    }
+                }
                 lastSrc = key;
             }
-            f = nv;
+            f = planar ? planar : nv;
         }
         if (!f) return false;
         f->pts = pts++;   // время кадра — по его номеру: кадры идут ровно с заданной частотой
@@ -2035,7 +2063,7 @@ int wmain(int argc, wchar_t** argv) {
             g_trackPipes.push_back(t);
         }
     }
-    printf("READY %d %d %d %s\n", w, h, a.fps, encoding ? "h264" : (nv12 ? "nv12" : "bgra"));
+    printf("READY %d %d %d %s\n", w, h, a.fps, encoding ? "coded" : (nv12 ? "nv12" : "bgra"));
     fflush(stdout);
 
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {

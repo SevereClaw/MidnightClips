@@ -37,6 +37,17 @@ def probe(ffmpeg, path):
     return duration, float(fps.group(1)) if fps else 30.0, int(size.group(2)) if size else 1080
 
 
+def video_codec(ffmpeg, path):
+    """Формат видео в файле: h264, hevc... (пусто — не удалось узнать)."""
+    try:
+        text = subprocess.run([ffmpeg, "-hide_banner", "-i", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, timeout=30, creationflags=NO_WINDOW).stderr.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    found = re.search(r"Video: (\w+)", text)
+    return found.group(1).lower() if found else ""
+
+
 def plan(limit_mb, duration):
     """Подобрать битрейт, разрешение и кадры под нужный размер файла."""
     total = limit_mb * 8 * 1024 * 1024 / duration / 1000 * 0.955   # кбит/с, с запасом на контейнер
@@ -171,7 +182,8 @@ class ClipTools:
                     source = os.path.join(self.tmp_dir, "send_trim.mp4")
                     temps.append(source)
                     self._trim(path, source, s, e)
-                if os.path.getsize(source) > limit_bytes:
+                # HEVC в чате Discord не проигрывается — такой клип отправляем перекодированным в H.264
+                if os.path.getsize(source) > limit_bytes or video_codec(self.ffmpeg, path) == "hevc":
                     source = os.path.join(self.tmp_dir, "send_small.mp4")
                     temps.append(source)
                     self._compress(path, source, limit, s, e, fps)

@@ -312,7 +312,7 @@ def encode_case(name, fps, seconds, *args, expect_code=None):
     if not ready.startswith("READY"):
         raise AssertionError((ready, helper.stderr.read().decode(errors="replace")[-1500:]))
     w, h, f, fmt = ready.split()[1:5]
-    assert fmt == "h264" and int(f) == fps, ready
+    assert fmt == "coded" and int(f) == fps, ready
     out = os.path.join(tempfile.gettempdir(), "mccap_enc_%d.ts" % (int(time.time() * 1000) % 100000))
     ff = subprocess.run([FFMPEG, "-hide_banner", "-y", "-analyzeduration", "1000000", "-f", "nut", "-i", pipe,
                          "-c", "copy", out], capture_output=True, text=True, errors="replace")
@@ -325,7 +325,7 @@ def encode_case(name, fps, seconds, *args, expect_code=None):
     info = subprocess.run([FFMPEG, "-hide_banner", "-i", out, "-vf", "showinfo", "-f", "null", "-"],
                           capture_output=True, text=True, errors="replace").stderr
     times = [float(x) for x in re.findall(r"pts_time:\s*([\d.]+)", info)]
-    size = re.search(r"Video: h264.*?, (\d+)x(\d+)", info)
+    size = re.search(r"Video: \w+.*?, (\d+)x(\d+)", info)
     assert size and (int(size[1]), int(size[2])) == (int(w) & ~1, int(h) & ~1), (ready, size and size.groups())
     steps = [b - a for a, b in zip(times, times[1:])]
     worst = max(abs(d - 1.0 / fps) for d in steps) if steps else 9
@@ -370,6 +370,10 @@ def encode_checks():
         assert all(abs(g - t) <= 14 for g, t in zip(got, want)), "цвет полосы %d: %s вместо %s" % (bar, got, want)
     encode_case("тестовая картинка 1080p 60", 60, 4, "--test", "--size", "1920x1080")
     print("  цвета тестовой картинки после кодирования совпадают", flush=True)
+    out, w, h = encode_case("HEVC, тестовая картинка 720p 60", 60, 4, "--test", "--size", "1280x720", "--encode", "libx265")
+    frame = decoded_frame(out, w, h)
+    got = pixel(int(5.5 * w / 7), 40)
+    assert all(abs(g - t) <= 16 for g, t in zip(got, (0xE4, 0x00, 0x2B))), "HEVC: цвет полосы %s" % (got,)
 
     # 2. Настоящий экран. Кодировщика видеокарты на сервере нет, поэтому проверяем всё, кроме него самого:
     #    кадр готовится в текстуре кодировщика так же, как для NVENC, но перед сжатием скачивается (download).
