@@ -219,21 +219,37 @@ class ClipTools:
                 url = self.cfg["discord_webhook"].strip()
                 if not WEBHOOK_RE.match(url):
                     raise Fail("Сначала вставьте ссылку вебхука: Настройки → Discord.")
-                source = path
+                source, kept = path, ""
                 if ranged or picked:
                     source = os.path.join(self.tmp_dir, "send_trim.mp4")
                     temps.append(source)
                     self._trim(path, source, s, e)
                 # HEVC в чате Discord не проигрывается — такой клип отправляем перекодированным в H.264
                 if os.path.getsize(source) > limit_bytes or video_codec(self.ffmpeg, path) == "hevc":
-                    source = os.path.join(self.tmp_dir, "send_small.mp4")
-                    temps.append(source)
-                    self._compress(path, source, limit, s, e, fps)
+                    # Сжатый клип остаётся рядом с исходным: если Discord не примет, его можно отправить самому.
+                    ready = "%s (%d МБ).mp4" % (base, limit)
+                    if not ranged and not picked and self._fresh(ready, path, limit_bytes):
+                        source = kept = ready          # уже сжимали целиком — второй раз не нужно
+                    else:
+                        source = unique(ready)
+                        temps.append(source)
+                        self._compress(path, source, limit, s, e, fps)
+                        temps.remove(source)
+                        kept = source
                 self._stage("Отправляю в Discord…")
-                if self._cancel:
-                    raise Fail("Отменено.")
-                post_file(url, source, os.path.basename(base) + ".mp4")
-                self._done(action, "Клип отправлен в Discord", "")
+                try:
+                    if self._cancel:
+                        raise Fail("Отменено.")
+                    post_file(url, source, os.path.basename(base) + ".mp4")
+                except Fail as exc:
+                    if not kept:
+                        raise
+                    self.on_event("job_done", {
+                        "ok": False, "action": action, "path": kept,
+                        "text": "%s Сжатый клип сохранён рядом с исходным (%s) — его можно отправить самому." % (
+                            "Отправка отменена." if self._cancel else str(exc), os.path.basename(kept))})
+                    return
+                self._done(action, "Клип отправлен в Discord" + (". Сжатая копия сохранена рядом" if kept else ""), kept)
         except Fail as exc:
             self.on_event("job_done", {"ok": False, "action": action,
                                        "text": "Отменено." if self._cancel else str(exc), "path": ""})
@@ -298,23 +314,47 @@ class ClipTools:
         if not os.path.isfile(out) or os.path.getsize(out) == 0:
             raise Fail("Обрезка не получилась.")
 
+    def _fresh(self, ready, src, limit_bytes):
+        """Готовый сжатый клип годится для отправки: не старее исходника, в пределах лимита, H.264
+        и той же длины (под этим именем мог сохраниться и сжатый отрезок)."""
+        try:
+            return (os.path.isfile(ready) and 0 < os.path.getsize(ready) <= limit_bytes
+                    and os.path.getmtime(ready) >= os.path.getmtime(src)
+                    and video_codec(self.ffmpeg, ready) == "h264"
+                    and abs(probe(self.ffmpeg, ready)[0] - probe(self.ffmpeg, src)[0]) < 0.5)
+        except (OSError, Fail):
+            return False
+
     def _compress(self, src, out, limit_mb, s, e, src_fps):
         duration = e - s
         video, audio, height, fps = plan(limit_mb, duration)
         limit_bytes = limit_mb * 1024 * 1024
-        passlog = os.path.join(self.tmp_dir, "pass")
-        for attempt in range(3):
+        two_pass = True
+        for attempt in range(4):
             filters = "scale=-2:'trunc(min(ih,%d)/2)*2'" % height
             if src_fps > fps + 1:
                 filters += ",fps=%d" % fps
             sound = [] if self._audio == ["-map", "0:v", "-map", "0:a?"] else self._audio   # по умолчанию — первая дорожка
+            # Журнал проходов — короткое имя в рабочей папке (ffmpeg запускается в ней): путь к папке
+            # с нелатинскими буквами в имени пользователя кодировщику тогда не нужен.
             common = ["-ss", "%.3f" % s, "-i", src, "-t", "%.3f" % duration, "-vf", filters,
-                      "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-                      "-b:v", "%dk" % video, "-passlogfile", passlog]
+                      "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", "%dk" % video]
+            tail = ["-c:a", "aac", "-b:a", "%dk" % audio, "-ac", "2", "-movflags", "+faststart", out]
             label = "Сжимаю до %d МБ…" % limit_mb
-            self._ffmpeg(common + ["-pass:v", "1", "-an", "-f", "null", "-"], duration, 0, 45, label)
-            self._ffmpeg(common + sound + ["-pass:v", "2", "-c:a", "aac", "-b:a", "%dk" % audio, "-ac", "2",
-                                   "-movflags", "+faststart", out], duration, 45, 55, label)
+            if two_pass:
+                try:
+                    self._ffmpeg(common + ["-passlogfile", "pass", "-pass:v", "1", "-an", "-f", "null", "-"],
+                                 duration, 0, 45, label)
+                    self._ffmpeg(common + sound + ["-passlogfile", "pass", "-pass:v", "2"] + tail, duration, 45, 55, label)
+                except Fail:
+                    if self._cancel:
+                        raise
+                    two_pass = False   # два прохода не получились — сжимаем в один, без журнала проходов
+            if not two_pass:
+                self._ffmpeg(common + sound + ["-maxrate", "%dk" % int(video * 1.3), "-bufsize", "%dk" % (video * 2)] + tail,
+                             duration, 0, 100, label)
+            if not os.path.isfile(out) or os.path.getsize(out) == 0:
+                raise Fail("Сжатие не получилось — подробности в Настройки → Журнал.")
             size = os.path.getsize(out)
             if size <= limit_bytes:
                 break
@@ -329,3 +369,4 @@ class ClipTools:
                     os.remove(os.path.join(self.tmp_dir, name))
                 except OSError:
                     pass
+        return True

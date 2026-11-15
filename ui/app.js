@@ -84,7 +84,7 @@ function flash(text, isError) {
   el.className = "flash" + (isError ? " is-error" : "");
   el.textContent = text;
   $("flashes").appendChild(el);
-  setTimeout(() => el.remove(), isError ? 6000 : 3200);
+  setTimeout(() => el.remove(), isError ? Math.max(6000, text.length * 90) : 3200);   // длинную ошибку нужно успеть прочитать
 }
 
 function fmtDuration(sec) {
@@ -610,7 +610,7 @@ function finishJob(result) {
   setEditorBusy(false);
   $("edJob").hidden = true;
   flash(result.text, !result.ok);
-  if (result.ok && result.action !== "send") loadClips();
+  if (result.path || (result.ok && result.action !== "send")) loadClips();   // при отправке рядом остаётся сжатая копия
 }
 $("edTrim").onclick = () => runAction("trim");
 $("edCompress").onclick = () => runAction("compress");

@@ -172,6 +172,44 @@ def main():
     print("отправить отрезок 20 c при лимите 2 МБ → ушло %.2f МБ" % (got["size"] / 1048576))
     assert got["size"] <= 2 * 1048576 + 2000
     assert not [f for f in os.listdir(os.path.join(tmp, "work")) if f.endswith(".mp4")], "временные файлы остались"
+    # сжатая копия остаётся рядом с клипом — её можно отправить самому
+    assert done["path"] and os.path.isfile(done["path"]) and os.path.dirname(done["path"]) == tmp, done
+    assert 0 < os.path.getsize(done["path"]) <= 2 * 1048576
+
+    # Discord отказал — сжатый клип всё равно сохранён, и об этом сказано
+    got["code"] = 413
+    done, _ = run("send", 2, 12)
+    print("отказ при отправке →", done["text"])
+    assert not done["ok"] and "сохранён" in done["text"] and os.path.isfile(done["path"]), done
+
+    # клип уже сжат целиком кнопкой «Сжать» — при отправке второй раз не сжимается
+    got["code"] = 204
+    cfg.update({"discord_limit_mb": 1})
+    done, percents = run("send")         # под этим именем лежит сжатый отрезок 10 c — он не годится
+    assert done["ok"] and percents and abs(tools.probe(FFMPEG, done["path"])[0] - 40) < 0.5, done
+    os.remove(done["path"])
+    os.remove(os.path.join(tmp, "Клип тест (1 МБ).mp4"))
+    os.rename(small, os.path.join(tmp, "Клип тест (1 МБ).mp4"))
+    small = os.path.join(tmp, "Клип тест (1 МБ).mp4")
+    before = set(os.listdir(tmp))
+    done, percents = run("send")
+    assert done["ok"] and done["path"] == small and not percents and set(os.listdir(tmp)) == before, done
+    print("готовая сжатая копия отправлена без повторного сжатия: %.2f МБ" % (got["size"] / 1048576))
+
+    # два прохода не удались — сжимает в один
+    real = t._ffmpeg
+
+    def broken(args, *a, **k):
+        if "-pass:v" in args:
+            raise tools.Fail("ffmpeg не справился.")
+        return real(args, *a, **k)
+
+    t._ffmpeg = broken
+    cfg.update({"discord_limit_mb": 2})
+    done, _ = run("compress", 0, 20)
+    t._ffmpeg = real
+    assert done["ok"] and os.path.getsize(done["path"]) <= 2 * 1048576, done
+    print("сжатие в один проход → %.2f МБ" % (os.path.getsize(done["path"]) / 1048576))
 
     # отмена
     cfg.update({"discord_limit_mb": 10})
