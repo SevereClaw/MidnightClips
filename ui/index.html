@@ -178,6 +178,14 @@
         <h2>Горячие клавиши</h2>
         <div class="row"><span>Сохранить клип<small class="warn" id="warnClip" hidden>Сочетание занято другой программой</small></span>
           <button class="hotkey" data-hotkey="hotkey_clip"></button></div>
+        <div class="row"><span>Клип покороче
+          <small>Сохраняет не весь буфер, а только последние секунды. Если буфер короче — сохранится весь буфер</small>
+          <small class="warn" id="warnClipA" hidden>Сочетание занято другой программой</small></span>
+          <span class="row-buttons"><select data-key="clip_a_seconds" data-type="int"><option value="10">10 секунд</option><option value="15">15 секунд</option><option value="30">30 секунд</option><option value="60">1 минута</option><option value="120">2 минуты</option><option value="300">5 минут</option></select>
+          <button class="hotkey" data-hotkey="hotkey_clip_a"></button></span></div>
+        <div class="row"><span>Ещё один короткий клип<small class="warn" id="warnClipB" hidden>Сочетание занято другой программой</small></span>
+          <span class="row-buttons"><select data-key="clip_b_seconds" data-type="int"><option value="10">10 секунд</option><option value="15">15 секунд</option><option value="30">30 секунд</option><option value="60">1 минута</option><option value="120">2 минуты</option><option value="300">5 минут</option></select>
+          <button class="hotkey" data-hotkey="hotkey_clip_b"></button></span></div>
         <div class="row"><span>Начать и остановить запись<small class="warn" id="warnRec" hidden>Сочетание занято другой программой</small></span>
           <button class="hotkey" data-hotkey="hotkey_record"></button></div>
         <div class="row"><span>Меню поверх игры

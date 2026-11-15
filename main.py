@@ -115,6 +115,8 @@ class App:
         self.hotkeys.bind("clip", self.cfg["hotkey_clip"], self.save_clip)
         self.hotkeys.bind("record", self.cfg["hotkey_record"], self.toggle_record)
         self.hotkeys.bind("overlay", self.cfg["hotkey_overlay"], self.toggle_overlay)
+        self.hotkeys.bind("clip_a", self.cfg["hotkey_clip_a"], lambda: self.save_clip(int(self.cfg["clip_a_seconds"])))
+        self.hotkeys.bind("clip_b", self.cfg["hotkey_clip_b"], lambda: self.save_clip(int(self.cfg["clip_b_seconds"])))
         time.sleep(0.15)  # дать потоку клавиш применить изменения
         self.push("hotkeys", dict(self.hotkeys.status))
 
@@ -176,8 +178,9 @@ class App:
 
     # ------------------------------------------------------------- действия
 
-    def save_clip(self):
-        self.recorder.save_clip(winutil.foreground_app())
+    def save_clip(self, seconds=None):
+        """Сохранить клип: весь буфер или только последние seconds секунд."""
+        self.recorder.save_clip(winutil.foreground_app(), seconds)
 
     def toggle_record(self, title=None):
         """Начать или остановить запись. Если для записи выбран свой набор настроек,
@@ -259,9 +262,23 @@ class App:
         else:
             status = rec.message or "Захват запускается…"
         mic_on = bool(cfg["mic"]) and bool(cfg["mic_on"])
+
+        def short(ident):   # плитка «клип покороче»
+            want = int(cfg["%s_seconds" % ident])
+            key = cfg["hotkey_%s" % ident] or "без клавиши"
+            name = "%d мин" % (want // 60) if want >= 60 and want % 60 == 0 else "%d с" % want
+            if not buffer_on:
+                sub = "Буфер повтора выключен"
+            elif want > seconds:
+                sub = "Буфер короче — сохранится %s  ·  %s" % (length, key)
+            else:
+                sub = key
+            return {"id": ident, "title": "Клип: последние %s" % name, "active": buffer_on and rec.state == "on", "sub": sub}
+
         tiles = [
             {"id": "clip", "title": "Сохранить клип", "active": buffer_on and rec.state == "on",
              "sub": ("Последние %s  ·  %s" % (length, cfg["hotkey_clip"] or "без клавиши")) if buffer_on else "Буфер повтора выключен"},
+            short("clip_a"), short("clip_b"),
             {"id": "record", "title": "Остановить запись" if recording else "Начать запись", "active": True, "alert": recording,
              "sub": cfg["hotkey_record"] or "без клавиши"},
             {"id": "buffer", "title": "Буфер повтора", "active": buffer_on, "sub": "Включён — нажмите, чтобы выключить" if buffer_on else "Выключен — нажмите, чтобы включить"},
@@ -270,13 +287,16 @@ class App:
             {"id": "clips", "title": "Клипы", "active": True, "sub": "Открыть галерею"},
             {"id": "settings", "title": "Настройки", "active": True, "sub": "Открыть настройки программы"},
         ]
-        hint = "Цифры 1–6 или мышь — выбрать.  %s или Esc — закрыть" % (cfg["hotkey_overlay"] or "Esc")
+        hint = "Цифры 1–8 или мышь — выбрать.  %s или Esc — закрыть" % (cfg["hotkey_overlay"] or "Esc")
         return {"status": status, "tiles": tiles, "hint": hint}
 
     def overlay_action(self, ident):
         """Нажатие плитки. True — меню после этого закрыть."""
         if ident == "clip":
             self.save_clip()
+            return True
+        if ident in ("clip_a", "clip_b"):
+            self.save_clip(int(self.cfg["%s_seconds" % ident]))
             return True
         if ident == "record":
             self.toggle_record()
@@ -369,7 +389,7 @@ class Api:
     def set_settings(self, values):
         app = self._app
         changed = app.cfg.update(values or {})
-        if changed & {"hotkey_clip", "hotkey_record", "hotkey_overlay"}:
+        if changed & {"hotkey_clip", "hotkey_record", "hotkey_overlay", "hotkey_clip_a", "hotkey_clip_b"}:
             app.bind_hotkeys()
         if changed & {"cleanup_days", "cleanup_gb", "clips_dir"}:
             threading.Thread(target=app.run_cleanup, daemon=True).start()

@@ -55,6 +55,17 @@ def main(storage="disk"):
     took = time.time() - t_save
     print("клип сохранён за %.2f c после нажатия" % took)
     assert took < 1.5, "сохранение клипа ждёт закрытия кусочка: %.2f c" % took
+    # 1б) короткий клип: только последние 3 секунды из 6
+    n_before = len([1 for k, _ in events if k == "saved"])
+    r.save_clip("Короткий", 3)
+    t0 = time.time()
+    while len([1 for k, _ in events if k == "saved"]) == n_before and time.time() - t0 < 10:
+        time.sleep(0.05)
+    short = [p for k, p in events if k == "saved"][-1]
+    short_dur = float(probe(short["path"])["format"]["duration"])
+    print("короткий клип (3 c): %.2f c" % short_dur)
+    assert 2.0 <= short_dur <= 4.5, short_dur
+    events[:] = [e for e in events if e[1] is not short]
     # 2) обычная запись ~5 секунд
     time.sleep(4)
     assert r.start_recording("Запись теста")
