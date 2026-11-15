@@ -48,12 +48,17 @@ def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True
     helper = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     ready = helper.stdout.readline().decode().strip().split()
     assert ready and ready[0] == "READY", ready
+    n_tracks = int(engine_args[engine_args.index("--tracks") + 1]) if "--tracks" in engine_args else 0
+    track_in, track_map = [], []
+    for k in range(1, n_tracks + 1):   # отдельные дорожки — свои каналы
+        track_in += ["-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "%s_a_%d" % (pipe, k)]
+        track_map += ["-map", "%d:a" % (k + 1)]
     video_in = (["-analyzeduration", "1000000", "-f", "nut"] if encode else
                 ["-f", "rawvideo", "-pixel_format", ready[4], "-video_size", "%sx%s" % (ready[1], ready[2]), "-framerate", ready[3]])
     out = os.path.join(TMP, "mccap_audio_%s.mkv" % name)
     ff = subprocess.Popen(
         [FFMPEG, "-hide_banner", "-y"] + video_in + ["-i", pipe, "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", pipe + "_a",
-         "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", out],
+         ] + track_in + ["-map", "0:v", "-map", "1:a"] + track_map + ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", out],
         stdout=subprocess.DEVNULL, stderr=open(out + ".log", "wb"))   # в файл: сообщений может быть много
     t0 = time.time()
     if side:
@@ -88,8 +93,8 @@ def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True
     return out, err
 
 
-def audio_of(path):
-    raw = subprocess.run([FFMPEG, "-v", "error", "-i", path, "-map", "0:a", "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
+def audio_of(path, stream=0):
+    raw = subprocess.run([FFMPEG, "-v", "error", "-i", path, "-map", "0:a:%d" % stream, "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
                          capture_output=True).stdout
     return struct.unpack("<%dh" % (len(raw) // 2), raw)
 
@@ -226,6 +231,26 @@ def app_checks():
     app_check("ffplay 25%", ["--app-vol", "ffplay.exe=0.25"], quarter, full, tone_a, tone_b)
     app_check("PowerShell выключен", ["--app-vol", "powershell.exe=0"], full, none, tone_a, tone_b)
     app_check("остальные 50%, ffplay 100%", ["--vol-system", "0.5", "--app-vol", "ffplay.exe=1"], full, half, tone_a, tone_b)
+    app_check("только отмеченные: ffplay", ["--vol-system", "0", "--app-vol", "ffplay.exe=1"], full, none, tone_a, tone_b)
+    # отдельные дорожки: общая, ffplay, остальное
+    def side(t0):
+        time.sleep(0.3)
+        subprocess.Popen([FFPLAY, "-nodisp", "-autoexit", "-loglevel", "quiet", tone_a], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["powershell", "-NoProfile", "-Command", "(New-Object Media.SoundPlayer '%s').PlaySync()" % tone_b],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    path, err = record("дорожки", 7, ["--tracks", "2", "--track", "ffplay.exe=1", "--track-other", "2",
+                                      "--app-vol", "powershell.exe=0.5"], side=side)
+    levels = []
+    for stream, label in enumerate(("общая", "ffplay", "остальное")):
+        a = audio_of(path, stream)
+        levels.append((tone_level(a, 440, 3.5, 1.5), tone_level(a, 1000, 3.5, 1.5), len(a) / 48000.0, onset(a)))
+        print("дорожка «%s»: 440 Гц %5.0f, 1000 Гц %5.0f, длина %.2f c, звук начался на %.3f c" % (
+            (label,) + levels[-1][:3] + (levels[-1][3] / 48000.0,)), flush=True)
+    assert full[0] <= levels[0][0] <= full[1] and half[0] <= levels[0][1] <= half[1], "общая дорожка\n" + err[-1200:]
+    assert full[0] <= levels[1][0] <= full[1] and levels[1][1] <= none[1], "дорожка программы"
+    assert levels[2][0] <= none[1] and half[0] <= levels[2][1] <= half[1], "дорожка «остальное»"
+    assert abs(levels[0][2] - levels[1][2]) < 0.1 and abs(levels[0][2] - levels[2][2]) < 0.1, "дорожки разной длины"
+    assert abs(levels[1][3] - levels[0][3]) < 48000 * 0.01 or abs(levels[2][3] - levels[0][3]) < 48000 * 0.01, "дорожки сдвинуты относительно общей"
     # список программ со звуком — для настроек
     p1 = subprocess.Popen([FFPLAY, "-nodisp", "-autoexit", "-loglevel", "quiet", tone_a], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1.5)

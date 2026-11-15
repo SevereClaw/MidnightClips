@@ -42,6 +42,9 @@ DEFAULTS = {
     "bitrate_mbps": 12,
     "monitor": 0,
     "capture_target": "monitor",  # что записывать: monitor — весь монитор, window — окно программы
+    "audio_mode": "all",        # all — все программы; apps — только отмеченные в списке
+    "mic_on": True,             # записывать микрофон (галочка в списке)
+    "separate_tracks": False,   # кроме общей дорожки — отдельные: микрофон, игра, отмеченные программы
     "game_include": "",         # через запятую: exe, которые всегда считать играми
     "game_exclude": "",         # ... и которые никогда
     "window_exe": "",           # имя exe программы, чьё окно записывать
@@ -79,7 +82,7 @@ DEFAULTS = {
 # Изменение этих ключей требует перезапуска захвата.
 CAPTURE_KEYS = {
     "buffer_enabled", "buffer_seconds", "fps", "height", "bitrate_mbps", "monitor",
-    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe", "cursor"}
+    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe", "cursor", "audio_mode", "mic_on", "separate_tracks"}
 
 
 class Config:

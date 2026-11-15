@@ -119,6 +119,7 @@ class Recorder:
         self._soft = False                # мягкий перезапуск: буфер не стирать
         self.find_window = find_window or (lambda exe: None)   # окно программы по имени exe
         self.detect_game = detect_game or (lambda include, exclude: None)   # игра в активном окне: (exe, окно)
+        self._track_names = ["Всё вместе"]  # звуковые дорожки текущей записи
         self._game_exe = None             # игра, найденная автоматически, пока её окно открыто
         self._game_skip = set()           # программы, чьё окно записать не получилось
         self.window_active = False        # сейчас записывается окно, а не весь монитор
@@ -566,8 +567,9 @@ class Recorder:
             files = self._segments(prefix)
             if files and max(self._seg_size(f) for f in files) > 0:
                 self._proc = proc
+                self._track_names = list(own[5]) if own else ["Всё вместе"]
                 self._format_changed((encoder, own[1:4] if own else None, self.fps_target,
-                                      int(self.cfg["height"])), prefix)
+                                      int(self.cfg["height"]), len(self._track_names)), prefix)
                 return proc, source, pump, time.time()
             if helper is not None and helper.poll() is not None:
                 break
@@ -619,6 +621,68 @@ class Recorder:
         except (ValueError, TypeError, AttributeError):
             return {}
 
+    def audio_rows(self):
+        """Строки списка «Что записывать из звука»: {ключ: (включено, громкость %)}.
+        Ключ — имя exe либо «@game» (игра) и «@self» (сигналы самой программы)."""
+        try:
+            data = json.loads(self.cfg["app_volumes"] or "{}")
+        except (ValueError, TypeError):
+            return {}
+        rows = {}
+        for key, value in (data.items() if isinstance(data, dict) else []):
+            key = str(key).strip().lower()
+            try:
+                if isinstance(value, dict):
+                    rows[key] = (bool(value.get("on", True)), max(0, min(200, int(value.get("vol", 100)))))
+                elif key:
+                    rows[key] = (True, max(0, min(200, int(value))))
+            except (ValueError, TypeError):
+                pass
+        return rows
+
+    def audio_plan(self):
+        """Что и с какой громкостью пишет движок и как звук раскладывается по дорожкам."""
+        rows = self.audio_rows()
+        specific = self.cfg["audio_mode"] == "apps"
+        default = 0.0 if specific else max(0, min(200, int(self.cfg["rec_volume_system"]))) / 100.0
+        target = self.cfg["capture_target"]
+        game = (self._game_exe if target == "game" else self.cfg["window_exe"] if target == "window" else "") or ""
+        game = game.lower()
+        own = os.path.basename(sys.executable).lower()
+        gains = {k: (vol / 100.0 if on else 0.0) for k, (on, vol) in rows.items() if not k.startswith("@")}
+        if "@game" in rows and game and game not in gains:
+            gains[game] = rows["@game"][1] / 100.0 if rows["@game"][0] else 0.0
+        include_parent = False
+        if "@self" in rows or specific:
+            on, vol = rows.get("@self", (True, 100))
+            gains[own] = vol / 100.0 if on else 0.0
+            include_parent = on
+        if specific and not gains:
+            gains["@none"] = 0.0   # режим «только отмеченные» без отмеченных: движок всё равно снимает программы по одной
+        mic = bool(self.cfg["mic"]) and bool(self.cfg["mic_on"]) and self._degrade < 1
+        plan = {"default": default, "gains": gains, "include_parent": include_parent, "mic": mic,
+                "names": ["Всё вместе"], "mic_track": 0, "other_track": 0, "app_track": {}}
+        if self.cfg["separate_tracks"]:
+            def add(name):
+                plan["names"].append(name)
+                return len(plan["names"]) - 1
+            if mic:
+                plan["mic_track"] = add("Микрофон")
+            # Дорожка игры есть всегда, когда записывается игра или окно, — даже пока игра не запущена:
+            # иначе набор дорожек менялся бы при входе в игру, и буфер приходилось бы начинать заново.
+            if target in ("game", "window") and rows.get("@game", (True, 100))[0]:
+                index = add("Игра")
+                if game and gains.get(game, default) > 0:
+                    plan["app_track"][game] = index
+            for exe in sorted(gains):
+                if exe not in (game, own) and gains[exe] > 0 and len(plan["names"]) < 7:
+                    plan["app_track"][exe] = add(exe[:-4].capitalize() if exe.endswith(".exe") else exe)
+            if default > 0 or include_parent:
+                plan["other_track"] = add("Остальное")
+                if include_parent and default <= 0:
+                    plan["app_track"][own] = plan["other_track"]
+        return plan
+
     def list_audio_apps(self):
         """Программы, у которых сейчас есть звук (спрашиваем у движка)."""
         if not self.engine:
@@ -637,15 +701,25 @@ class Recorder:
         pipe = r"\\.\pipe\mccap_%d_%d" % (os.getpid(), self._session)
         args = [self.engine, "--pipe", pipe, "--fps", str(fps), "--parent", str(os.getpid())]
         audio_pipe = ""
+        tracks = ["Всё вместе"]
         if audio:
             audio_pipe = pipe + "_a"
+            plan = self.audio_plan()
+            tracks = plan["names"]
             args += ["--audio-pipe", audio_pipe, "--audio-system", "1" if self.cfg["audio"] else "0",
-                     "--vol-system", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_system"]))) / 100.0)]
-            for exe, percent in sorted(self.app_volumes().items()):   # своя громкость программ
-                args += ["--app-vol", "%s=%.2f" % (exe, percent / 100.0)]
-            if self.cfg["mic"] and self._degrade < 1:
+                     "--vol-system", "%.2f" % plan["default"]]
+            for exe, gain in sorted(plan["gains"].items()):   # своя громкость программ; 0 — в запись не идёт
+                args += ["--app-vol", "%s=%.2f" % (exe, gain)]
+            if plan["include_parent"]:
+                args += ["--include-parent"]
+            if plan["mic"]:
                 args += ["--mic", self.cfg["mic"],
                          "--vol-mic", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0)]
+            if len(tracks) > 1:   # отдельные дорожки
+                args += ["--tracks", str(len(tracks) - 1), "--track-mic", str(plan["mic_track"]),
+                         "--track-other", str(plan["other_track"])]
+                for exe, index in sorted(plan["app_track"].items()):
+                    args += ["--track", "%s=%d" % (exe, index)]
         if not self.cfg["cursor"]:
             args.append("--no-cursor")
         if encode:   # движок кодирует сам; в канал идёт уже сжатое видео
@@ -706,7 +780,7 @@ class Recorder:
                     self._log("захват окна здесь недоступен — записываю весь монитор")
                 return self._start_engine(gpu, audio, allow_window=False, encode=encode)
             return None, None
-        return helper, (pipe, int(parts[1]), int(parts[2]), parts[4] if len(parts) > 4 else "bgra", audio_pipe)
+        return helper, (pipe, int(parts[1]), int(parts[2]), parts[4] if len(parts) > 4 else "bgra", audio_pipe, tracks)
 
     def _watch_engine(self, helper, fps):
         """Сообщения движка — в журнал; из статистики берём реальную частоту обновления экрана."""
@@ -827,6 +901,11 @@ class Recorder:
                 cmd += ["-itsoffset", "%.3f" % (offset / 1000.0)]
             cmd += ["-i", own[4]]
             audio_inputs.append(1)
+            for k in range(1, len(own[5])):   # отдельные дорожки — такие же каналы, по одному на дорожку
+                cmd += ["-f", "s16le", "-ar", "48000", "-ac", "2"]
+                if offset:
+                    cmd += ["-itsoffset", "%.3f" % (offset / 1000.0)]
+                cmd += ["-i", "%s_%d" % (own[4], k)]
         elif source:
             cmd += ["-f", "s16le", "-ar", str(source.rate), "-ac", str(source.channels)]
             offset = int(cfg["audio_offset_ms"])
@@ -880,6 +959,9 @@ class Recorder:
                     "-map", "0:v", "-map", "[a]"]
         elif audio_inputs:
             cmd += ["-map", "0:v", "-map", "1:a"]
+            if engine_audio:
+                for k in range(1, len(own[5])):
+                    cmd += ["-map", "%d:a" % (k + 1)]
             volume = 1.0 if engine_audio else (vol_sys if source else vol_mic)
             if abs(volume - 1.0) > 0.001:
                 cmd += ["-af", "volume=%.2f" % volume]
@@ -1225,7 +1307,8 @@ class Recorder:
                    "-f", "concat", "-safe", "0", "-i", os.path.basename(list_path)]
             if skip > 0.05:
                 cmd += ["-ss", "%.3f" % skip]
-            cmd += ["-c", "copy", "-movflags", "+faststart", out_path]
+            cmd += ["-map", "0:v", "-map", "0:a?", "-c", "copy"] + self._track_titles()
+            cmd += ["-movflags", "+faststart", out_path]
             return self._run_mux(cmd, out_path)
         finally:
             for path in parts + [list_path]:
@@ -1251,7 +1334,7 @@ class Recorder:
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", source]
         if skip > 0.05:
             cmd += ["-ss", "%.3f" % skip]
-        cmd += ["-c", "copy"]
+        cmd += ["-map", "0:v", "-map", "0:a?", "-c", "copy"] + self._track_titles()
         if faststart:
             cmd += ["-movflags", "+faststart"]
         cmd += [out_path]
@@ -1260,6 +1343,16 @@ class Recorder:
         finally:
             if joined:
                 self._remove(joined)
+
+    def _track_titles(self):
+        """Названия звуковых дорожек в готовом файле (видны в редакторах и плеерах)."""
+        names = self._track_names
+        if len(names) < 2:
+            return []
+        out = []
+        for i, name in enumerate(names):
+            out += ["-metadata:s:a:%d" % i, "title=" + name, "-metadata:s:a:%d" % i, "handler_name=" + name]
+        return out
 
     def _run_mux(self, cmd, out_path):
         try:

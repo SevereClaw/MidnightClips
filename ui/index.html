@@ -152,14 +152,16 @@
         <h2>Звук</h2>
         <label class="row"><span>Записывать звук компьютера</span><input type="checkbox" data-key="audio"></label>
         <label class="row"><span>Микрофон</span><select data-key="mic" id="selMic"><option value="">Не записывать</option></select></label>
-        <label class="row"><span>Громкость звука компьютера в записи<small id="volSysText"></small></span>
-          <input type="range" class="vol" data-key="rec_volume_system" data-type="int" min="0" max="200" step="5"></label>
-        <label class="row"><span>Громкость микрофона в записи<small id="volMicText"></small></span>
-          <input type="range" class="vol" data-key="rec_volume_mic" data-type="int" min="0" max="200" step="5"></label>
-        <div class="row row-top"><span>Своя громкость программ в записи
-          <small>Например, сделать Discord или музыку тише, чем игру. Остальные программы пишутся с громкостью «звука компьютера». В этом режиме в запись не попадают системные звуки Windows и сигналы самой программы</small></span>
-          <span class="row-buttons"><select id="selAddApp"><option value="">Добавить программу…</option></select></span></div>
-        <div id="appRows"></div>
+        <label class="row"><span>Что записывать из звука
+          <small>«Только отмеченные» — в запись идут лишь программы с галочкой, всё остальное в ней не слышно</small></span>
+          <select data-key="audio_mode"><option value="all">Все программы</option><option value="apps">Только отмеченные</option></select></label>
+        <div class="audio-list" id="appRows"></div>
+        <div class="row"><span>Добавить программу в список
+          <small>Здесь программы, которые звучат прямо сейчас. Громкость меняется только в записи: в наушниках всё звучит как раньше</small></span>
+          <span class="row-buttons"><select id="selAddApp"><option value="">Выбрать…</option></select></span></div>
+        <label class="row"><span>Отдельные звуковые дорожки
+          <small>Кроме общего звука в файл пишутся отдельные дорожки: микрофон, игра, каждая отмеченная программа и «остальное». В редакторе видео любую можно заглушить. Обычные плееры играют первую дорожку — общую</small></span>
+          <input type="checkbox" data-key="separate_tracks"></label>
         <label class="row"><span>Сдвиг звука, мс
           <small>Если звук отстаёт от картинки — поставьте минус, если спешит — плюс</small></span>
           <input type="number" data-key="audio_offset_ms" data-type="int" min="-2000" max="2000" step="20"></label>

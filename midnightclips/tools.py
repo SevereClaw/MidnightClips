@@ -238,7 +238,7 @@ class ClipTools:
     def _trim(self, src, out, s, e):
         """Быстрая обрезка без перекодирования (начало встаёт на ближайший опорный кадр, до секунды раньше)."""
         self._stage("Обрезаю…")
-        self._ffmpeg(["-ss", "%.3f" % s, "-i", src, "-t", "%.3f" % (e - s), "-c", "copy",
+        self._ffmpeg(["-ss", "%.3f" % s, "-i", src, "-t", "%.3f" % (e - s), "-map", "0:v", "-map", "0:a?", "-c", "copy",
                       "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out])
         if not os.path.isfile(out) or os.path.getsize(out) == 0:
             raise Fail("Обрезка не получилась.")

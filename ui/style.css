@@ -330,7 +330,23 @@ select { padding-right: 6px; max-width: 320px; }
 .row small.warn { color: var(--red); font-weight: 700; }
 .row-buttons { display: flex; gap: 10px; }
 .row-top { align-items: flex-start; }
-.app-row span:first-child { font-family: var(--display); font-style: italic; }
+.audio-list { border: 3px solid var(--black); margin: 10px 0 4px; background: var(--white); }
+.audio-row {
+  display: grid; grid-template-columns: 54px minmax(0, 1fr) 240px 52px 34px; align-items: center; gap: 16px;
+  padding: 10px 14px; border-bottom: 2px dashed #d9d9d9;
+}
+.audio-row:last-child { border-bottom: 0; }
+.audio-name { font-family: var(--display); font-style: italic; font-weight: 600; overflow-wrap: anywhere; }
+.audio-name small { display: block; font-family: inherit; font-style: normal; font-weight: 400; color: #555; font-size: 12.5px; margin-top: 2px; }
+.audio-percent { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+.audio-row.is-off .audio-name, .audio-row.is-off .audio-percent { color: #8a8a8a; }
+.audio-row.is-off input.vol { opacity: .35; }
+.audio-remove { background: transparent; border: 0; font-weight: 700; font-size: 18px; line-height: 1; padding: 4px 8px; cursor: pointer; }
+.audio-remove:hover { background: var(--red); color: var(--white); }
+@media (max-width: 760px) {
+  .audio-row { grid-template-columns: 54px minmax(0, 1fr) 52px 34px; }
+  .audio-row input.vol { grid-column: 1 / -1; width: 100%; }
+}
 input[type="number"] { width: 110px; }
 input[type="checkbox"] {
   appearance: none; width: 54px; height: 28px; flex: none; margin: 0;

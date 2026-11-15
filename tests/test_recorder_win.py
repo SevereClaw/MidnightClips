@@ -149,7 +149,7 @@ def game_mode():
     tmp = tempfile.mkdtemp(prefix="mc_game_")
     cfg = Config(os.path.join(tmp, "settings.json"))
     cfg.update({"clips_dir": os.path.join(tmp, "clips"), "buffer_seconds": 30, "fps": 60, "capture": "own",
-                "capture_target": "game"})
+                "capture_target": "game", "separate_tracks": True})
     events, game = [], {"proc": None}
 
     def detect(include, exclude):   # «игра» — наше тестовое окно, пока оно открыто
@@ -191,6 +191,12 @@ def game_mode():
         total, info = frames(ffmpeg, saved[0]["path"])
         print("клип через оба переключения: %d кадров (%.1f c) | %s" % (total, total / 60.0, info), flush=True)
         assert total > 60 * 14, "буфер не пережил переключения: %d кадров" % total
+        streams = subprocess.run([ffmpeg, "-hide_banner", "-i", saved[0]["path"]], capture_output=True, text=True,
+                                 errors="replace").stderr
+        tracks = re.findall(r"Stream #0:\d+.*Audio:", streams)
+        titles = re.findall(r"handler_name\s*:\s*(.+)", streams)
+        print("звуковых дорожек в клипе: %d (%s)" % (len(tracks), ", ".join(t.strip() for t in titles)), flush=True)
+        assert len(tracks) == 3, streams[-1500:]
         print("АВТОЗАХВАТ ИГРЫ: OK", flush=True)
     finally:
         r.stop()

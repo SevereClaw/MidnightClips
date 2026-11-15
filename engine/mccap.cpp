@@ -126,6 +126,10 @@ struct Args {
     float volSystem = 1.0f, volMic = 1.0f;
     std::wstring mic;          // название микрофона; "default" — основной; пусто — без микрофона
     std::map<std::wstring, float> appVol;   // своя громкость программ: имя exe (строчными) -> громкость
+    // Отдельные звуковые дорожки: кроме общей (всё вместе) — ещё tracks штук, каналы «<audio-pipe>_1», «_2»...
+    int tracks = 0, trackMic = 0, trackOther = 0;
+    std::map<std::wstring, int> appTrack;   // программа -> номер дорожки (1..tracks)
+    bool includeParent = false;             // записывать и звуки запустившей нас программы (сигналы MidnightClips)
     bool listApps = false;     // вывести программы, у которых сейчас есть звук, и выйти
     HWND window = nullptr;     // записывать одно окно (а не весь монитор)
     int frameW = 0, frameH = 0; // размер кадра на выходе задан снаружи (окно вписывается в него с полями)
@@ -1621,7 +1625,8 @@ struct AudioSource {
     }
 
     // Подмешать в out отсчёты [pos, pos + count).
-    void mixInto(std::vector<float>& out, long long pos, long long count) {
+    int track = 0;   // номер отдельной дорожки (0 — только общая)
+    void mixInto(std::vector<float>& out, std::vector<float>* extra, long long pos, long long count) {
         long long have = (long long)(fifo.size() / 2);
         if (have && frontPos < pos) {   // устаревшее
             const long long drop = std::min(have, pos - frontPos);
@@ -1632,7 +1637,11 @@ struct AudioSource {
         if (!have || frontPos >= pos + count) return;
         const long long offset = frontPos - pos;
         const long long n = std::min(have, count - offset);
-        for (long long i = 0; i < n * 2; i++) out[(size_t)(offset * 2 + i)] += fifo[(size_t)i] * gain;
+        for (long long i = 0; i < n * 2; i++) {
+            const float v = fifo[(size_t)i] * gain;
+            out[(size_t)(offset * 2 + i)] += v;
+            if (extra) (*extra)[(size_t)(offset * 2 + i)] += v;
+        }
         fifo.erase(fifo.begin(), fifo.begin() + (size_t)n * 2);
         frontPos += n;
     }
@@ -1650,15 +1659,48 @@ static float g_volSystem = 1.0f;
 static DWORD g_parentPid = 0;
 static bool g_perApp = false;
 
+static std::map<std::wstring, int> g_appTrack;
+static int g_tracks = 0, g_trackOther = 0;
+static bool g_includeParent = false;
+
 static float gainOf(const std::wstring& exe) {
     auto it = g_appVol.find(exe);
     return it == g_appVol.end() ? g_volSystem : it->second;
+}
+static int trackOf(const std::wstring& exe) {
+    auto it = g_appTrack.find(exe);
+    return it == g_appTrack.end() ? g_trackOther : it->second;
+}
+
+// Канал отдельной дорожки. ffmpeg открывает каналы по очереди, поэтому пока дорожку не открыли,
+// её звук копится в памяти — тогда все дорожки начинаются с одного и того же момента.
+struct TrackPipe {
+    HANDLE h = INVALID_HANDLE_VALUE;
+    volatile LONG connected = 0;
+    std::vector<uint8_t> pending;
+};
+static std::vector<TrackPipe*> g_trackPipes;
+static DWORD WINAPI trackConnect(LPVOID p) {
+    TrackPipe* t = (TrackPipe*)p;
+    if (ConnectNamedPipe(t->h, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) InterlockedExchange(&t->connected, 1);
+    return 0;
+}
+static bool writeTrack(TrackPipe* t, const uint8_t* data, size_t n) {
+    if (!t->connected) {
+        if (t->pending.size() < (size_t)kRate * 4 * 120) t->pending.insert(t->pending.end(), data, data + n);
+        return true;
+    }
+    if (!t->pending.empty()) {
+        if (!writeAll(t->h, t->pending.data(), t->pending.size())) return false;
+        std::vector<uint8_t>().swap(t->pending);
+    }
+    return writeAll(t->h, data, n);
 }
 
 // Режим «по программам»: держим по одному источнику на каждую программу со звуком.
 static void refreshApps() {
     const std::map<DWORD, ProcInfo> procs = snapshotProcesses();
-    std::set<DWORD> roots = audioRoots(procs, GetCurrentProcessId(), g_parentPid);
+    std::set<DWORD> roots = audioRoots(procs, GetCurrentProcessId(), g_includeParent ? 0 : g_parentPid);
     // Захват идёт по дереву процессов. Если одна программа со звуком запущена из другой (игра из
     // лаунчера), их нельзя снять обе, не записав игру дважды: при одинаковой громкости берём
     // верхнюю (она включает нижнюю), при разной — нижнюю.
@@ -1676,6 +1718,9 @@ static void refreshApps() {
         }
     }
     for (DWORD d : drop) roots.erase(d);
+    for (auto it = roots.begin(); it != roots.end();) {   // программа выключена в записи — её звук и не снимаем
+        if (gainOf(procs.at(*it).exe) <= 0.0f) it = roots.erase(it); else ++it;
+    }
     for (size_t i = 0; i < g_sources.size();) {   // программа закрылась или больше не нужна
         AudioSource* s = g_sources[i];
         if (s->pid && !roots.count(s->pid)) {
@@ -1693,6 +1738,7 @@ static void refreshApps() {
         s->pid = r;
         s->exe = procs.at(r).exe;
         s->gain = gainOf(s->exe);
+        s->track = trackOf(s->exe);
         g_sources.push_back(s);
     }
     // Если «петля по процессу» здесь не работает совсем (старая Windows) — возвращаемся к общему звуку.
@@ -1707,6 +1753,7 @@ static void refreshApps() {
         AudioSource* s = new AudioSource();
         s->loopback = true;
         s->gain = g_volSystem;
+        s->track = g_trackOther;
         g_sources.push_back(s);
         g_perApp = false;
     }
@@ -1715,6 +1762,8 @@ static void refreshApps() {
 static DWORD WINAPI audioThread(LPVOID) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    for (TrackPipe* t : g_trackPipes) CloseHandle(CreateThread(nullptr, 0, trackConnect, t, 0, nullptr));
+    std::vector<std::vector<float>> trackMix(g_trackPipes.size());
     if (!ConnectNamedPipe(g_audioPipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
         logf("error: audio pipe %lu", GetLastError());
         InterlockedExchange(&g_audioFailed, 1);
@@ -1747,8 +1796,19 @@ static DWORD WINAPI audioThread(LPVOID) {
             const long long due = std::min<long long>(target - outPos, kRate);
             if (due > 0) {
                 mix.assign((size_t)due * 2, 0.0f);
-                for (AudioSource* s : g_sources) s->mixInto(mix, outPos, due);
+                for (auto& t : trackMix) t.assign((size_t)due * 2, 0.0f);
+                for (AudioSource* s : g_sources)
+                    s->mixInto(mix, s->track > 0 && s->track <= (int)trackMix.size() ? &trackMix[(size_t)s->track - 1] : nullptr, outPos, due);
                 pcm.resize((size_t)due * 2);
+                bool tracksOk = true;
+                for (size_t k = 0; k < trackMix.size() && tracksOk; k++) {   // отдельные дорожки
+                    for (size_t i = 0; i < pcm.size(); i++) {
+                        float v = trackMix[k][i] * 32767.0f;
+                        pcm[i] = (int16_t)(v > 32767.0f ? 32767.0f : (v < -32768.0f ? -32768.0f : v));
+                    }
+                    tracksOk = writeTrack(g_trackPipes[k], (const uint8_t*)pcm.data(), pcm.size() * 2);
+                }
+                if (!tracksOk) { InterlockedExchange(&g_audioFailed, 1); break; }
                 for (size_t i = 0; i < pcm.size(); i++) {
                     float v = mix[i] * 32767.0f;
                     pcm[i] = (int16_t)(v > 32767.0f ? 32767.0f : (v < -32768.0f ? -32768.0f : v));
@@ -1838,6 +1898,19 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--frame") swscanf_s(next(), L"%dx%d", &a.frameW, &a.frameH);
         else if (k == L"--bitrate") a.bitrate = std::max(1, std::min(200, _wtoi(next())));
         else if (k == L"--frames") a.frames = next();
+        else if (k == L"--tracks") a.tracks = std::max(0, std::min(8, _wtoi(next())));
+        else if (k == L"--track-mic") a.trackMic = _wtoi(next());
+        else if (k == L"--track-other") a.trackOther = _wtoi(next());
+        else if (k == L"--include-parent") a.includeParent = true;
+        else if (k == L"--track") {     // имя.exe=номер дорожки
+            std::wstring spec = next();
+            const size_t eq = spec.rfind(L'=');
+            if (eq != std::wstring::npos && eq > 0) {
+                std::wstring exe = spec.substr(0, eq);
+                for (auto& c : exe) c = (wchar_t)towlower(c);
+                a.appTrack[exe] = _wtoi(spec.substr(eq + 1).c_str());
+            }
+        }
         else if (k == L"--app-vol") {   // имя.exe=громкость
             std::wstring spec = next();
             const size_t eq = spec.rfind(L'=');
@@ -1954,6 +2027,13 @@ int wmain(int argc, wchar_t** argv) {
     if (!a.audioPipe.empty()) {
         g_audioPipe = CreateNamedPipeW(a.audioPipe.c_str(), PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 1 << 16, 0, 0, nullptr);
         if (g_audioPipe == INVALID_HANDLE_VALUE) { logf("error: CreateNamedPipe(audio) %lu", GetLastError()); return 2; }
+        for (int k = 1; k <= a.tracks; k++) {
+            TrackPipe* t = new TrackPipe();
+            const std::wstring name = a.audioPipe + L"_" + std::to_wstring(k);
+            t->h = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 1 << 20, 0, 0, nullptr);
+            if (t->h == INVALID_HANDLE_VALUE) { logf("error: CreateNamedPipe(track) %lu", GetLastError()); return 2; }
+            g_trackPipes.push_back(t);
+        }
     }
     printf("READY %d %d %d %s\n", w, h, a.fps, encoding ? "h264" : (nv12 ? "nv12" : "bgra"));
     fflush(stdout);
@@ -1980,9 +2060,14 @@ int wmain(int argc, wchar_t** argv) {
         g_appVol = a.appVol;
         g_volSystem = a.volSystem;
         g_parentPid = a.parent;
-        g_perApp = a.audioSystem && !a.appVol.empty();   // есть своя громкость программ — снимаем каждую отдельно
-        if (a.audioSystem && !g_perApp) { AudioSource* s = new AudioSource(); s->loopback = true; s->gain = a.volSystem; g_sources.push_back(s); }
-        if (!a.mic.empty()) { AudioSource* s = new AudioSource(); s->name = a.mic; s->gain = a.volMic; g_sources.push_back(s); }
+        g_appTrack = a.appTrack;
+        g_tracks = a.tracks;
+        g_trackOther = a.trackOther;
+        g_includeParent = a.includeParent;
+        // есть своя громкость программ или отдельные дорожки — снимаем каждую программу отдельно
+        g_perApp = a.audioSystem && (!a.appVol.empty() || !a.appTrack.empty());
+        if (a.audioSystem && !g_perApp) { AudioSource* s = new AudioSource(); s->loopback = true; s->gain = a.volSystem; s->track = a.trackOther; g_sources.push_back(s); }
+        if (!a.mic.empty()) { AudioSource* s = new AudioSource(); s->name = a.mic; s->gain = a.volMic; s->track = a.trackMic; g_sources.push_back(s); }
         audioWorker = CreateThread(nullptr, 0, audioThread, nullptr, 0, nullptr);
     }
 
@@ -2087,6 +2172,7 @@ int wmain(int argc, wchar_t** argv) {
     // Сначала закрываем видео: читатель дочитывает его до конца, после этого спокойно добирает звук.
     closePipe(pipe);
     if (g_audioPipe != INVALID_HANDLE_VALUE) closePipe(g_audioPipe);
+    for (TrackPipe* t : g_trackPipes) if (t->connected) closePipe(t->h);
     cap.close();
     return code;
 }
