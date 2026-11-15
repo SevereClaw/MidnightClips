@@ -656,6 +656,16 @@ class Recorder:
         if hwnd:   # записывать только окно выбранной программы
             args += ["--window", str(hwnd)]
             self.window_active = True
+            if self.cfg["capture_target"] == "game":
+                # Кадр — как при записи монитора: тогда вход в игру и выход из неё не сбрасывают буфер.
+                mons = self.monitors()
+                idx = int(self.cfg["monitor"])
+                mon = mons[idx] if 0 <= idx < len(mons) else (mons[0] if mons else None)
+                if mon:
+                    want = int(self.cfg["height"])
+                    out_h = want if 0 < want < mon["h"] else mon["h"]
+                    out_w = int(mon["w"] * out_h / mon["h"] + 0.5)
+                    args += ["--frame", "%dx%d" % (out_w & ~1, out_h & ~1)]
         if not gpu:
             args += ["--cpu"]
         elif int(self.cfg["height"]) > 0:

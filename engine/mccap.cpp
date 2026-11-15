@@ -128,6 +128,7 @@ struct Args {
     std::map<std::wstring, float> appVol;   // своя громкость программ: имя exe (строчными) -> громкость
     bool listApps = false;     // вывести программы, у которых сейчас есть звук, и выйти
     HWND window = nullptr;     // записывать одно окно (а не весь монитор)
+    int frameW = 0, frameH = 0; // размер кадра на выходе задан снаружи (окно вписывается в него с полями)
     std::wstring encode;       // кодировать здесь же: h264_nvenc / h264_amf / h264_qsv / libx264
     int bitrate = 12;          // Мбит/с
     std::wstring frames;       // gpu — кадр остаётся на видеокарте; cpu — через обычную память;
@@ -239,6 +240,7 @@ struct Capturer {
     // Источник: «сырой» кадр экрана может быть повёрнут (монитор стоит боком) или в формате HDR —
     // тогда он сначала приводится к обычному виду (raw -> desk).
     bool wantGpu = false, prepass = false, hdr = false;
+    int frameW = 0, frameH = 0;
     int rot = 0, rawW = 0, rawH = 0;
     float white = 1.0f;
     DXGI_FORMAT rawFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -292,6 +294,10 @@ struct Capturer {
         outW = (int)((double)width * outH / height + 0.5);
         outW &= ~1; outH &= ~1;
         scaled = outH != (height & ~1);
+        if (frameW >= 16 && frameH >= 16) {   // кадр как у монитора: при переключении «окно <-> монитор» буфер остаётся цел
+            outW = frameW & ~1; outH = frameH & ~1;
+            scaled = true;
+        }
         const UINT both = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         bool ok = makeTex(width, height, deskFormat, both, false, &desk)
                && makeTex(width, height, deskFormat, both, false, &stage)
@@ -1829,6 +1835,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--list-audio-apps") a.listApps = true;
         else if (k == L"--window") a.window = (HWND)(INT_PTR)_wtoi64(next());
         else if (k == L"--encode") a.encode = next();
+        else if (k == L"--frame") swscanf_s(next(), L"%dx%d", &a.frameW, &a.frameH);
         else if (k == L"--bitrate") a.bitrate = std::max(1, std::min(200, _wtoi(next())));
         else if (k == L"--frames") a.frames = next();
         else if (k == L"--app-vol") {   // имя.exe=громкость
@@ -1861,6 +1868,7 @@ int wmain(int argc, wchar_t** argv) {
 
     if (!a.test && a.window) {
         // Одно окно: Windows сама отдаёт его картинку, даже если поверх что-то всплыло.
+        cap.frameW = a.frameW; cap.frameH = a.frameH;
         if (a.cpu || !IsWindow(a.window) || !cap.initWindow(a.window, a.height, a.cursor)) {
             logf("error: window capture unavailable");
             return 7;   // программа перейдёт на запись монитора
