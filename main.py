@@ -383,7 +383,10 @@ class Api:
                 capture_changed.add("buffer_storage")   # буфер переезжает из памяти на диск или обратно
             if capture_changed:
                 # громкость в записи применяется без потери буфера и идущей записи
-                app.recorder.restart(soft=capture_changed <= {"rec_volume_system", "rec_volume_mic", "app_volumes", "audio_mode", "mic_on"})
+                volume_only = capture_changed <= {"rec_volume_system", "rec_volume_mic", "app_volumes", "audio_mode", "mic_on"}
+                # громкость меняется на ходу; если так нельзя (меняется набор дорожек) — мягкий перезапуск без потери буфера
+                if not (volume_only and app.recorder.update_audio()):
+                    app.recorder.restart(soft=volume_only)
         return self.get_settings()
 
     def get_options(self):

@@ -1950,6 +1950,59 @@ static void refreshApps() {
     }
 }
 
+// Громкость на ходу. Программа пишет в наш стандартный ввод строки:
+//   default 0.80          громкость всего, что не названо отдельно
+//   vol 0.50 discord.exe  своя громкость программы (0 — не записывать)
+//   unset discord.exe     убрать свою громкость
+//   mic 1.20              громкость микрофона
+// Захват при этом не перезапускается.
+static std::mutex g_ctlLock;
+static std::vector<std::string> g_ctl;
+static DWORD WINAPI controlThread(LPVOID) {
+    char line[600];
+    while (fgets(line, sizeof(line), stdin)) {
+        std::lock_guard<std::mutex> lock(g_ctlLock);
+        g_ctl.push_back(line);
+    }
+    return 0;
+}
+static bool applyControl() {   // вызывается из потока звука
+    std::vector<std::string> cmds;
+    {
+        std::lock_guard<std::mutex> lock(g_ctlLock);
+        cmds.swap(g_ctl);
+    }
+    if (cmds.empty()) return false;
+    for (std::string c : cmds) {
+        while (!c.empty() && (c.back() == '\n' || c.back() == '\r' || c.back() == ' ')) c.pop_back();
+        const size_t sp = c.find(' ');
+        const std::string word = c.substr(0, sp);
+        const std::string rest = sp == std::string::npos ? "" : c.substr(sp + 1);
+        auto exeOf = [](const std::string& text) {
+            std::wstring w;
+            const int n = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0);
+            w.resize((size_t)n);
+            if (n) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), (int)text.size(), &w[0], n);
+            for (auto& ch : w) ch = (wchar_t)towlower(ch);
+            return w;
+        };
+        if (word == "default") {
+            g_volSystem = (float)atof(rest.c_str());
+            for (AudioSource* s : g_sources) if (s->loopback && !s->pid) s->gain = g_volSystem;
+        } else if (word == "mic") {
+            for (AudioSource* s : g_sources) if (!s->loopback && !s->pid) s->gain = (float)atof(rest.c_str());
+        } else if (word == "vol") {
+            const size_t sp2 = rest.find(' ');
+            if (sp2 != std::string::npos) g_appVol[exeOf(rest.substr(sp2 + 1))] = (float)atof(rest.substr(0, sp2).c_str());
+        } else if (word == "unset") {
+            g_appVol.erase(exeOf(rest));
+        }
+    }
+    for (AudioSource* s : g_sources) if (s->pid) s->gain = gainOf(s->exe);
+    logf("info: volume updated (%d)", (int)cmds.size());
+    return true;
+}
+
 static DWORD WINAPI audioThread(LPVOID) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -1969,6 +2022,7 @@ static DWORD WINAPI audioThread(LPVOID) {
     std::vector<int16_t> pcm;
     double nextRefresh = 0, nextInfo = 0;
     while (!g_audioStop) {
+        if (applyControl()) nextRefresh = 0;   // новая громкость — сразу пересмотреть список программ
         if (g_perApp && now() >= nextRefresh) {
             refreshApps();
             nextRefresh = now() + 0.5;
@@ -2282,6 +2336,7 @@ int wmain(int argc, wchar_t** argv) {
         g_perApp = a.audioSystem && (!a.appVol.empty() || !a.appTrack.empty());
         if (a.audioSystem && !g_perApp) { AudioSource* s = new AudioSource(); s->loopback = true; s->gain = a.volSystem; s->track = a.trackOther; g_sources.push_back(s); }
         if (!a.mic.empty()) { AudioSource* s = new AudioSource(); s->name = a.mic; s->gain = a.volMic; s->track = a.trackMic; g_sources.push_back(s); }
+        CloseHandle(CreateThread(nullptr, 0, controlThread, nullptr, 0, nullptr));
         audioWorker = CreateThread(nullptr, 0, audioThread, nullptr, 0, nullptr);
     }
 

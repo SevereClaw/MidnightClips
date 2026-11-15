@@ -736,8 +736,10 @@ class Recorder:
             include_parent = on
         if specific and not gains:
             gains["@none"] = 0.0   # режим «только отмеченные» без отмеченных: движок всё равно снимает программы по одной
-        mic = bool(self.cfg["mic"]) and bool(self.cfg["mic_on"]) and self._degrade < 1
-        plan = {"default": default, "gains": gains, "include_parent": include_parent, "mic": mic,
+        # Микрофон открыт всегда, когда выбран: галочка только убирает его громкость до нуля — без перезапуска захвата.
+        mic = bool(self.cfg["mic"]) and self._degrade < 1
+        mic_gain = max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0 if self.cfg["mic_on"] else 0.0
+        plan = {"default": default, "gains": gains, "include_parent": include_parent, "mic": mic, "mic_gain": mic_gain,
                 "names": ["Всё вместе"], "mic_track": 0, "other_track": 0, "app_track": {}}
         if self.cfg["separate_tracks"]:
             def add(name):
@@ -760,6 +762,34 @@ class Recorder:
                     plan["app_track"][own] = plan["other_track"]
         return plan
 
+    def _audio_fixed(self, plan):
+        """То в настройках звука, что на ходу поменять нельзя (набор дорожек и источников)."""
+        return (tuple(plan["names"]), tuple(sorted(plan["app_track"].items())), plan["mic_track"], plan["other_track"],
+                plan["mic"], plan["include_parent"], bool(self.cfg["audio"]), self.cfg["mic"])
+
+    def update_audio(self):
+        """Применить новую громкость записи без перезапуска захвата. False — так нельзя, нужен перезапуск."""
+        proc = self._proc
+        helper = getattr(proc, "mc_helper", None) if proc is not None else None
+        live = getattr(helper, "mc_audio", None) if helper is not None else None
+        if not live or helper.poll() is not None or helper.stdin is None:
+            return False
+        plan = self.audio_plan()
+        needs_per_app = bool(plan["gains"]) or bool(plan["app_track"])
+        if self._audio_fixed(plan) != live["fixed"] or (needs_per_app and not live["per_app"]):
+            return False
+        lines = ["default %.2f" % plan["default"], "mic %.2f" % plan["mic_gain"]]
+        lines += ["unset %s" % exe for exe in live["gains"] if exe not in plan["gains"]]
+        lines += ["vol %.2f %s" % (gain, exe) for exe, gain in sorted(plan["gains"].items())]
+        try:
+            helper.stdin.write(("\n".join(lines) + "\n").encode("utf-8"))
+            helper.stdin.flush()
+        except (OSError, ValueError):
+            return False
+        live["gains"] = dict(plan["gains"])
+        self._log("громкость записи изменена на ходу")
+        return True
+
     def list_audio_apps(self):
         """Программы, у которых сейчас есть звук (спрашиваем у движка)."""
         if not self.engine:
@@ -778,6 +808,7 @@ class Recorder:
         pipe = r"\\.\pipe\mccap_%d_%d" % (os.getpid(), self._session)
         args = [self.engine, "--pipe", pipe, "--fps", str(fps), "--parent", str(os.getpid())]
         audio_pipe = ""
+        live = None
         tracks = ["Всё вместе"]
         if audio:
             audio_pipe = "" if mux else pipe + "_a"
@@ -792,8 +823,9 @@ class Recorder:
             if plan["include_parent"]:
                 args += ["--include-parent"]
             if plan["mic"]:
-                args += ["--mic", self.cfg["mic"],
-                         "--vol-mic", "%.2f" % (max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0)]
+                args += ["--mic", self.cfg["mic"], "--vol-mic", "%.2f" % plan["mic_gain"]]
+            live = {"fixed": self._audio_fixed(plan), "gains": dict(plan["gains"]),
+                    "per_app": bool(plan["gains"]) or bool(plan["app_track"])}
             if len(tracks) > 1:   # отдельные дорожки
                 args += ["--tracks", str(len(tracks) - 1), "--track-mic", str(plan["mic_track"]),
                          "--track-other", str(plan["other_track"])]
@@ -836,7 +868,8 @@ class Recorder:
                 args += ["--x", str(mons[idx]["x"]), "--y", str(mons[idx]["y"])]
         try:
             helper = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                                      stdin=subprocess.PIPE, creationflags=NO_WINDOW)
+            helper.mc_audio = live   # по стандартному вводу движку можно менять громкость на ходу
         except OSError as exc:
             self._log("движок захвата не запустился: %s" % exc)
             return None, None

@@ -38,7 +38,7 @@ def has_audio_device():
         return False
 
 
-def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True, side=None, encode=False, mux=False):
+def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True, side=None, encode=False, mux=False, control=()):
     """Движок (+звук) -> ffmpeg -> файл с несжатым звуком. Возвращает (путь, сообщения движка)."""
     pipe = r"\\.\pipe\mccap_au_%d_%d" % (os.getpid(), int(time.time() * 1000) % 100000)
     args = [MCCAP, "--fps", "60", "--seconds", str(seconds), "--pipe", pipe, "--audio-pipe", pipe + "_a",
@@ -49,9 +49,21 @@ def record(name, seconds, engine_args, play=None, play_at=1.5, test_pattern=True
         i = args.index("--audio-pipe")
         args[i:i + 2] = ["--mux-audio"]
         args += ["--encode", "libx264", "--bitrate", "20", "--frames", "download", "--mux"]
-    helper = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    helper = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
     ready = helper.stdout.readline().decode().strip().split()
     assert ready and ready[0] == "READY", ready
+    if control:   # команды движку на ходу: [(через сколько секунд, строка)]
+        import threading
+
+        def send(started=time.time()):
+            for at, text in control:
+                time.sleep(max(0, started + at - time.time()))
+                try:
+                    helper.stdin.write((text + "\n").encode())
+                    helper.stdin.flush()
+                except OSError:
+                    pass
+        threading.Thread(target=send, daemon=True).start()
     if mux:
         import threading
         out = os.path.join(TMP, "mccap_audio_%s.ts" % name)
@@ -260,6 +272,17 @@ def app_checks():
     app_check("PowerShell выключен", ["--app-vol", "powershell.exe=0"], full, none, tone_a, tone_b)
     app_check("остальные 50%, ffplay 100%", ["--vol-system", "0.5", "--app-vol", "ffplay.exe=1"], full, half, tone_a, tone_b)
     app_check("только отмеченные: ffplay", ["--vol-system", "0", "--app-vol", "ffplay.exe=1"], full, none, tone_a, tone_b)
+    # громкость на ходу: посреди записи программа делается вчетверо тише — без перезапуска
+    long_tone = make_wav("long.wav", 7.0, 440, 9000)
+    def side_long(t0):
+        time.sleep(0.3)
+        subprocess.Popen([FFPLAY, "-nodisp", "-autoexit", "-loglevel", "quiet", long_tone], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    path, err = record("на ходу", 9, ["--app-vol", "ffplay.exe=1"], side=side_long, control=[(4.5, "vol 0.25 ffplay.exe")])
+    a = audio_of(path)
+    before, after = tone_level(a, 440, 2.0, 1.5), tone_level(a, 440, 6.0, 1.0)
+    print("громкость на ходу: до команды %5.0f, после %5.0f (ожидалось вчетверо тише) | %s" % (
+        before, after, "команда принята" if "volume updated" in err else "команда НЕ принята"), flush=True)
+    assert "volume updated" in err and before > 1000 and 0.17 < after / before < 0.35, (before, after, err[-800:])
     # отдельные дорожки: общая, ffplay, остальное
     def side(t0):
         time.sleep(0.3)
