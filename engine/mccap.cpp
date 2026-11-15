@@ -139,6 +139,7 @@ struct Args {
     bool mux = false;          // (с --encode) упаковывать самим: в канал идёт готовый поток MPEG-TS, ffmpeg не нужен
     bool muxAudio = false;     // ... и кодировать в него звук (AAC)
     int audioOffset = 0;       // сдвиг звука относительно картинки, мс
+    bool hwRgb = false;        // отдавать кодировщику видеокарты RGB (цвет переводит он сам), как в первых версиях
     std::wstring frames;       // gpu — кадр остаётся на видеокарте; cpu — через обычную память;
                                // download — как gpu, но кадр скачивается перед кодированием (для проверок)
 };
@@ -601,26 +602,37 @@ struct Capturer {
     }
 
     // Готовый кадр NV12: курсор, уменьшение и перевод цвета — на видеокарте, копируется только результат.
-    bool composeGpu(std::vector<uint8_t>& dst, bool drawCursor) {
+    // Картинка -> яркость и цвет (NV12, BT.709) в заданные «холсты»: свои текстуры или плоскости текстуры кодировщика.
+    void renderNv12(ID3D11RenderTargetView* yView, ID3D11RenderTargetView* uvView, bool drawCursor) {
         ID3D11ShaderResourceView* nullSrv = nullptr;
         ID3D11ShaderResourceView* src = prepare(drawCursor);
         float vx, vy, vw, vh;
         if (placement(vx, vy, vw, vh)) {
             const float blackY[4] = { 0.0627f, 0, 0, 1 }, blackUV[4] = { 0.502f, 0.502f, 0, 1 };
-            ctx->ClearRenderTargetView(yRtv, blackY);
-            ctx->ClearRenderTargetView(uvRtv, blackUV);
+            ctx->ClearRenderTargetView(yView, blackY);
+            ctx->ClearRenderTargetView(uvView, blackUV);
         }
-        ctx->OMSetRenderTargets(1, &yRtv, nullptr);      // яркость
+        ctx->OMSetRenderTargets(1, &yView, nullptr);     // яркость
         viewport(vx, vy, vw, vh);
         ctx->PSSetShader(psY, nullptr, 0);
         ctx->PSSetShaderResources(0, 1, &src);
         ctx->Draw(3, 0);
-        ctx->OMSetRenderTargets(1, &uvRtv, nullptr);     // цвет, вдвое меньше
+        ctx->OMSetRenderTargets(1, &uvView, nullptr);    // цвет, вдвое меньше
         viewport(vx / 2, vy / 2, vw / 2, vh / 2);
         ctx->PSSetShader(psUV, nullptr, 0);
         ctx->Draw(3, 0);
         ctx->PSSetShaderResources(0, 1, &nullSrv);
         ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+
+    // То же — прямо в текстуру кодировщика: он получает готовый NV12 и цвет сам не пересчитывает.
+    void composeNv12To(ID3D11RenderTargetView* yView, ID3D11RenderTargetView* uvView, bool drawCursor) {
+        renderNv12(yView, uvView, drawCursor);
+        ctx->Flush();
+    }
+
+    bool composeGpu(std::vector<uint8_t>& dst, bool drawCursor) {
+        renderNv12(yRtv, uvRtv, drawCursor);
         ctx->CopyResource(yRead, yTex);
         ctx->CopyResource(uvRead, uvTex);
         D3D11_MAPPED_SUBRESOURCE m;
@@ -1095,7 +1107,10 @@ struct Encoder {
     long long pts = 0, bytes = 0, packets = 0;
     volatile LONG ioFailed = 0;
     ID3D11Device* dev = nullptr;
-    std::map<ID3D11Texture2D*, ID3D11RenderTargetView*> views;
+    struct Views { ID3D11RenderTargetView* a = nullptr; ID3D11RenderTargetView* b = nullptr; };   // RGB: a; NV12: a — яркость, b — цвет
+    std::map<ID3D11Texture2D*, Views> views;
+    bool hwNv12 = false;   // текстуры кодировщика — NV12 (цвет переводим сами), иначе BGRA (переводит кодировщик)
+    bool wantRgb = false;
 
     // Режим «без ffmpeg»: звук кодируется здесь же (AAC), всё упаковывается в MPEG-TS.
     struct AudioEnc {
@@ -1220,18 +1235,40 @@ struct Encoder {
         }
         int ret = av_hwdevice_ctx_init(hwDevice);
         if (ret < 0) { logf("error: encoder: device: %s", avErr(ret).c_str()); return false; }
+        // Сначала пробуем отдавать готовый NV12: цвет переводим сами (BT.709), кодировщику остаётся только сжать.
+        // Если видеокарта не даёт рисовать в такую текстуру — отдаём RGB, как раньше.
+        if (!wantRgb && makeFrames(AV_PIX_FMT_NV12)) {
+            ID3D11RenderTargetView *y = nullptr, *uv = nullptr;
+            std::shared_ptr<void> probe = newFrame(&y, &uv);
+            if (probe) { hwNv12 = true; return true; }
+            logf("info: encoder: nv12 textures unavailable, using rgb");
+            for (auto& v : views) { if (v.second.a) v.second.a->Release(); if (v.second.b) v.second.b->Release(); }
+            views.clear();
+            probe.reset();
+            av_buffer_unref(&hwFrames);
+        }
+        hwNv12 = false;
+        return makeFrames(AV_PIX_FMT_BGRA);
+    }
+
+    bool makeFrames(AVPixelFormat format) {
+        hwNv12 = format == AV_PIX_FMT_NV12;
         hwFrames = av_hwframe_ctx_alloc(hwDevice);
         if (!hwFrames) return false;
         AVHWFramesContext* fc = (AVHWFramesContext*)hwFrames->data;
         fc->format = AV_PIX_FMT_D3D11;
-        fc->sw_format = AV_PIX_FMT_BGRA;
+        fc->sw_format = format;
         fc->width = w;
         fc->height = h;
         fc->initial_pool_size = 0;
         AVD3D11VAFramesContext* f3 = (AVD3D11VAFramesContext*)fc->hwctx;
         f3->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        ret = av_hwframe_ctx_init(hwFrames);
-        if (ret < 0) { logf("error: encoder: frames: %s", avErr(ret).c_str()); return false; }
+        const int ret = av_hwframe_ctx_init(hwFrames);
+        if (ret < 0) {
+            logf("%s: encoder: frames: %s", hwNv12 ? "info" : "error", avErr(ret).c_str());
+            av_buffer_unref(&hwFrames);
+            return false;
+        }
         return true;
     }
 
@@ -1258,6 +1295,12 @@ struct Encoder {
         if (mode == GPU) {
             enc->pix_fmt = AV_PIX_FMT_D3D11;
             enc->hw_frames_ctx = av_buffer_ref(hwFrames);
+            if (hwNv12) {   // цвет уже переведён нами — сообщаем, по какому стандарту
+                enc->colorspace = AVCOL_SPC_BT709;
+                enc->color_primaries = AVCOL_PRI_BT709;
+                enc->color_trc = AVCOL_TRC_BT709;
+                enc->color_range = AVCOL_RANGE_MPEG;
+            }
         } else {
             enc->pix_fmt = AV_PIX_FMT_NV12;
             enc->colorspace = AVCOL_SPC_BT709;
@@ -1310,7 +1353,7 @@ struct Encoder {
         if (ret < 0) { logf("error: encoder %s: %s", name.c_str(), avErr(ret).c_str()); return false; }
         pkt = av_packet_alloc();
         logf("info: encoder %s %dx%d %d fps %d Mbit/s frames=%s", name.c_str(), w, h, fps, mbps,
-             mode == GPU ? "gpu" : (mode == DOWNLOAD ? "download" : "cpu"));
+             mode == GPU ? (hwNv12 ? "gpu-nv12" : "gpu-rgb") : (mode == DOWNLOAD ? (hwNv12 ? "download-nv12" : "download-rgb") : "cpu"));
         return pkt != nullptr;
     }
 
@@ -1342,20 +1385,38 @@ struct Encoder {
     }
 
     // Свободная текстура под новый кадр (текстуры переиспользуются) и «холст» для рисования в неё.
-    std::shared_ptr<void> newFrame(ID3D11RenderTargetView** view) {
+    std::shared_ptr<void> newFrame(ID3D11RenderTargetView** first, ID3D11RenderTargetView** second) {
         AVFrame* f = av_frame_alloc();
         if (!f) return nullptr;
         const int ret = av_hwframe_get_buffer(hwFrames, f, 0);
-        if (ret < 0) { logf("error: encoder: frame: %s", avErr(ret).c_str()); av_frame_free(&f); return nullptr; }
+        if (ret < 0) { logf("%s: encoder: frame: %s", hwNv12 ? "info" : "error", avErr(ret).c_str()); av_frame_free(&f); return nullptr; }
         ID3D11Texture2D* tex = (ID3D11Texture2D*)f->data[0];
         auto it = views.find(tex);
         if (it == views.end()) {
-            ID3D11RenderTargetView* v = nullptr;
-            const HRESULT hr = dev->CreateRenderTargetView(tex, nullptr, &v);
-            if (FAILED(hr)) { logf("error: encoder: render target 0x%08lx", hr); av_frame_free(&f); return nullptr; }
+            Views v;
+            HRESULT hr;
+            if (hwNv12) {   // у текстуры NV12 две плоскости: яркость (R8) и цвет вдвое меньше (R8G8)
+                D3D11_RENDER_TARGET_VIEW_DESC d{};
+                d.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                d.Format = DXGI_FORMAT_R8_UNORM;
+                hr = dev->CreateRenderTargetView(tex, &d, &v.a);
+                if (SUCCEEDED(hr)) {
+                    d.Format = DXGI_FORMAT_R8G8_UNORM;
+                    hr = dev->CreateRenderTargetView(tex, &d, &v.b);
+                }
+            } else {
+                hr = dev->CreateRenderTargetView(tex, nullptr, &v.a);
+            }
+            if (FAILED(hr)) {
+                logf("%s: encoder: render target 0x%08lx", hwNv12 ? "info" : "error", hr);
+                if (v.a) v.a->Release();
+                av_frame_free(&f);
+                return nullptr;
+            }
             it = views.emplace(tex, v).first;
         }
-        *view = it->second;
+        *first = it->second.a;
+        *second = it->second.b;
         return std::shared_ptr<void>(f, [](void* p) { AVFrame* fr = (AVFrame*)p; av_frame_free(&fr); });
     }
 
@@ -1384,8 +1445,12 @@ struct Encoder {
                     av_frame_unref(sw);
                     const int ret = av_hwframe_transfer_data(sw, (AVFrame*)item.hw.get(), 0);
                     if (ret < 0) { logf("error: encoder: download: %s", avErr(ret).c_str()); return false; }
-                    if (sw->format != AV_PIX_FMT_BGRA) { logf("error: encoder: download format %d", sw->format); return false; }
-                    bgraToNv12(sw->data[0], sw->linesize[0], w, h, nv->data[0], nv->linesize[0], nv->data[1], nv->linesize[1]);
+                    if (sw->format == AV_PIX_FMT_NV12) {   // текстура уже в NV12 — берём как есть
+                        for (int yy = 0; yy < h; yy++) memcpy(nv->data[0] + (size_t)yy * nv->linesize[0], sw->data[0] + (size_t)yy * sw->linesize[0], (size_t)w);
+                        for (int yy = 0; yy < h / 2; yy++) memcpy(nv->data[1] + (size_t)yy * nv->linesize[1], sw->data[1] + (size_t)yy * sw->linesize[1], (size_t)w);
+                    } else if (sw->format == AV_PIX_FMT_BGRA) {
+                        bgraToNv12(sw->data[0], sw->linesize[0], w, h, nv->data[0], nv->linesize[0], nv->data[1], nv->linesize[1]);
+                    } else { logf("error: encoder: download format %d", sw->format); return false; }
                 } else if (srcNv12) {
                     const uint8_t* src = item.cpu->data();
                     for (int yy = 0; yy < h; yy++) memcpy(nv->data[0] + (size_t)yy * nv->linesize[0], src + (size_t)yy * w, (size_t)w);
@@ -2039,6 +2104,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--frame") swscanf_s(next(), L"%dx%d", &a.frameW, &a.frameH);
         else if (k == L"--bitrate") a.bitrate = std::max(1, std::min(200, _wtoi(next())));
         else if (k == L"--frames") a.frames = next();
+        else if (k == L"--hw-rgb") a.hwRgb = true;
         else if (k == L"--mux") a.mux = true;
         else if (k == L"--mux-audio") a.muxAudio = true;
         else if (k == L"--audio-offset") a.audioOffset = _wtoi(next());
@@ -2155,6 +2221,7 @@ int wmain(int argc, wchar_t** argv) {
         int mode = Encoder::CPU;
         if (!a.test && cap.gpu && a.frames != L"cpu") mode = a.frames == L"download" ? Encoder::DOWNLOAD : Encoder::GPU;
         g_enc.mux = a.mux;
+        g_enc.wantRgb = a.hwRgb;
         if (!g_enc.init(narrow(a.encode), w, h, a.fps, a.bitrate, mode, nv12, w * 4, cap.dev, cap.ctx)) return 8;
         if (a.mux && a.muxAudio && !g_enc.initAudio(1 + a.tracks, a.audioOffset)) return 8;
         hwFrames = mode != Encoder::CPU;
@@ -2250,10 +2317,11 @@ int wmain(int argc, wchar_t** argv) {
             if ((r > 0 || !cur) && hwFrames) {
 #ifdef MC_FFMPEG
                 // Рисуем кадр сразу в текстуру кодировщика — в обычную память он не попадает.
-                ID3D11RenderTargetView* view = nullptr;
-                std::shared_ptr<void> fresh = g_enc.newFrame(&view);
+                ID3D11RenderTargetView *view = nullptr, *view2 = nullptr;
+                std::shared_ptr<void> fresh = g_enc.newFrame(&view, &view2);
                 if (!fresh) { code = 9; break; }
-                cap.composeTo(view, a.cursor && !cap.windowMode);
+                if (g_enc.hwNv12) cap.composeNv12To(view, view2, a.cursor && !cap.windowMode);
+                else cap.composeTo(view, a.cursor && !cap.windowMode);
                 cur.hw = fresh;
 #endif
             } else if (r > 0 || !cur) {

@@ -388,6 +388,10 @@ def encode_checks():
         diff = bgra_diff(decoded_frame(out, w, h, 60), crop, w, h)
         print("  отличие от эталона: %.2f" % diff, flush=True)
         assert diff < 6.0, "картинка после кодирования не похожа на экран: %.2f" % diff
+    out, w, h = encode_case("экран: текстура RGB (как раньше)", 60, 4, "--frames", "download", "--hw-rgb")
+    diff = bgra_diff(decoded_frame(out, w, h, 60), crop, w, h)
+    print("  отличие от эталона: %.2f" % diff, flush=True)
+    assert diff < 6.0, "RGB-текстура: картинка не похожа на экран: %.2f" % diff
     out, w, h = encode_case("экран: уменьшение до 480, текстура", 60, 3, "--frames", "download", "--height", "480")
     assert h == 480, (w, h)
     # 3. Кодировщик, которому нельзя отдать кадр видеокарты, должен отказаться сразу — программа возьмёт другой способ.

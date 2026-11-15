@@ -48,6 +48,7 @@ DEFAULTS = {
     "game_include": "",         # через запятую: exe, которые всегда считать играми
     "game_exclude": "",         # ... и которые никогда
     "window_exe": "",           # имя exe программы, чьё окно записывать
+    "color_path": "engine",     # engine — цвет переводит движок (BT.709); encoder — кодировщик видеокарты, как раньше
     "codec": "h264",            # h264 — играет везде; hevc — файлы меньше, но не везде открывается
     "encoder": "auto",          # auto / h264_nvenc / h264_amf / h264_qsv / libx264
     "capture": "auto",          # auto / dda / gdi
@@ -84,7 +85,7 @@ DEFAULTS = {
 # Изменение этих ключей требует перезапуска захвата.
 CAPTURE_KEYS = {
     "buffer_enabled", "buffer_seconds", "fps", "height", "bitrate_mbps", "monitor",
-    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe", "cursor", "audio_mode", "mic_on", "separate_tracks", "codec"}
+    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe", "cursor", "audio_mode", "mic_on", "separate_tracks", "codec", "color_path"}
 
 
 class Config:

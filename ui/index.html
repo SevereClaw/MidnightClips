@@ -131,6 +131,9 @@
         <label class="row"><span>Формат видео
           <small>HEVC даёт то же качество при файле примерно в полтора раза меньше — битрейт можно снизить. Но он открывается не везде: в чате Discord такой клип не проигрывается, поэтому кнопка «В Discord» отправляет его перекодированным. Если видеокарта HEVC не умеет, запись останется в H.264</small></span>
           <select data-key="codec"><option value="h264">H.264 — играет везде</option><option value="hevc">HEVC (H.265) — файлы меньше</option></select></label>
+        <label class="row"><span>Перевод цвета
+          <small>Действует при кодировании в движке. «Движок» — цвета точнее и видеокарте чуть легче. Если в клипах цвета стали странными или появился мусор, выберите «Кодировщик» — так было раньше</small></span>
+          <select data-key="color_path"><option value="engine">Движок</option><option value="encoder">Кодировщик видеокарты</option></select></label>
         <label class="row"><span>Кодировщик
           <small>«Авто» выберет видеокарту, если она умеет</small></span>
           <select data-key="encoder">

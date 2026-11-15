@@ -804,6 +804,8 @@ class Recorder:
         if encode:   # движок кодирует сам; в канал идёт уже сжатое видео
             mbps = max(2, min(100, int(self.cfg["bitrate_mbps"])))
             args += ["--encode", encode[0], "--bitrate", str(mbps), "--frames", "gpu" if encode[1] else "cpu"]
+            if self.cfg["color_path"] == "encoder":
+                args.append("--hw-rgb")
             if mux:   # ... и сам упаковывает вместе со звуком
                 args.append("--mux")
         self.window_active = False
