@@ -556,6 +556,14 @@ class Api:
             return []
         return clip_tools.audio_tracks(self._app.ffmpeg, path)
 
+    def set_fullscreen(self, on):
+        """Плеер в окне клипа развернули на весь экран (или свернули) — окно программы следует за ним."""
+        on = bool(on)
+        if on != getattr(self, "_fullscreen", False) and self._app.window is not None:
+            self._fullscreen = on
+            self._app.window.toggle_fullscreen()
+        return on
+
     def clip_track_urls(self, path):
         """Адреса отдельных звуковых дорожек (без общей) — чтобы в окне клипа было слышно только включённые."""
         if not (self._app.library.inside(path) and os.path.isfile(path) and self._app.ffmpeg):

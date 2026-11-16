@@ -50,6 +50,7 @@ const demoApi = {
   media_url: async () => window.DEMO_VIDEO || "",
   clip_tracks: async () => ["Всё вместе", "Микрофон", "Игра", "Discord", "Остальное"],
   clip_track_urls: async () => window.DEMO_TRACKS || [],
+  set_fullscreen: async (on) => on,
   clip_action: async (p, action) => {
     let n = 0;
     const timer = setInterval(() => {
@@ -483,13 +484,30 @@ async function loadClips() {
 const video = $("edVideo");
 let edClip = null;
 let edBusy = false;
+let edVol = 1, edMuted = false;   // громкость плеера — одна на видео и на отдельные дорожки
+try { const saved = parseFloat(localStorage.getItem("mc_volume")); if (saved >= 0 && saved <= 1) edVol = saved; } catch (e) { /* без памяти */ }
+
+const ICONS = {
+  play: '<svg viewBox="0 0 24 24"><path d="M6 3l15 9-15 9z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24"><path d="M5 3h5v18H5zM14 3h5v18h-5z"/></svg>',
+  sound: '<svg viewBox="0 0 24 24"><path d="M3 9h4l6-5v16l-6-5H3zM16 8a5 5 0 010 8v-2a3 3 0 000-4zM16 3a10 10 0 010 18v-2a8 8 0 000-14z"/></svg>',
+  muted: '<svg viewBox="0 0 24 24"><path d="M3 9h4l6-5v16l-6-5H3zM15.5 9.4l1.4-1.4 2.1 2.1L21.1 8l1.4 1.4-2.1 2.1 2.1 2.1-1.4 1.4-2.1-2.1-2.1 2.1-1.4-1.4 2.1-2.1z"/></svg>',
+  full: '<svg viewBox="0 0 24 24"><path d="M3 3h7v3H6v4H3zM14 3h7v7h-3V6h-4zM3 14h3v4h4v3H3zM18 14h3v7h-7v-3h4z"/></svg>',
+};
+$("pFull").innerHTML = ICONS.full;
 
 function fmtTime(sec) {
+  sec = Math.max(0, sec || 0);
   const m = Math.floor(sec / 60), s = sec - m * 60;
-  return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
+  return m + ":" + (s < 9.95 ? "0" : "") + s.toFixed(1);
 }
 function trimValues() {
   return [parseFloat($("trimStart").value), parseFloat($("trimEnd").value)];
+}
+function trimmed() {
+  const dur = video.duration || 0;
+  const [a, b] = trimValues();
+  return dur > 0 && !(a < 0.05 && b > dur - 0.05);
 }
 function drawTrim() {
   const dur = video.duration || 0;
@@ -497,13 +515,15 @@ function drawTrim() {
   const [a, b] = trimValues();
   $("trimRange").style.left = (a / dur * 100) + "%";
   $("trimRange").style.width = ((b - a) / dur * 100) + "%";
-  const whole = a < 0.05 && b > dur - 0.05;
+  const whole = !trimmed();
   $("trimText").textContent = whole
     ? "Весь клип, " + fmtTime(dur)
     : "Отрезок " + fmtTime(a) + " – " + fmtTime(b) + ", длина " + fmtTime(b - a);
   const picked = pickedTracks() !== null;
   $("edTrim").disabled = (whole && !picked) || edBusy;
   $("edTrim").textContent = whole && picked ? "Сохранить с этими дорожками" : "Сохранить обрезку";
+  $("trimPlayRange").hidden = whole;
+  $("trimReset").hidden = whole;
 }
 function setTrim(a, b) {
   const dur = video.duration || 0;
@@ -513,6 +533,132 @@ function setTrim(a, b) {
   $("trimEnd").value = b;
   drawTrim();
 }
+
+// ---- плеер: своя панель вместо встроенной
+
+let osdTimer = null;
+function osd(text) {
+  $("edOsd").textContent = text;
+  $("edOsd").hidden = false;
+  clearTimeout(osdTimer);
+  osdTimer = setTimeout(() => { $("edOsd").hidden = true; }, 800);
+}
+function drawPlayer() {
+  const dur = video.duration || 0;
+  $("pTime").textContent = fmtTime(video.currentTime) + " / " + fmtTime(dur);
+  if (dur) $("trimPlay").style.left = (video.currentTime / dur * 100) + "%";
+  $("pPlay").innerHTML = video.paused ? ICONS.play : ICONS.pause;
+  $("edBig").hidden = !video.paused || !dur || scrubbing;
+}
+function playerLoop() {   // пока идёт воспроизведение, метка времени движется плавно
+  if ($("editor").hidden) return;
+  drawPlayer();
+  if (!video.paused) {
+    const [a, b] = trimValues();
+    if (trimmed() && video.currentTime >= b) { video.pause(); video.currentTime = a; }
+    requestAnimationFrame(playerLoop);
+  }
+}
+function togglePlay() {
+  if (!video.duration) return;
+  if (video.paused) {
+    const [a, b] = trimValues();
+    if (trimmed() && (video.currentTime >= b - 0.05 || video.currentTime < a - 0.05)) video.currentTime = a;
+    else if (video.ended) video.currentTime = 0;
+    video.play().catch(() => {});
+  } else video.pause();
+}
+function seekTo(time) {
+  const dur = video.duration || 0;
+  if (!dur) return;
+  video.currentTime = Math.max(0, Math.min(time, dur - 0.01));
+  drawPlayer();
+}
+function seekBy(delta) {
+  seekTo(video.currentTime + delta);
+  osd((delta > 0 ? "+" : "−") + Math.abs(delta) + " с");
+}
+function stepFrame(direction) {
+  video.pause();
+  seekTo(video.currentTime + direction / 60);
+}
+function applyVolume() {
+  if (edSplit) {
+    video.muted = true;
+    edAudio.forEach((a, i) => { a.muted = edMuted || !edTracks[i].checked; a.volume = edVol; });
+  } else {
+    video.muted = edMuted;
+    video.volume = edVol;
+  }
+  $("edVolume").value = edMuted ? 0 : edVol;
+  $("pMute").innerHTML = edMuted || edVol === 0 ? ICONS.muted : ICONS.sound;
+}
+function setVolume(value, quiet) {
+  edVol = Math.max(0, Math.min(1, value));
+  edMuted = false;
+  try { localStorage.setItem("mc_volume", String(edVol)); } catch (e) { /* без памяти */ }
+  applyVolume();
+  if (!quiet) osd("Громкость " + Math.round(edVol * 100) + "%");
+}
+function toggleMute() {
+  edMuted = !edMuted;
+  applyVolume();
+  osd(edMuted ? "Звук выключен" : "Звук включён");
+}
+function setSpeed(value) {
+  video.playbackRate = value;
+  $("pSpeed").value = String(value);
+  osd("Скорость " + value + "×");
+}
+function toggleFull() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if ($("edStage").requestFullscreen) $("edStage").requestFullscreen().catch(() => {});
+}
+document.addEventListener("fullscreenchange", () => { api.set_fullscreen(!!document.fullscreenElement); });
+
+["play", "pause", "seeked", "loadedmetadata", "ended", "timeupdate"].forEach((name) => video.addEventListener(name, drawPlayer));
+video.addEventListener("play", () => requestAnimationFrame(playerLoop));
+$("pPlay").onclick = togglePlay;
+$("pBack").onclick = (e) => seekBy(e.shiftKey ? -1 : -5);
+$("pFwd").onclick = (e) => seekBy(e.shiftKey ? 1 : 5);
+$("pPrevF").onclick = () => stepFrame(-1);
+$("pNextF").onclick = () => stepFrame(1);
+$("pMute").onclick = toggleMute;
+$("pFull").onclick = toggleFull;
+$("pSpeed").onchange = () => { setSpeed(parseFloat($("pSpeed").value)); $("pSpeed").blur(); };
+$("edVolume").addEventListener("input", () => setVolume(parseFloat($("edVolume").value), true));
+let screenClick = null;
+$("edScreen").addEventListener("click", () => {   // одиночное нажатие — пауза, двойное — на весь экран
+  clearTimeout(screenClick);
+  screenClick = setTimeout(togglePlay, 220);
+});
+$("edScreen").addEventListener("dblclick", () => { clearTimeout(screenClick); toggleFull(); });
+$("edScreen").addEventListener("wheel", (e) => { e.preventDefault(); setVolume(edVol + (e.deltaY < 0 ? 0.05 : -0.05)); }, { passive: false });
+
+// шкала: нажатие и протяжка перематывают, наведение показывает время
+let scrubbing = false;
+function trackTime(e) {
+  const r = $("edTrack").getBoundingClientRect();
+  const part = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  return [part * (video.duration || 0), part * 100];
+}
+$("edTrack").addEventListener("pointerdown", (e) => {
+  if (e.target.tagName === "INPUT" || e.button !== 0 || !video.duration) return;   // за ручки тянут границы отрезка
+  scrubbing = true;
+  $("edTrack").setPointerCapture(e.pointerId);
+  seekTo(trackTime(e)[0]);
+});
+$("edTrack").addEventListener("pointermove", (e) => {
+  if (!video.duration) return;
+  const [time, percent] = trackTime(e);
+  $("trimTip").textContent = fmtTime(time);
+  $("trimTip").style.left = percent + "%";
+  $("trimTip").hidden = false;
+  if (scrubbing) seekTo(time);
+});
+["pointerup", "pointercancel"].forEach((name) => $("edTrack").addEventListener(name, () => { scrubbing = false; drawPlayer(); }));
+$("edTrack").addEventListener("pointerleave", () => { if (!scrubbing) $("trimTip").hidden = true; });
+
 let edTracks = [];
 // Номера оставленных дорожек; null — все на месте (звук как есть).
 function pickedTracks() {
@@ -539,45 +685,50 @@ function syncAudio(force) {
 function applyTracks() {
   const want = pickedTracks() !== null && edAudio.length === edTracks.length && edAudio.length > 0;
   $("edTrackNote").hidden = pickedTracks() === null || want;
-  $("editor").classList.toggle("is-split", want);
-  if (want) {
-    if (!edSplit) $("edVolume").value = video.muted ? 0 : video.volume;
-    const volume = parseFloat($("edVolume").value);
-    edAudio.forEach((a, i) => { a.muted = !edTracks[i].checked; a.volume = volume; });
-    edSplit = true;
-    video.muted = true;
-    syncAudio(true);
-  } else if (edSplit) {
-    edSplit = false;
-    edAudio.forEach((a) => a.pause());
-    video.volume = parseFloat($("edVolume").value) || video.volume;
-    video.muted = false;
-  }
+  if (!want && edSplit) edAudio.forEach((a) => a.pause());
+  edSplit = want;
+  applyVolume();
+  syncAudio(true);
 }
 function dropAudio() {
   edAudio.forEach((a) => { a.pause(); a.removeAttribute("src"); a.load(); });
   edAudio = [];
-  if (edSplit) { edSplit = false; video.muted = false; }
-  $("editor").classList.remove("is-split");
+  edSplit = false;
   $("edTrackNote").hidden = true;
+  applyVolume();
 }
 ["play", "playing", "pause", "waiting", "seeking", "ended", "ratechange", "timeupdate"].forEach((name) => video.addEventListener(name, () => syncAudio(false)));
 video.addEventListener("seeked", () => syncAudio(true));
-video.addEventListener("volumechange", () => { if (edSplit && !video.muted) video.muted = true; });   // звук видео — только через дорожки
-$("edVolume").addEventListener("input", () => { edAudio.forEach((a) => { a.volume = parseFloat($("edVolume").value); }); });
 
+function editorNeighbors() {
+  const index = edClip ? shownClips.findIndex((c) => c.path === edClip.path) : -1;
+  return [index, index > 0 ? shownClips[index - 1] : null, index >= 0 && index < shownClips.length - 1 ? shownClips[index + 1] : null];
+}
+function stepClip(direction) {
+  if (edBusy) return;
+  const [, prev, next] = editorNeighbors();
+  const clip = direction < 0 ? prev : next;
+  if (clip) openEditor(clip);
+}
 async function openEditor(clip) {
   edClip = clip;
   $("edName").textContent = clip.name;
+  const [index, prev, next] = editorNeighbors();
+  $("edCount").textContent = index >= 0 ? (index + 1) + " из " + shownClips.length : "";
+  $("edPrev").disabled = !prev;
+  $("edNext").disabled = !next;
   $("editor").hidden = false;
   $("edJob").hidden = true;
   $("trimText").textContent = "Загружаю клип…";
-  video.src = await api.media_url(clip.path);
-  $("edClose").focus();
-  // отдельные звуковые дорожки: галочками выбирается, что останется в сохранённом или отправленном клипе
+  $("pSpeed").value = "1";
+  // отдельные звуковые дорожки: переключателями выбирается, что слышно здесь и что останется в сохранённом клипе
   edTracks = [];
   dropAudio();
   $("edTracks").hidden = true;
+  video.autoplay = true;   // открыли клип — он сразу играет
+  video.src = await api.media_url(clip.path);
+  $("edStage").focus();
+  drawPlayer();
   const names = (await api.clip_tracks(clip.path)) || [];
   if (edClip !== clip || names.length < 2) return;
   const list = $("edTrackList");
@@ -585,7 +736,7 @@ async function openEditor(clip) {
   names.slice(1).forEach((name, i) => {
     const label = document.createElement("label");
     const box = document.createElement("input");
-    box.type = "checkbox"; box.checked = true; box.dataset.track = String(i + 1);
+    box.type = "checkbox"; box.checked = true; box.dataset.track = String(i + 1); box.tabIndex = -1;
     box.onchange = () => { const [a, b] = trimValues(); setTrim(a, b); applyTracks(); };
     label.append(box, document.createTextNode(name));
     list.appendChild(label);
@@ -601,6 +752,7 @@ async function openEditor(clip) {
 }
 function closeEditor() {
   if (edBusy) api.cancel_job();
+  if (document.fullscreenElement) document.exitFullscreen();
   dropAudio();
   video.pause();
   video.removeAttribute("src");
@@ -612,25 +764,46 @@ video.addEventListener("loadedmetadata", () => {
   const dur = video.duration;
   ["trimStart", "trimEnd"].forEach((id) => { $(id).max = dur; });
   setTrim(0, dur);
+  applyVolume();
 });
 video.addEventListener("error", () => { if (edClip) $("trimText").textContent = "Этот клип не открывается во встроенном плеере — нажмите «Открыть в плеере»."; });
-video.addEventListener("timeupdate", () => {
-  const dur = video.duration || 0;
-  if (!dur) return;
-  const [a, b] = trimValues();
-  $("trimPlay").style.left = (video.currentTime / dur * 100) + "%";
-  if (!video.paused && b < dur - 0.05 && video.currentTime >= b) { video.pause(); video.currentTime = a; }
-});
-$("trimStart").addEventListener("input", () => { const [a, b] = trimValues(); setTrim(Math.min(a, b - 0.5), b); video.currentTime = trimValues()[0]; });
-$("trimEnd").addEventListener("input", () => { const [a, b] = trimValues(); setTrim(a, Math.max(b, a + 0.5)); video.currentTime = trimValues()[1]; });
-$("trimSetStart").onclick = () => setTrim(video.currentTime, trimValues()[1]);
-$("trimSetEnd").onclick = () => setTrim(trimValues()[0], video.currentTime);
+$("trimStart").addEventListener("input", () => { const [a, b] = trimValues(); setTrim(Math.min(a, b - 0.5), b); seekTo(trimValues()[0]); });
+$("trimEnd").addEventListener("input", () => { const [a, b] = trimValues(); setTrim(a, Math.max(b, a + 0.5)); seekTo(trimValues()[1]); });
+["trimStart", "trimEnd"].forEach((id) => $(id).addEventListener("change", () => $(id).blur()));
+function markStart() { setTrim(video.currentTime, Math.max(trimValues()[1], video.currentTime + 0.5)); osd("Начало отрезка"); }
+function markEnd() { setTrim(Math.min(trimValues()[0], video.currentTime - 0.5), video.currentTime); osd("Конец отрезка"); }
+$("trimSetStart").onclick = markStart;
+$("trimSetEnd").onclick = markEnd;
+$("trimPlayRange").onclick = () => { seekTo(trimValues()[0]); video.play().catch(() => {}); };
 $("trimReset").onclick = () => setTrim(0, video.duration || 0);
 $("edClose").onclick = closeEditor;
-$("edOpen").onclick = () => edClip && api.open_clip(edClip.path);
+$("edPrev").onclick = () => stepClip(-1);
+$("edNext").onclick = () => stepClip(1);
+$("edOpen").onclick = () => { video.pause(); if (edClip) api.open_clip(edClip.path); };
 $("edCancel").onclick = () => api.cancel_job();
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("editor").hidden && $("modal").hidden) closeEditor();
+  if ($("editor").hidden || !$("modal").hidden) return;
+  const el = e.target, tag = el.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable || (tag === "INPUT" && !["range", "checkbox"].includes(el.type))) return;
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const keys = {
+    Space: togglePlay, KeyK: togglePlay,
+    ArrowLeft: () => seekBy(e.shiftKey ? -1 : -5), ArrowRight: () => seekBy(e.shiftKey ? 1 : 5),
+    ArrowUp: () => setVolume(edVol + 0.05), ArrowDown: () => setVolume(edVol - 0.05),
+    Comma: () => stepFrame(-1), Period: () => stepFrame(1),
+    KeyI: markStart, KeyO: markEnd, KeyM: toggleMute, KeyF: toggleFull,
+    Home: () => seekTo(0), End: () => seekTo(video.duration || 0),
+    PageUp: () => stepClip(-1), PageDown: () => stepClip(1),
+    Escape: () => { if (!document.fullscreenElement) closeEditor(); },
+  };
+  const action = keys[e.code];
+  if (!action) return;
+  e.preventDefault();
+  if (e.code === "Space" && tag === "BUTTON") el.blur();   // иначе пробел ещё и «нажмёт» кнопку под фокусом
+  action();
+});
+document.addEventListener("keyup", (e) => {
+  if (e.code === "Space" && !$("editor").hidden && e.target.tagName === "BUTTON") e.preventDefault();
 });
 
 function setEditorBusy(busy) {

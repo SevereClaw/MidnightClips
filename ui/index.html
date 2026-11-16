@@ -278,28 +278,52 @@
 <div class="editor" id="editor" hidden>
   <div class="editor-box" role="dialog" aria-modal="true">
     <header class="editor-head">
+      <button class="mini ed-nav" id="edPrev" title="Предыдущий клип (PageUp)" aria-label="Предыдущий клип">‹</button>
+      <button class="mini ed-nav" id="edNext" title="Следующий клип (PageDown)" aria-label="Следующий клип">›</button>
       <h2 id="edName"></h2>
-      <button class="mini" id="edClose">Закрыть</button>
+      <span class="ed-count" id="edCount"></span>
+      <button class="mini" id="edClose" title="Закрыть (Esc)">Закрыть</button>
     </header>
-    <video id="edVideo" controls preload="metadata"></video>
-    <div class="trim">
-      <div class="trim-track">
+    <div class="ed-stage" id="edStage" tabindex="-1">
+      <div class="ed-screen" id="edScreen" title="Нажатие — играть или пауза, двойное — на весь экран">
+        <video id="edVideo" preload="metadata"></video>
+        <div class="big-play" id="edBig" hidden></div>
+        <div class="osd" id="edOsd" hidden></div>
+      </div>
+      <div class="trim-track" id="edTrack">
         <div class="trim-range" id="trimRange"></div>
         <div class="trim-play" id="trimPlay"></div>
-        <input type="range" id="trimStart" min="0" max="1" step="0.05" value="0" aria-label="Начало отрезка">
-        <input type="range" id="trimEnd" min="0" max="1" step="0.05" value="1" aria-label="Конец отрезка">
+        <div class="trim-tip" id="trimTip" hidden></div>
+        <input type="range" id="trimStart" min="0" max="1" step="0.05" value="0" aria-label="Начало отрезка" tabindex="-1">
+        <input type="range" id="trimEnd" min="0" max="1" step="0.05" value="1" aria-label="Конец отрезка" tabindex="-1">
       </div>
-      <div class="trim-info">
-        <strong id="trimText"></strong>
-        <button class="link" id="trimSetStart">Начало здесь</button>
-        <button class="link" id="trimSetEnd">Конец здесь</button>
-        <button class="link" id="trimReset">Весь клип</button>
+      <div class="player">
+        <button class="pbtn pbtn-main" id="pPlay" title="Играть / пауза (Пробел)" aria-label="Играть или пауза"></button>
+        <button class="pbtn" id="pBack" title="Назад на 5 секунд (←), с Shift — на 1 секунду">−5 с</button>
+        <button class="pbtn" id="pFwd" title="Вперёд на 5 секунд (→), с Shift — на 1 секунду">+5 с</button>
+        <button class="pbtn" id="pPrevF" title="Кадр назад (,)">‹ кадр</button>
+        <button class="pbtn" id="pNextF" title="Кадр вперёд (.)">кадр ›</button>
+        <span class="ptime" id="pTime">0:00.0 / 0:00.0</span>
+        <span class="pgap"></span>
+        <select id="pSpeed" title="Скорость" aria-label="Скорость">
+          <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option>
+          <option value="1.5">1.5×</option><option value="2">2×</option>
+        </select>
+        <button class="pbtn" id="pMute" title="Выключить или включить звук (M)" aria-label="Звук"></button>
+        <input type="range" class="vol" id="edVolume" min="0" max="1" step="0.02" value="1" title="Громкость (↑ ↓)" aria-label="Громкость" tabindex="-1">
+        <button class="pbtn" id="pFull" title="На весь экран (F)" aria-label="На весь экран"></button>
       </div>
+    </div>
+    <div class="trim-info">
+      <strong id="trimText"></strong>
+      <button class="link" id="trimSetStart" title="Клавиша I">Начало здесь</button>
+      <button class="link" id="trimSetEnd" title="Клавиша O">Конец здесь</button>
+      <button class="link" id="trimPlayRange">Смотреть отрезок</button>
+      <button class="link" id="trimReset">Весь клип</button>
     </div>
     <div class="tracks" id="edTracks" hidden>
       <strong>Звук в клипе</strong>
       <span id="edTrackList"></span>
-      <label class="track-volume">Громкость <input type="range" class="vol" id="edVolume" min="0" max="1" step="0.02" value="1"></label>
       <small id="edTrackNote" hidden>В этом окне пока слышно всё — выбор применится в сохранённом клипе</small>
     </div>
     <div class="editor-actions" id="edActions">
@@ -308,6 +332,7 @@
       <button class="mini mini-discord" id="edSend">Отправить в Discord</button>
       <button class="mini mini-quiet" id="edOpen">Открыть в плеере</button>
     </div>
+    <small class="ed-keys">Пробел — пауза · ← → — 5 с (с Shift — 1 с) · , . — по кадру · I и O — начало и конец отрезка · F — на весь экран · PageUp и PageDown — другой клип</small>
     <div class="job" id="edJob" hidden>
       <div class="job-bar"><i id="edJobFill"></i></div>
       <span id="edJobText"></span>
