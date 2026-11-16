@@ -213,7 +213,7 @@ class Toast(threading.Thread):
                 canvas.create_line(cx, cy, cx + int(r * 0.45), cy + int(r * 0.2), fill=ink, width=width)
             elif kind == "rec":       # кружок записи
                 canvas.create_oval(cx - r, cy - r, cx + r, cy + r, outline=ink, width=max(2, r // 5))
-                canvas.create_oval(cx - r // 2, cy - r // 2, cx + r // 2, cy + r // 2, fill=ink, outline="", tags="pulse_b")
+                canvas.create_oval(cx - r // 2, cy - r // 2, cx + r // 2, cy + r // 2, fill=ink, outline="")
             elif kind == "stop":      # квадрат «стоп»
                 canvas.create_oval(cx - r, cy - r, cx + r, cy + r, outline=ink, width=max(2, r // 5))
                 canvas.create_rectangle(cx - r // 2, cy - r // 2, cx + r // 2, cy + r // 2, fill=ink, outline="", tags="pulse_b")
