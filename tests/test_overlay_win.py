@@ -89,6 +89,23 @@ if __name__ == "__main__":
     time.sleep(0.7)
     assert not toast.menu_open and pressed == ["record", "clip"], (toast.menu_open, pressed)
     print("меню поверх игры: открытие, нажатия и закрытие — ok", flush=True)
+
+    # анимация: меню появляется и исчезает плавно — много кадров, а не десяток
+    del os.environ["MC_MENU_IN_CAPTURE"]
+    toast.toggle_menu(rect, model, action)
+    time.sleep(1.0)
+    assert toast.menu_open, toast.errors
+    opened = toast.menu_frames[0]
+    toast.toggle_menu(rect, model, action)
+    time.sleep(0.05)
+    assert not toast.menu_open and toast.menu_alive, "меню должно закрываться с анимацией, а не пропадать сразу"
+    time.sleep(0.6)
+    assert not toast.menu_alive, "меню не закрылось"
+    closed = toast.menu_frames[1]
+    print("анимация меню: %d кадров за появление (%.0f в секунду), %d за исчезновение (%.0f в секунду)" % (
+        opened, opened / 0.30, closed, closed / 0.17), flush=True)
+    assert opened >= 12 and closed >= 6, "анимация меню идёт рывками: %s" % toast.menu_frames
+    os.environ["MC_MENU_IN_CAPTURE"] = "1"
     print("ошибки:", toast.errors)
     assert not toast.errors, toast.errors
     assert rate >= 55, "метроном слишком редкий: %.0f/с" % rate

@@ -46,6 +46,8 @@ class Toast(threading.Thread):
         self.tickle_on = False
         self.ready = threading.Event()
         self.menu_open = False   # открыто ли меню поверх игры
+        self.menu_frames = [0, 0]   # для проверки: кадров за появление и за исчезновение меню
+        self.menu_alive = False  # окно меню ещё на экране (в том числе пока закрывается)
 
     # ------------------------------------------------- вызывается из любых потоков
 
@@ -173,14 +175,45 @@ class Toast(threading.Thread):
 
         menu = {"win": None, "canvas": None, "model": None, "get": None, "act": None, "boxes": [], "hover": None,
                 "timer": None, "anim": None, "size": (0, 0), "t0": 0.0, "intro": 1.0, "march": 0.0,
-                "flash": (None, 0.0), "clock": "", "blink": None}
+                "flash": (None, 0.0), "clock": "", "blink": None, "bands": [], "pose": {}, "tiles": 0,
+                "closing": False, "from": 0.0, "last": 0.0, "timing": False}
         GREY, DIM, SOFT = "#2A2A2A", "#161616", "#BDBDBD"
         DAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
         MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
                   "октября", "ноября", "декабря"]
         ALPHA = 0.92
+        OPEN_TIME, CLOSE_TIME = 0.30, 0.17   # секунды: появление и исчезновение меню
 
-        def menu_close():
+        class Tagged:
+            """Холст, который помечает всё нарисованное текущей группой — группы потом двигаются целиком, без перерисовки."""
+
+            def __init__(self, canvas):
+                self.canvas, self.group = canvas, None
+
+            def __getattr__(self, name):
+                target = getattr(self.canvas, name)
+                if not name.startswith("create_"):
+                    return target
+
+                def create(*args, **kw):
+                    tags = kw.pop("tags", ())
+                    tags = (tags,) if isinstance(tags, str) else tuple(tags)
+                    if self.group:
+                        tags += (self.group,)
+                    return target(*args, tags=tags, **kw)
+                return create
+
+        def timer_precision(on):
+            """Точный системный таймер на время, пока меню открыто: без него кадры идут раз в 15–30 мс и анимация дёргается."""
+            if WIN and on != menu["timing"]:
+                try:
+                    winmm = ctypes.windll.winmm
+                    (winmm.timeBeginPeriod if on else winmm.timeEndPeriod)(1)
+                    menu["timing"] = on
+                except Exception:
+                    pass
+
+        def menu_destroy():
             for name in ("timer", "anim"):
                 if menu[name]:
                     try:
@@ -194,7 +227,28 @@ class Toast(threading.Thread):
                 except Exception:
                     pass
             menu["win"] = menu["canvas"] = None
+            menu["bands"] = []
+            menu["closing"] = False
+            timer_precision(False)
+            self.menu_open = self.menu_alive = False
+
+        def menu_close():
+            """Закрыть с анимацией: плитки уезжают, окно гаснет. Нажатия с этого момента уже не принимаются."""
+            if menu["win"] is None or menu["closing"]:
+                return
+            if os.environ.get("MC_MENU_IN_CAPTURE"):
+                menu_destroy()
+                return
+            menu["closing"] = True
+            menu["from"] = menu["intro"]
+            menu["t0"] = time.perf_counter()
             self.menu_open = False
+            if menu["timer"]:
+                try:
+                    root.after_cancel(menu["timer"])
+                except Exception:
+                    pass
+                menu["timer"] = None
 
         def ease(t):
             t = max(0.0, min(1.0, t))
@@ -236,32 +290,23 @@ class Toast(threading.Thread):
 
         @guard
         def menu_draw():
-            canvas, model = menu["canvas"], menu["model"] or {}
-            if canvas is None:
+            real, model = menu["canvas"], menu["model"] or {}
+            if real is None:
                 return
+            canvas = Tagged(real)
             w, h = menu["size"]
             k = max(0.5, min(2.0, h / 1080.0, w / 1400.0))
 
             def S(v):
                 return int(v * k)
 
-            t = menu["intro"]
-            e = ease(t)
+            e = 1.0   # рисуем готовый вид; въезд и выезд делает menu_pose, сдвигая группы
             canvas.delete("all")
 
             # фон: тёмная косая полоса и «ленты» по краям, которые едут
             canvas.create_polygon(int(w * 0.60), 0, int(w * 0.84), 0, int(w * 0.54), h, int(w * 0.30), h, fill=DIM, outline="")
             canvas.create_polygon(int(w * 0.86), 0, int(w * 0.89), 0, int(w * 0.59), h, int(w * 0.56), h, fill=DIM, outline="")
-            band, period = S(20), S(48)
-            off = int(menu["march"]) % max(1, period)
-            for y1, y2, lean in ((0, band, 1), (h - band, h, -1)):
-                canvas.create_rectangle(0, y1, w, y2, fill=BLACK, outline="")
-                x = -2 * period + off
-                while x < w + period:
-                    canvas.create_polygon(x, y2, x + period // 2, y2, x + period // 2 + lean * band, y1, x + lean * band, y1,
-                                          fill=YELLOW, outline="", tags="march")
-                    x += period
-
+            canvas.group = "g_head"
             # шапка: косая жёлтая полоса с названием выезжает слева
             hx = -int((1 - e) * S(820))
             canvas.create_polygon(hx, S(206), hx + S(712), S(206), hx + S(706), S(196), hx, S(196), fill=WHITE, outline="")
@@ -276,6 +321,7 @@ class Toast(threading.Thread):
                                font=("Segoe UI", S(13), "bold"))
 
             # часы и дата справа
+            canvas.group = "g_clock"
             now = time.localtime()
             cx = w - S(60) + int((1 - e) * S(420))
             menu["clock"] = time.strftime("%H:%M", now)
@@ -285,6 +331,7 @@ class Toast(threading.Thread):
                                text="%s, %d %s" % (DAYS[now.tm_wday], now.tm_mday, MONTHS[now.tm_mon - 1]))
 
             # строка сведений: что и чем записывается
+            canvas.group = "g_chips"
             x, y = S(60), S(246) + int((1 - e) * S(30))
             for chip in model.get("chips", []):
                 accent = bool(chip.get("accent"))
@@ -311,11 +358,9 @@ class Toast(threading.Thread):
                 bx = x0 + (i % cols) * (tw + gap)
                 by = y0 + (i // cols) * (th + gap)
                 menu["boxes"].append((bx, by, bx + tw, by + th, tile["id"]))
-                ti = ease(t * 1.7 - i * 0.075)
-                if ti <= 0:
-                    continue
+                canvas.group = "g_t%d" % i
                 hover = menu["hover"] == tile["id"]
-                x = bx + int((1 - ti) * S(220)) - (S(6) if hover else 0)
+                x = bx - (S(6) if hover else 0)
                 y = by - (S(6) if hover else 0)
                 active = bool(tile.get("active"))
                 fill = RED if tile.get("alert") else (YELLOW if active else GREY)
@@ -356,6 +401,7 @@ class Toast(threading.Thread):
                     menu_icon(canvas, tile["icon"], x + tw - skew - S(62), y + th // 2 + S(14), S(24), ink, fill)
 
             # последний клип и подсказка
+            canvas.group = "g_last"
             ly = h - S(128) + int((1 - e) * S(60))
             last = model.get("last", "")
             if last:
@@ -368,9 +414,47 @@ class Toast(threading.Thread):
                 canvas.create_text(x2 + S(40), ly, text=last, anchor="w", fill=WHITE, font=("Segoe UI", S(13), "bold"))
             canvas.create_text(w // 2, h - S(66), text=model.get("hint", ""), fill=SOFT, font=("Segoe UI", S(12)))
             menu["blink"] = None
+            menu["tiles"] = len(tiles)
+            menu["pose"] = {}
+            menu_pose()
+
+        def menu_pose():
+            """Расставить группы по текущему шагу анимации (0 — меню ещё нет, 1 — всё на местах). Только сдвиги — дёшево."""
+            canvas = menu["canvas"]
+            w, h = menu["size"]
+            k = max(0.5, min(2.0, h / 1080.0, w / 1400.0))
+            t = menu["intro"]
+            e = 1 - ease(t)
+            want = {"g_head": (-int(e * 820 * k), 0, True), "g_clock": (int(e * 420 * k), 0, True),
+                    "g_chips": (0, int(e * 30 * k), True), "g_last": (0, int(e * 60 * k), True)}
+            for i in range(menu["tiles"]):
+                ti = ease(t * 1.7 - i * 0.075)
+                want["g_t%d" % i] = (int((1 - ti) * 220 * k), 0, ti > 0)
+            pose = menu["pose"]
+            for tag, (dx, dy, shown) in want.items():
+                ox, oy, was = pose.get(tag, (0, 0, True))
+                if (dx, dy) != (ox, oy):
+                    canvas.move(tag, dx - ox, dy - oy)
+                if shown != was:
+                    canvas.itemconfigure(tag, state="normal" if shown else "hidden")
+                pose[tag] = (dx, dy, shown)
+
+        def bands_draw():
+            """Ленты по верхнему и нижнему краю — на своих узких холстах: их движение не заставляет перерисовывать весь экран."""
+            w, h = menu["size"]
+            k = max(0.5, min(2.0, h / 1080.0, w / 1400.0))
+            band, period = int(20 * k), max(2, int(48 * k))
+            for strip, lean in zip(menu["bands"], (1, -1)):
+                strip.delete("all")
+                x = -2 * period
+                while x < w + 2 * period:
+                    strip.create_polygon(x, band, x + period // 2, band, x + period // 2 + lean * band, 0, x + lean * band, 0,
+                                         fill=YELLOW, outline="", tags="march")
+                    x += period
+            menu["march"] = 0.0
 
         def menu_refresh():
-            if menu["win"] is None:
+            if menu["win"] is None or menu["closing"]:
                 return
             try:
                 menu["model"] = menu["get"]()
@@ -381,27 +465,35 @@ class Toast(threading.Thread):
 
         @guard
         def menu_anim_step():
-            canvas = menu["canvas"]
-            now = time.monotonic()
+            canvas, win = menu["canvas"], menu["win"]
+            now = time.perf_counter()
             w, h = menu["size"]
             k = max(0.5, min(2.0, h / 1080.0, w / 1400.0))
-            period = max(1, int(48 * k))
-            if menu["intro"] < 1.0:
-                menu["intro"] = min(1.0, (now - menu["t0"]) / 0.38)
-                try:
-                    menu["win"].attributes("-alpha", ALPHA * min(1.0, 0.25 + menu["intro"] * 1.5))
-                except Exception:
-                    pass
-                menu_draw()
-                return
-            if menu["flash"][0] and now >= menu["flash"][1]:
+            if menu["closing"]:
+                menu["intro"] = menu["from"] * max(0.0, 1 - (now - menu["t0"]) / CLOSE_TIME)
+                if menu["intro"] <= 0:
+                    menu_destroy()
+                    return
+                win.attributes("-alpha", ALPHA * min(1.0, menu["intro"] * 1.4))
+                menu_pose()
+                self.menu_frames[1] += 1
+            elif menu["intro"] < 1.0:
+                menu["intro"] = min(1.0, (now - menu["t0"]) / OPEN_TIME)
+                win.attributes("-alpha", ALPHA * min(1.0, menu["intro"] * 2.2))
+                menu_pose()
+                self.menu_frames[0] += 1
+            elif menu["flash"][0] and time.monotonic() >= menu["flash"][1]:
                 menu["flash"] = (None, 0.0)
                 menu_draw()
-            # ленты едут, огонёк записи мигает, часы идут
-            step = max(1, int(2 * k))
-            before = int(menu["march"]) % period
-            menu["march"] = (menu["march"] + step) % period
-            canvas.move("march", (int(menu["march"]) % period) - before, 0)
+            # ленты едут с постоянной скоростью, сколько бы ни занял кадр
+            period = max(2, int(48 * k))
+            before = int(menu["march"])
+            menu["march"] = (menu["march"] + (now - menu["last"]) * 70 * k) % period
+            menu["last"] = now
+            shift = int(menu["march"]) - before
+            if shift:
+                for strip in menu["bands"]:
+                    strip.move("march", shift, 0)
             blink = int(now * 2) % 2 == 0
             if blink != menu["blink"]:
                 menu["blink"] = blink
@@ -411,15 +503,22 @@ class Toast(threading.Thread):
             if clock != menu["clock"]:
                 menu["clock"] = clock
                 canvas.itemconfigure("clock", text=clock)
+            win.update_idletasks()   # показать кадр сейчас, а не «когда-нибудь»
 
         def menu_anim():
             if menu["win"] is None:
                 return
+            started = time.perf_counter()
             menu_anim_step()
-            menu["anim"] = root.after(33, menu_anim)
+            if menu["win"] is None:
+                return
+            moving = menu["closing"] or menu["intro"] < 1.0
+            spent = (time.perf_counter() - started) * 1000
+            # пока меню едет — до 120 кадров в секунду, дальше хватает 60 (едут только ленты)
+            menu["anim"] = root.after(max(1, int((8 if moving else 16) - spent)), menu_anim)
 
         def menu_act(ident):
-            if menu["win"] is None or not ident:
+            if menu["win"] is None or not ident or menu["closing"]:
                 return
             act = menu["act"]
             menu["flash"] = (ident, time.monotonic() + 0.16)   # плитка вспыхивает при нажатии
@@ -456,23 +555,37 @@ class Toast(threading.Thread):
 
         @guard
         def menu_toggle(rect, get_model, on_action):
-            if menu["win"] is not None:
+            if menu["win"] is not None and not menu["closing"]:
                 menu_close()
                 return
+            menu_destroy()   # если прошлое меню ещё закрывается — убрать сразу и открыть заново
             rect = rect or {"x": 0, "y": 0, "w": root.winfo_screenwidth(), "h": root.winfo_screenheight()}
             win = tk.Toplevel(root)
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             instant = bool(os.environ.get("MC_MENU_IN_CAPTURE"))   # для проверок — сразу готовый вид
-            win.attributes("-alpha", ALPHA if instant else ALPHA * 0.25)
+            win.attributes("-alpha", ALPHA if instant else 0.0)
             win.geometry("%dx%d+%d+%d" % (rect["w"], rect["h"], rect["x"], rect["y"]))
             win.configure(bg=BLACK)
             canvas = tk.Canvas(win, width=rect["w"], height=rect["h"], bg=BLACK, highlightthickness=0, cursor="hand2")
             canvas.pack()
+            scale = max(0.5, min(2.0, rect["h"] / 1080.0, rect["w"] / 1400.0))
+            bands = []
+            for top in (True, False):
+                strip = tk.Canvas(win, width=rect["w"], height=int(20 * scale), bg=BLACK, highlightthickness=0)
+                strip.place(x=0, y=0 if top else rect["h"] - int(20 * scale))
+                bands.append(strip)
             menu.update(win=win, canvas=canvas, get=get_model, act=on_action, hover=None, size=(rect["w"], rect["h"]),
-                        t0=time.monotonic(), intro=1.0 if instant else 0.0, flash=(None, 0.0), blink=None)
+                        t0=time.perf_counter(), last=time.perf_counter(), intro=1.0 if instant else 0.0, flash=(None, 0.0),
+                        blink=None, bands=bands, closing=False, pose={})
+            bands_draw()
+            timer_precision(True)
+            self.menu_frames = [0, 0]
+            self.menu_alive = True
 
             def motion(event):
+                if menu["closing"]:
+                    return
                 ident = menu_at(event.x, event.y)
                 if ident != menu["hover"]:
                     menu["hover"] = ident
@@ -480,6 +593,8 @@ class Toast(threading.Thread):
 
             def key(event):
                 moves = {"Left": (-1, 0), "Right": (1, 0), "Up": (0, -1), "Down": (0, 1)}
+                if menu["closing"]:
+                    return
                 if event.keysym == "Escape":
                     menu_close()
                 elif event.keysym in moves:
@@ -544,7 +659,7 @@ class Toast(threading.Thread):
                     menu_close()
                 elif item[0] == "menu_press":
                     menu_act(item[1])
-            root.after(100, poll)
+            root.after(15, poll)   # часто: от нажатия клавиши до появления меню не должно быть заметной паузы
 
         root.after(50, poll)
         root.after(50, tick)
