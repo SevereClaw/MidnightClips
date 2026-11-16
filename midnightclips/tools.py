@@ -1,10 +1,12 @@
 """Обрезка, сжатие под лимит Discord и отправка клипа по вебхуку."""
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -83,6 +85,40 @@ def audio_choice(tracks, total):
         return ["-map", "0:v", "-map", "0:a:%d" % chosen[0]], True
     mix = "".join("[0:a:%d]" % i for i in chosen) + "amix=inputs=%d:normalize=0[mcaudio]" % len(chosen)
     return ["-filter_complex", mix, "-map", "0:v", "-map", "[mcaudio]"], False
+
+
+def split_tracks(ffmpeg, path, cache_dir):
+    """Отдельные звуковые дорожки клипа — файлами, чтобы плеер в окне клипа мог играть только выбранные.
+    Возвращает пути для дорожек 1..N-1 (нулевая — «всё вместе») или [] — если дорожка одна или не получилось."""
+    total = len(audio_tracks(ffmpeg, path))
+    if total < 2:
+        return []
+    stat = os.stat(path)
+    key = hashlib.sha1(("%s|%d|%d" % (path, stat.st_mtime_ns, stat.st_size)).encode("utf-8")).hexdigest()[:16]
+    os.makedirs(cache_dir, exist_ok=True)
+    files = [os.path.join(cache_dir, "%s_%d.m4a" % (key, n)) for n in range(1, total)]
+    if all(os.path.isfile(f) and os.path.getsize(f) > 0 for f in files):
+        return files
+    now = time.time()
+    for name in os.listdir(cache_dir):   # старые дорожки от прошлых клипов не копим
+        old = os.path.join(cache_dir, name)
+        try:
+            if name.endswith(".m4a") and now - os.path.getmtime(old) > 6 * 3600:
+                os.remove(old)
+        except OSError:
+            pass
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", path]
+    for n, out in enumerate(files, 1):
+        args += ["-map", "0:a:%d" % n, "-c", "copy", "-movflags", "+faststart", "-f", "mp4", out + ".part"]
+    try:
+        done = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, timeout=120, creationflags=NO_WINDOW)
+        if done.returncode != 0:
+            return []
+        for out in files:
+            os.replace(out + ".part", out)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return files
 
 
 def plan(limit_mb, duration):

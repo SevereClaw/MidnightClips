@@ -49,6 +49,7 @@ const demoApi = {
   cleanup_preview: async (days, gb) => ({ count: days || gb ? 3 : 0, bytes: 1.25e9 }),
   media_url: async () => window.DEMO_VIDEO || "",
   clip_tracks: async () => ["Всё вместе", "Микрофон", "Игра", "Discord", "Остальное"],
+  clip_track_urls: async () => window.DEMO_TRACKS || [],
   clip_action: async (p, action) => {
     let n = 0;
     const timer = setInterval(() => {
@@ -518,6 +519,53 @@ function pickedTracks() {
   if (!edTracks.length || edTracks.every((b) => b.checked)) return null;
   return edTracks.filter((b) => b.checked).map((b) => parseInt(b.dataset.track, 10));
 }
+// Отдельные дорожки играют рядом с видео: слышно только включённые — так же, как будет в сохранённом клипе.
+let edAudio = [];      // по одному <audio> на каждую отдельную дорожку
+let edSplit = false;   // сейчас звук идёт от отдельных дорожек, а само видео без звука
+function syncAudio(force) {
+  if (!edSplit) return;
+  edAudio.forEach((a) => {
+    a.playbackRate = video.playbackRate;
+    const now = performance.now();   // подравниваем не чаще раза в секунду, иначе звук будет заикаться
+    if (force || (Math.abs(a.currentTime - video.currentTime) > 0.05 && now - (a.fixedAt || 0) > 1000)) {
+      a.fixedAt = now;
+      try { a.currentTime = video.currentTime; } catch (e) { /* дорожка ещё не загрузилась */ }
+    }
+    const playing = !video.paused && !video.ended && video.readyState > 2 && !video.seeking;
+    if (playing && a.paused) a.play().catch(() => {});
+    else if (!playing && !a.paused) a.pause();
+  });
+}
+function applyTracks() {
+  const want = pickedTracks() !== null && edAudio.length === edTracks.length && edAudio.length > 0;
+  $("edTrackNote").hidden = pickedTracks() === null || want;
+  $("editor").classList.toggle("is-split", want);
+  if (want) {
+    if (!edSplit) $("edVolume").value = video.muted ? 0 : video.volume;
+    const volume = parseFloat($("edVolume").value);
+    edAudio.forEach((a, i) => { a.muted = !edTracks[i].checked; a.volume = volume; });
+    edSplit = true;
+    video.muted = true;
+    syncAudio(true);
+  } else if (edSplit) {
+    edSplit = false;
+    edAudio.forEach((a) => a.pause());
+    video.volume = parseFloat($("edVolume").value) || video.volume;
+    video.muted = false;
+  }
+}
+function dropAudio() {
+  edAudio.forEach((a) => { a.pause(); a.removeAttribute("src"); a.load(); });
+  edAudio = [];
+  if (edSplit) { edSplit = false; video.muted = false; }
+  $("editor").classList.remove("is-split");
+  $("edTrackNote").hidden = true;
+}
+["play", "playing", "pause", "waiting", "seeking", "ended", "ratechange", "timeupdate"].forEach((name) => video.addEventListener(name, () => syncAudio(false)));
+video.addEventListener("seeked", () => syncAudio(true));
+video.addEventListener("volumechange", () => { if (edSplit && !video.muted) video.muted = true; });   // звук видео — только через дорожки
+$("edVolume").addEventListener("input", () => { edAudio.forEach((a) => { a.volume = parseFloat($("edVolume").value); }); });
+
 async function openEditor(clip) {
   edClip = clip;
   $("edName").textContent = clip.name;
@@ -528,6 +576,7 @@ async function openEditor(clip) {
   $("edClose").focus();
   // отдельные звуковые дорожки: галочками выбирается, что останется в сохранённом или отправленном клипе
   edTracks = [];
+  dropAudio();
   $("edTracks").hidden = true;
   const names = (await api.clip_tracks(clip.path)) || [];
   if (edClip !== clip || names.length < 2) return;
@@ -537,7 +586,7 @@ async function openEditor(clip) {
     const label = document.createElement("label");
     const box = document.createElement("input");
     box.type = "checkbox"; box.checked = true; box.dataset.track = String(i + 1);
-    box.onchange = () => { const [a, b] = trimValues(); setTrim(a, b); };
+    box.onchange = () => { const [a, b] = trimValues(); setTrim(a, b); applyTracks(); };
     label.append(box, document.createTextNode(name));
     list.appendChild(label);
     edTracks.push(box);
@@ -545,9 +594,14 @@ async function openEditor(clip) {
   $("edTracks").hidden = false;
   const [a, b] = trimValues();
   setTrim(a, b);
+  const urls = (await api.clip_track_urls(clip.path)) || [];
+  if (edClip !== clip || urls.length !== edTracks.length) return;
+  edAudio = urls.map((url) => { const a = new Audio(); a.preload = "auto"; a.src = url; return a; });
+  applyTracks();
 }
 function closeEditor() {
   if (edBusy) api.cancel_job();
+  dropAudio();
   video.pause();
   video.removeAttribute("src");
   video.load();

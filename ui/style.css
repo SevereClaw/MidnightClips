@@ -396,6 +396,13 @@ input.vol::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height:
 .tracks { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding-left: 4px; }
 #edTrackList { display: flex; flex-wrap: wrap; gap: 8px 28px; }
 .tracks label { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+.track-volume { display: none !important; }
+.editor.is-split .track-volume { display: inline-flex !important; margin-left: auto; }
+.track-volume input.vol { width: 140px; }
+/* звук идёт от отдельных дорожек — родную громкость видео прячем, вместо неё ползунок рядом с дорожками */
+.editor.is-split video::-webkit-media-controls-mute-button,
+.editor.is-split video::-webkit-media-controls-volume-slider,
+.editor.is-split video::-webkit-media-controls-volume-control-container { display: none; }
 .mini-discord { background: #5865F2; }
 .mini-quiet { background: transparent; color: var(--black); box-shadow: inset 0 0 0 3px var(--black); margin-left: auto; }
 .mini:disabled { opacity: .45; cursor: default; }

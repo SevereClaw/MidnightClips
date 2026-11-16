@@ -297,8 +297,10 @@
       </div>
     </div>
     <div class="tracks" id="edTracks" hidden>
-      <strong>Звук в готовом клипе</strong>
+      <strong>Звук в клипе</strong>
       <span id="edTrackList"></span>
+      <label class="track-volume">Громкость <input type="range" class="vol" id="edVolume" min="0" max="1" step="0.02" value="1"></label>
+      <small id="edTrackNote" hidden>В этом окне пока слышно всё — выбор применится в сохранённом клипе</small>
     </div>
     <div class="editor-actions" id="edActions">
       <button class="mini" id="edTrim">Сохранить обрезку</button>

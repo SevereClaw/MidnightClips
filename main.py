@@ -556,6 +556,13 @@ class Api:
             return []
         return clip_tools.audio_tracks(self._app.ffmpeg, path)
 
+    def clip_track_urls(self, path):
+        """Адреса отдельных звуковых дорожек (без общей) — чтобы в окне клипа было слышно только включённые."""
+        if not (self._app.library.inside(path) and os.path.isfile(path) and self._app.ffmpeg):
+            return []
+        files = clip_tools.split_tracks(self._app.ffmpeg, path, os.path.join(cache_dir(), "tracks"))
+        return [self._app.media.allow(f) for f in files]
+
     def clip_action(self, path, action, start=None, end=None, tracks=None):
         """action: trim — сохранить обрезку, compress — сжать под лимит, send — отправить в Discord."""
         if not (self._app.library.inside(path) and os.path.isfile(path)):

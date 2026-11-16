@@ -5,7 +5,7 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-TYPES = {".mp4": "video/mp4", ".mov": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm"}
+TYPES = {".m4a": "audio/mp4", ".mp4": "video/mp4", ".mov": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm"}
 
 
 class MediaServer:
@@ -13,6 +13,7 @@ class MediaServer:
         """allowed(path) -> bool: можно ли отдавать этот файл (только из папки клипов)."""
         self.token = secrets.token_urlsafe(18)
         token = self.token
+        extra = self._extra = set()   # отдельные файлы вне папки клипов, которые тоже можно отдавать (звуковые дорожки)
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -31,7 +32,7 @@ class MediaServer:
                 query = urllib.parse.parse_qs(parsed.query)
                 path = (query.get("p") or [""])[0]
                 if (parsed.path != "/clip" or (query.get("t") or [""])[0] != token
-                        or not allowed(path) or not os.path.isfile(path)):
+                        or not (allowed(path) or path in extra) or not os.path.isfile(path)):
                     self.send_error(404)
                     return
                 size = os.path.getsize(path)
@@ -85,6 +86,11 @@ class MediaServer:
         self._httpd.daemon_threads = True
         self.port = self._httpd.server_address[1]
         threading.Thread(target=self._httpd.serve_forever, daemon=True, name="media").start()
+
+    def allow(self, path):
+        """Разрешить отдавать ещё и этот файл (например, звуковую дорожку из кэша)."""
+        self._extra.add(path)
+        return self.url(path)
 
     def url(self, path):
         return "http://127.0.0.1:%d/clip?t=%s&p=%s" % (self.port, self.token, urllib.parse.quote(path, safe=""))
