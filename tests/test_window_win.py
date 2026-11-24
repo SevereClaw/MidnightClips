@@ -50,10 +50,10 @@ def check(window):
         print("окно:", (x, y, w, h), flush=True)
 
         result["step"] = "перетаскивание"
-        assert drag(hwnd, "move", (x + 300, y + 15), (140, 80)), "перетаскивание не началось"
+        assert drag(hwnd, "move", (x + 200, y + 15), (100, 60)), "перетаскивание не началось"
         nx, ny, nw, nh = winutil._rect(hwnd)
         print("после перетаскивания:", (nx, ny, nw, nh), flush=True)
-        assert abs(nx - x - 140) <= 6 and abs(ny - y - 80) <= 6 and (nw, nh) == (w, h), "окно не переехало за мышью"
+        assert abs(nx - x - 100) <= 6 and abs(ny - y - 60) <= 6 and (nw, nh) == (w, h), "окно не переехало за мышью"
 
         result["step"] = "растягивание"
         assert drag(hwnd, "br", (nx + nw - 3, ny + nh - 3), (90, 50)), "растягивание не началось"
@@ -96,7 +96,7 @@ if __name__ == "__main__":
     threading.Thread(target=watchdog, daemon=True).start()
     winutil.set_dpi_aware()
     win = webview.create_window("MidnightClips", html=HTML, frameless=True, easy_drag=False,
-                                width=900, height=600, x=120, y=120, min_size=(400, 300))
+                                width=640, height=420, x=60, y=60, min_size=(400, 300))
     webview.start(check, win)
     print("ОКНО БЕЗ РАМКИ: окно закрылось раньше проверки", result["errors"])
     sys.exit(1)
