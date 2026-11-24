@@ -11,7 +11,7 @@ const demo = {
   settings: {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
-    audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9", hotkey_overlay: "Alt+Z", hotkey_clip_a: "Alt+F8", clip_a_seconds: 30, hotkey_clip_b: "Alt+F7", clip_b_seconds: 15,
+    audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9", hotkey_overlay: "Alt+Z", hotkey_marker: "Alt+F6", hotkey_clip_a: "Alt+F8", clip_a_seconds: 30, hotkey_clip_b: "Alt+F7", clip_b_seconds: 15,
     folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, capture_target: "game", window_exe: "p3r.exe", app_volumes: '{"discord.exe": {"on": true, "vol": 60}}', audio_mode: "apps", mic_on: true, separate_tracks: true, game_include: "", game_exclude: "", cursor: true, preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
@@ -19,11 +19,12 @@ const demo = {
     ["hl2 запись 2026-11-11 19-05-10", "hl2", 754, 1.1e9, 1], ["Тройное убийство", "cs2", 30, 44e6, 0],
     ["cs2 2026-11-10 23-58-31", "cs2", 30, 46e6, 0], ["Рабочий стол 2026-11-09 14-02-00", "Рабочий стол", 15, 9e6, 0],
   ].map((c, i) => ({ path: "demo" + i, name: c[0], game: c[1], duration: c[2], size: c[3], recording: !!c[4], mtime: Date.now() / 1000 - i * 5400,
-    favorite: i === 0 || i === 3, tags: [["босс"], [], [], ["эйс", "смешное"], ["эйс"], []][i] })),
+    favorite: i === 0 || i === 3, markers: i === 0 ? [5.5, 18.2, 33] : [], tags: [["босс"], [], [], ["эйс", "смешное"], ["эйс"], []][i] })),
 };
 const demoApi = {
   get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", window_active: true, buffer_in_memory: true, buffer_mb: 99, fps_real: 59.8, fps_target: 60, slow: false, fallback: false, recording: !!demo.rec, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
   get_settings: async () => Object.assign(demo.settings, { clips_free: 412e9, moving: false }),
+  syv_state: async () => ({ ok: true, connected: true, muted: false, fx: false, fxVoice: "ДЕМОН", presets: ["ЧИСТЫЙ", "СТРИМ", "СЫРОЙ", "Гирсешен"], active: "СТРИМ" }),
   list_drives: async () => [
     { root: "C:\\", label: "Windows", free: 84e9, total: 512e9, removable: false, network: false, current: !demo.settings.clips_dir },
     { root: "D:\\", label: "Игры", free: 1.2e12, total: 2e12, removable: false, network: false, current: demo.settings.clips_dir.startsWith("D") },
@@ -218,6 +219,7 @@ function applyHotkeyStatus(h) {
   $("warnClipA").hidden = h.clip_a !== false;
   $("warnClipB").hidden = h.clip_b !== false;
   $("warnOverlay").hidden = h.overlay !== false;
+  $("warnMarker").hidden = h.marker !== false;
 }
 setInterval(() => {
   if (recSince) $("recTimer").textContent = fmtDuration(Math.max(0, Date.now() / 1000 - recSince));
@@ -315,6 +317,12 @@ function renderClips() {
     thumb.title = "Смотреть и обрезать";
     thumb.innerHTML = '<span class="play"></span><span class="badge badge-time" hidden></span>' + (clip.recording ? '<span class="badge badge-rec">запись</span>' : "");
     if (clip.duration != null) { const b = thumb.querySelector(".badge-time"); b.textContent = fmtDuration(clip.duration); b.hidden = false; }
+    if (clip.markers && clip.markers.length) {
+      const m = document.createElement("span");
+      m.className = "badge badge-mark"; m.textContent = "⚑ " + clip.markers.length;
+      m.title = "Отметок: " + clip.markers.length;
+      thumb.appendChild(m);
+    }
     thumb.onclick = (e) => {   // пока что-то выбрано, нажатие отмечает клип — как в галерее телефона
       if (picked.size || e.ctrlKey || e.shiftKey) togglePick(clip.path, e.shiftKey);
       else openEditor(clip);
@@ -599,6 +607,15 @@ function drawTrim() {
     box.appendChild(el);
   });
   gap(from, dur);
+  ((edClip && edClip.markers) || []).forEach((t, i) => {
+    if (t > dur + 0.5) return;
+    const pin = document.createElement("div");
+    pin.className = "tl-mark";
+    pin.dataset.mark = i;
+    pin.style.left = pct(Math.min(t, dur)) + "%";
+    pin.title = "Отметка " + fmtTime(t) + " — нажмите, чтобы перейти. Правая кнопка — убрать";
+    box.appendChild(pin);
+  });
 
   const whole = segsWhole();
   const kept = keptLength();
@@ -812,6 +829,8 @@ function trackTime(e) {
 $("edTrack").addEventListener("pointerdown", (e) => {
   if (e.button !== 0 || !video.duration) return;
   $("edTrack").setPointerCapture(e.pointerId);
+  const pin = e.target.closest(".tl-mark");
+  if (pin) { seekTo(edClip.markers[parseInt(pin.dataset.mark, 10)]); return; }
   const handle = e.target.closest(".tl-h");
   if (handle) {   // тянут край куска
     rememberSegs();
@@ -969,6 +988,39 @@ $("cutDelete").onclick = deleteSeg;
 $("cutUndo").onclick = undoSegs;
 $("trimReset").onclick = () => { rememberSegs(); setSegs([{ a: 0, b: video.duration || 0 }], -1); };
 $("cutToMontage").onclick = addToMontage;
+$("markAdd").onclick = addMarker;
+$("edTrack").addEventListener("contextmenu", (e) => {
+  const pin = e.target.closest(".tl-mark");
+  if (!pin || !edClip) return;
+  e.preventDefault();
+  const list = edClip.markers.slice();
+  list.splice(parseInt(pin.dataset.mark, 10), 1);
+  saveMarkers(list);
+  osd("Отметка убрана");
+});
+function saveMarkers(list) {
+  if (!edClip) return;
+  edClip.markers = list.slice().sort((a, b) => a - b);
+  api.set_markers(edClip.path, edClip.markers);
+  drawTrim();
+  renderClips();
+}
+function addMarker() {
+  if (!edClip || !edDur()) return;
+  const t = Math.round(video.currentTime * 100) / 100;
+  const list = (edClip.markers || []).filter((m) => Math.abs(m - t) > 0.3);
+  list.push(t);
+  saveMarkers(list);
+  osd("Отметка " + fmtTime(t));
+}
+function jumpMarker(direction) {
+  const list = (edClip && edClip.markers) || [];
+  const t = video.currentTime;
+  const next = direction > 0 ? list.find((m) => m > t + 0.15) : [...list].reverse().find((m) => m < t - 0.15);
+  if (next == null) { osd(list.length ? (direction > 0 ? "Дальше отметок нет" : "Раньше отметок нет") : "Отметок нет"); return; }
+  seekTo(next);
+  osd("Отметка " + (list.indexOf(next) + 1) + " из " + list.length);
+}
 $("edClose").onclick = closeEditor;
 $("edPrev").onclick = () => stepClip(-1);
 $("edNext").onclick = () => stepClip(1);
@@ -982,6 +1034,7 @@ document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   const keys = {
     KeyS: splitHere, Delete: deleteSeg, Backspace: deleteSeg,
+    KeyB: addMarker, KeyQ: () => jumpMarker(-1), KeyE: () => jumpMarker(1),
     Space: togglePlay, KeyK: togglePlay,
     ArrowLeft: () => seekBy(e.shiftKey ? -1 : -5), ArrowRight: () => seekBy(e.shiftKey ? 1 : 5),
     ArrowUp: () => setVolume(edVol + 0.05), ArrowDown: () => setVolume(edVol - 0.05),
@@ -1125,6 +1178,20 @@ $("selJoin").onclick = () => {
 };
 
 // ---------------------------------------------------------------- где хранить клипы
+
+// Steal Your Voice запущен — можно выбрать его пресет на время записи
+async function renderSyv() {
+  const state = await api.syv_state();
+  const sel = $("selSyvPreset");
+  const presets = state && state.presets ? state.presets : [];
+  $("rowSyvPreset").hidden = !presets.length && !settings.syv_preset_record;
+  sel.innerHTML = "";
+  sel.add(new Option("Не менять", ""));
+  presets.forEach((name) => sel.add(new Option(name, name)));
+  if (settings.syv_preset_record && !presets.includes(settings.syv_preset_record))
+    sel.add(new Option(settings.syv_preset_record + " (нет в Steal Your Voice)", settings.syv_preset_record));
+  sel.value = settings.syv_preset_record || "";
+}
 
 async function renderDrives() {
   const list = (await api.list_drives()) || [];
@@ -1436,7 +1503,7 @@ $("selAddApp").addEventListener("change", () => {
 });
 
 // Свои звуки сигналов
-const SOUNDS = [["saved", "Клип или запись сохранены"], ["rec_on", "Запись началась"], ["rec_off", "Запись остановлена"], ["error", "Что-то не получилось"]];
+const SOUNDS = [["saved", "Клип или запись сохранены"], ["rec_on", "Запись началась"], ["rec_off", "Запись остановлена"], ["marker", "Отметка поставлена"], ["error", "Что-то не получилось"]];
 function renderSounds() {
   const box = $("soundRows");
   box.innerHTML = "";
@@ -1559,7 +1626,7 @@ document.querySelectorAll(".nav-item").forEach((item) => {
     document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("is-active", n === item));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("is-active", v.id === "view-" + item.dataset.view));
     if (item.dataset.view === "clips") loadClips();
-    if (item.dataset.view === "settings") renderDrives();
+    if (item.dataset.view === "settings") { renderDrives(); renderSyv(); }   // флешку могли вставить, панель — запустить
     $("tbWhere").textContent = VIEW_NAMES[item.dataset.view] || "";   // флешку могли вставить или вынуть
     syncPicked();
   };
@@ -1607,6 +1674,7 @@ async function init() {
   loadClips();
   loadPresets();
   renderDrives();
+  renderSyv();
   const options = await api.get_options();
   const mon = $("selMonitor");
   mon.innerHTML = "";

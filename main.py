@@ -16,6 +16,7 @@ from midnightclips.presets import KEYS as PRESET_KEYS, VIDEO_KEYS, Presets
 from midnightclips.sounds import EVENTS as SOUND_EVENTS, SoundBank
 from midnightclips.toast import Toast
 from midnightclips import storage
+from midnightclips import syv
 from midnightclips import tools as clip_tools
 from midnightclips.tools import ClipTools
 from midnightclips.updater import Updater
@@ -51,6 +52,7 @@ class App:
         self.sounds = SoundBank(self.cfg, self.ffmpeg, os.path.join(self.res, "assets"), cache_dir())
         self.media = MediaServer(self.library.inside)
         self.mover = storage.Mover(self.on_move_event)
+        self.syv = syv.Link()   # Steal Your Voice: мьют, эффект голоса и пресеты — в меню поверх игры
         self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event,
                                self.log_path)
         self.recorder_encoders = lambda: getattr(self.recorder, "_encoders", None) or []
@@ -134,6 +136,7 @@ class App:
                           lambda: self.save_clip(int(self.cfg["clip_a_seconds"])))
         self.hotkeys.bind("clip_b", self.cfg["hotkey_clip_b"] if clips else "",
                           lambda: self.save_clip(int(self.cfg["clip_b_seconds"])))
+        self.hotkeys.bind("marker", self.cfg["hotkey_marker"], self.add_marker)
         time.sleep(0.15)  # дать потоку клавиш применить изменения
         self.push("hotkeys", dict(self.hotkeys.status))
 
@@ -194,6 +197,17 @@ class App:
             pass
 
     # ------------------------------------------------------------- действия
+
+    def add_marker(self):
+        """Отметка во время игры: клип не сохраняется, а в будущем клипе или записи это место будет видно на шкале."""
+        if self.recorder.add_marker():
+            self.sound("marker")
+            if self.cfg["toast"]:
+                self.toast.show("Отметка поставлена", "Она будет на шкале клипа или записи")
+        else:
+            self.sound("error")
+            if self.cfg["toast"]:
+                self.toast.show("Отметку не поставить", "Захват не идёт или клипы выключены")
 
     def save_clip(self, seconds=None):
         """Сохранить клип: весь буфер или только последние seconds секунд."""
@@ -265,6 +279,7 @@ class App:
     def toggle_overlay(self):
         if not self.toast.menu_open:   # какие программы сейчас звучат — для переключателей звука в меню
             threading.Thread(target=self.refresh_heard_apps, daemon=True, name="heard-apps").start()
+            self.syv.refresh()
         self.toast.toggle_menu(self.monitor_rect(), self.overlay_model, self.overlay_action)
 
     def refresh_heard_apps(self):
@@ -408,8 +423,31 @@ class App:
                 "%d ч назад" % (ago // 3600) if ago < 86400 else "%d дн назад" % (ago // 86400)
             last_text = "%s  ·  %s  ·  %.0f МБ" % (last["name"][:48], when, last["size"] / 1048576)
         hint = "Цифры 1–9, стрелки с Enter или мышь — выбрать.   %s или Esc — закрыть" % (cfg["hotkey_overlay"] or "Esc")
+        rows = []
+        sounds = self.overlay_sounds()
+        if sounds:
+            rows.append({"label": "ЗВУК В ЗАПИСИ", "items": sounds})
+        voice = self.overlay_voice()
+        if voice:
+            rows.append({"label": "STEAL YOUR VOICE", "items": voice})
         return {"status": status, "recording": recording, "tiles": tiles, "chips": chips, "last": last_text, "hint": hint,
-                "sounds": self.overlay_sounds()}
+                "rows": rows}
+
+    def overlay_voice(self):
+        """Строка Steal Your Voice в меню: мьют микрофона, эффект голоса и пресеты (если панель запущена)."""
+        if time.time() - self.syv.checked > 2:
+            self.syv.refresh()   # в фоне: меню берёт последнее известное состояние и не ждёт
+        state = self.syv.state
+        if not state or not state.get("connected"):
+            return []
+        voice = str(state.get("fxVoice") or "").strip()
+        items = [{"id": "syv:mute", "name": "Микрофон везде", "on": not state.get("muted")},
+                 {"id": "syv:fx", "name": "Голос: " + (voice.capitalize() if voice else "эффект"), "on": bool(state.get("fx"))}]
+        active = str(state.get("active") or "")
+        for name in (state.get("presets") or [])[:8]:
+            items.append({"id": "syv:preset:" + name, "name": name.capitalize() if name.isupper() else name,
+                          "active": name.lower() == active.lower()})
+        return items
 
     def overlay_action(self, ident):
         """Нажатие плитки. True — меню после этого закрыть."""
@@ -435,6 +473,15 @@ class App:
             return False
         if ident.startswith("snd:"):
             self.toggle_app_sound(ident[4:])
+            return False
+        if ident == "syv:mute":
+            self.syv.send("mute")
+            return False
+        if ident == "syv:fx":
+            self.syv.send("fx")
+            return False
+        if ident.startswith("syv:preset:"):
+            self.syv.send("preset", name=ident[len("syv:preset:"):])
             return False
         if ident == "copy":
             last = self.overlay_facts()["last"]
@@ -468,6 +515,8 @@ class App:
         if kind in ("state", "recording"):
             self.sync_overlays()
         if kind == "saved":
+            if payload.get("markers"):
+                self.library.set_markers(payload["path"], payload["markers"])
             threading.Thread(target=self.run_cleanup, daemon=True).start()
             self.sound("saved")
             if self.cfg["toast"]:
@@ -479,6 +528,12 @@ class App:
         elif kind == "recording":
             if not payload.get("on") and self.cfg["clip_restore"]:
                 threading.Thread(target=self.restore_clip_settings, daemon=True).start()
+            if self.cfg["syv_preset_record"]:   # пресет Steal Your Voice на время записи и обратно
+                if payload.get("on"):
+                    threading.Thread(target=self.syv.send, args=("preset",), kwargs={"name": self.cfg["syv_preset_record"], "temp": True},
+                                     daemon=True).start()
+                else:
+                    threading.Thread(target=self.syv.send, args=("restore",), daemon=True).start()
             self.sound("rec_on" if payload.get("on") else "rec_off")
             if payload.get("on") and self.cfg["toast"]:
                 self.toast.show("Запись идёт", "Остановить: " + (self.cfg["hotkey_record"] or "кнопкой в окне"))
@@ -537,7 +592,7 @@ class Api:
     def set_settings(self, values):
         app = self._app
         changed = app.cfg.update(values or {})
-        if changed & {"hotkey_clip", "hotkey_record", "hotkey_overlay", "hotkey_clip_a", "hotkey_clip_b", "buffer_enabled"}:
+        if changed & {"hotkey_clip", "hotkey_record", "hotkey_overlay", "hotkey_clip_a", "hotkey_clip_b", "hotkey_marker", "buffer_enabled"}:
             app.bind_hotkeys()
         if changed & {"cleanup_days", "cleanup_gb", "clips_dir"}:
             threading.Thread(target=app.run_cleanup, daemon=True).start()
@@ -769,6 +824,15 @@ class Api:
 
     def set_favorites(self, paths, value):
         return sum(1 for path in list(paths or [])[:5000] if self._app.library.set_favorite(path, value))
+
+    def syv_state(self):
+        """Состояние Steal Your Voice (для настроек): запущена ли панель и какие в ней пресеты."""
+        self._app.syv.refresh(wait=True)
+        return self._app.syv.state
+
+    def set_markers(self, path, seconds):
+        """Отметки в клипе — из окна клипа (поставить, убрать)."""
+        return self._app.library.set_markers(path, seconds)
 
     def rename_clip(self, path, new_name):
         return self._app.library.rename(path, new_name or "")

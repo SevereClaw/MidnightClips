@@ -9,6 +9,7 @@ import glob
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -168,6 +169,7 @@ class Recorder:
         self._enc_crashes = []            # когда оно падало
         self._avoid_mux = False           # запись одним движком (без ffmpeg) здесь не работает
         self._mux_crashes = []
+        self.markers = []                 # отметки «вот тут было круто» (время, time.time()) — в буфере и в записи
         self.fps_real = None              # сколько кадров в секунду реально успевает записываться
         self.fps_target = 0
         self.slow = False                 # захват не успевает за выбранной частотой
@@ -244,6 +246,35 @@ class Recorder:
         threading.Thread(
             target=self._save_clip, args=(title, seconds), daemon=True, name="save-clip"
         ).start()
+
+    def add_marker(self):
+        """Отметка в буфере и в идущей записи. False — отмечать нечего (захват не идёт)."""
+        if self.state != "on" or (not self.cfg["buffer_enabled"] and self.recording_since is None):
+            return False
+        now = time.time()
+        keep = int(self.cfg["buffer_seconds"]) + 120
+        oldest = min(now - keep, (self.recording_since or now) - 10)
+        self.markers = [m for m in self.markers if m >= oldest] + [now]
+        return True
+
+    def _markers_for(self, out_path, ended):
+        """Отметки внутри сохранённого файла — секунды от его начала. Конец файла — момент нажатия."""
+        if not self.markers:
+            return []
+        try:
+            text = subprocess.run([self.ffmpeg, "-hide_banner", "-i", out_path], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30,
+                                  creationflags=NO_WINDOW).stderr.decode("utf-8", "replace")
+            found = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
+            duration = int(found.group(1)) * 3600 + int(found.group(2)) * 60 + float(found.group(3))
+        except (OSError, subprocess.SubprocessError, AttributeError, ValueError):
+            return []
+        out = []
+        for m in self.markers:
+            at = duration - (ended - m)
+            if 0 <= at <= duration:
+                out.append(round(at, 2))
+        return out
 
     def toggle_recording(self, title=""):
         if self.recording_since is None:
@@ -1528,6 +1559,7 @@ class Recorder:
             self.on_event("error", {"text": "Захват ещё не запущен — в буфере пусто."})
             return
         seconds = int(seconds or self.cfg["buffer_seconds"])
+        pressed = time.time()
         self.on_event("saving", {})
         with self._save_lock:
             closed = self._closed_segments()
@@ -1538,8 +1570,8 @@ class Recorder:
             out_path = self._output_path(title, "Клип")
             ok = self._mux(chosen, out_path, skip)
         if ok:
-            self.on_event("saved", {"path": out_path, "kind": "clip",
-                                    "seconds": length})
+            self.on_event("saved", {"path": out_path, "kind": "clip", "seconds": length,
+                                    "markers": self._markers_for(out_path, pressed)})
         else:
             self._remove(out_path)
             self.on_event("error", {"text": "Не получилось сохранить клип. Подробности — в журнале."})
@@ -1548,6 +1580,7 @@ class Recorder:
         first, title = self._rec_first, self._rec_title
         if first is None:
             return
+        pressed = time.time()
         with self._save_lock:
             if self._rec_first is None:
                 return
@@ -1565,8 +1598,8 @@ class Recorder:
         self.on_event("recording", {"on": False})
         self._emit_state()
         if ok:
-            self.on_event("saved", {"path": out_path, "kind": "recording",
-                                    "seconds": len(chosen) * SEGMENT})
+            self.on_event("saved", {"path": out_path, "kind": "recording", "seconds": len(chosen) * SEGMENT,
+                                    "markers": self._markers_for(out_path, pressed)})
         else:
             if out_path:
                 self._remove(out_path)

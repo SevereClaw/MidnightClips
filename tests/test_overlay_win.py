@@ -55,9 +55,16 @@ if __name__ == "__main__":
                           {"id": "copy", "title": "Скопировать", "sub": "Последний клип — и Ctrl+V в Discord", "active": True, "icon": "copy"},
                           {"id": "clips", "title": "Галерея", "sub": "Сегодня клипов: 4", "active": True, "icon": "grid"},
                           {"id": "settings", "title": "Настройки", "sub": "Открыть настройки программы", "active": True, "icon": "gear"}],
-                "sounds": [{"id": "snd:@game", "name": "Игра", "on": True},
-                           {"id": "snd:discord.exe", "name": "Discord", "on": flags["discord"]},
-                           {"id": "snd:mp3player.exe", "name": "Mp3player", "on": False}]}
+                "rows": [{"label": "ЗВУК В ЗАПИСИ", "items": [
+                            {"id": "snd:@game", "name": "Игра", "on": True},
+                            {"id": "snd:discord.exe", "name": "Discord", "on": flags["discord"]},
+                            {"id": "snd:mp3player.exe", "name": "Mp3player", "on": False}]},
+                         {"label": "STEAL YOUR VOICE", "items": [
+                            {"id": "syv:mute", "name": "Микрофон везде", "on": True},
+                            {"id": "syv:fx", "name": "Голос: Демон", "on": False},
+                            {"id": "syv:preset:ЧИСТЫЙ", "name": "Чистый", "active": True},
+                            {"id": "syv:preset:СТРИМ", "name": "Стрим", "active": False},
+                            {"id": "syv:preset:Гирсешен", "name": "Гирсешен", "active": False}]}]}
 
     def action(ident):
         pressed.append(ident)

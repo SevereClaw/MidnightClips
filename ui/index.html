@@ -88,6 +88,9 @@
         <label class="row"><span>Набор для записи
           <small>Включается сам, когда начинаете запись, и выключается, когда останавливаете. При переключении буфер повтора начинается заново, а запись стартует на пару секунд позже</small></span>
           <select data-key="preset_record" id="selPresetRecord"></select></label>
+        <label class="row" id="rowSyvPreset" hidden><span>Пресет Steal Your Voice на время записи
+          <small>Голос на время записи — например, «Стрим». После записи Steal Your Voice сам вернёт прежние настройки</small></span>
+          <select data-key="syv_preset_record" id="selSyvPreset"></select></label>
       </div>
 
       <div class="panel">
@@ -207,6 +210,10 @@
           <small>Быстрые кнопки прямо во время игры: клип, запись, буфер, микрофон. В запись меню не попадает. В играх в эксклюзивном полноэкранном режиме его не видно</small>
           <small class="warn" id="warnOverlay" hidden>Сочетание занято другой программой</small></span>
           <button class="hotkey" data-hotkey="hotkey_overlay"></button></div>
+        <div class="row"><span>Поставить отметку
+          <small>Клип не сохраняется: в будущем клипе или записи это место будет отмечено флажком на шкале. Удобно для длинных записей</small>
+          <small class="warn" id="warnMarker" hidden>Сочетание занято другой программой</small></span>
+          <button class="hotkey" data-hotkey="hotkey_marker"></button></div>
       </div>
 
       <div class="panel">
@@ -344,6 +351,7 @@
       <button class="cbtn" id="cutDelete" title="Убрать выбранный кусок из клипа (Delete)">Убрать кусок</button>
       <button class="cbtn" id="trimSetStart" title="Начало куска — здесь (I)">[ Начало здесь</button>
       <button class="cbtn" id="trimSetEnd" title="Конец куска — здесь (O)">Конец здесь ]</button>
+      <button class="cbtn" id="markAdd" title="Поставить отметку здесь (B). Q и E — к предыдущей и следующей отметке, правая кнопка по флажку — убрать">⚑ Отметка</button>
       <button class="cbtn" id="cutUndo" title="Отменить (Ctrl+Z)">↶</button>
       <button class="cbtn" id="trimReset" title="Вернуть весь клип одним куском">Весь клип</button>
       <button class="cbtn cbtn-add" id="cutToMontage" title="Добавить оставленные куски в монтаж — потом их можно склеить с кусками других клипов">＋ В монтаж</button>
@@ -368,7 +376,7 @@
       </div>
       <div class="mt-list" id="mtList"></div>
     </div>
-    <small class="ed-keys">Пробел — пауза · ← → — 5 с (с Shift — 1 с) · , . — по кадру · S — разрезать · Delete — убрать кусок · I и O — начало и конец куска · Ctrl+Z — отменить · F — на весь экран · PageUp и PageDown — другой клип</small>
+    <small class="ed-keys">Пробел — пауза · ← → — 5 с (с Shift — 1 с) · , . — по кадру · S — разрезать · Delete — убрать кусок · B — отметка, Q / E — к отметкам · I и O — начало и конец куска · Ctrl+Z — отменить · F — на весь экран · PageUp и PageDown — другой клип</small>
     <div class="job" id="edJob" hidden>
       <div class="job-bar"><i id="edJobFill"></i></div>
       <span id="edJobText"></span>

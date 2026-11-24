@@ -70,6 +70,10 @@ jobs:
         run: python tests/test_montage.py
         env:
           PYTHONUTF8: "1"
+      - name: Проверить связь со Steal Your Voice
+        run: python tests/test_syv_win.py
+        env:
+          PYTHONUTF8: "1"
       - name: Проверить окно без рамки (перетаскивание, растягивание, разворачивание)
         run: python tests/test_window_win.py
         env:

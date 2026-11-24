@@ -13,7 +13,7 @@ import threading
 from . import winutil
 
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
-EVENTS = ("saved", "rec_on", "rec_off", "error")
+EVENTS = ("saved", "rec_on", "rec_off", "error", "marker")
 MAX_SECONDS = 8
 
 

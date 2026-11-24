@@ -65,6 +65,8 @@ DEFAULTS = {
     "hotkey_clip_b": "Alt+F7",  # ещё короче
     "clip_b_seconds": 15,
     "hotkey_overlay": "Alt+Z",  # меню поверх игры
+    "hotkey_marker": "Alt+F6",
+    "syv_preset_record": "",    # пресет Steal Your Voice на время записи; пусто — не трогать  # отметка «вот тут было круто» — видна на шкале клипа
     "folder_per_game": True,
     "sound": True,
     "toast": True,
@@ -75,6 +77,7 @@ DEFAULTS = {
     "sound_rec_on": "",
     "sound_rec_off": "",
     "sound_error": "",
+    "sound_marker": "",
     "cursor": True,             # показывать курсор мыши в записи
     "indicator": True,          # красная точка поверх экрана, пока идёт запись
     "indicator_corner": "tl",   # tl / tr / bl / br

@@ -412,27 +412,33 @@ class Toast(threading.Thread):
                 elif tile.get("icon"):
                     menu_icon(canvas, tile["icon"], x + tw - skew - S(62), y + th // 2 + S(14), S(24), ink, fill)
 
-            # звук программ в записи: выключатели в одну строку под плитками
-            sounds = model.get("sounds") or []
+            # строки выключателей под плитками: звук программ в записи, Steal Your Voice
+            rows_model = model.get("rows") or ([{"label": "ЗВУК В ЗАПИСИ", "items": model["sounds"]}] if model.get("sounds") else [])
             canvas.group = "g_snd"
-            if sounds and tiles:
-                sy = y0 + rows * (th + gap) - gap + S(46)
-                if sy + S(18) < h - S(150):
-                    item = canvas.create_text(x0 + S(22), sy, text="ЗВУК В ЗАПИСИ", anchor="w", fill=BLACK,
+            rows_end = y0 + rows * (th + gap) - gap
+            if tiles:
+                sy = rows_end + S(46)
+                right = x0 + cols * tw + (cols - 1) * gap
+                for row in rows_model:
+                    items = row.get("items") or []
+                    if not items or sy + S(18) > h - S(110):
+                        continue
+                    item = canvas.create_text(x0 + S(22), sy, text=row.get("label", ""), anchor="w", fill=BLACK,
                                               font=("Arial Black", S(11), "italic"))
                     x2 = canvas.bbox(item)[2]
                     canvas.create_polygon(x0 + S(10), sy - S(16), x2 + S(26), sy - S(16), x2 + S(16), sy + S(16), x0, sy + S(16),
                                           fill=YELLOW, outline="")
                     canvas.tag_raise(item)
                     px = x2 + S(40)
-                    right = x0 + cols * tw + (cols - 1) * gap
-                    for snd in sounds:
-                        on = bool(snd.get("on"))
+                    for snd in items:
+                        switch = "on" in snd               # выключатель; без него — кнопка (пресет), включённая подсвечена
+                        on = bool(snd.get("on")) if switch else bool(snd.get("active"))
                         hover = menu["hover"] == snd["id"]
                         flash = snd["id"] == flash_id
                         fill = WHITE if flash else (YELLOW if on else GREY)
                         ink = BLACK if (on or flash) else SOFT
-                        label = canvas.create_text(px + S(58), sy, text=snd.get("name", ""), anchor="w", fill=ink,
+                        lx = px + (S(58) if switch else S(18))
+                        label = canvas.create_text(lx, sy, text=snd.get("name", ""), anchor="w", fill=ink,
                                                    font=("Segoe UI", S(12), "bold"))
                         lx2 = canvas.bbox(label)[2]
                         pw = lx2 - px + S(22)
@@ -446,25 +452,27 @@ class Toast(threading.Thread):
                                                   px + d, bottom + d, fill=WHITE, outline="")
                         canvas.create_polygon(px + S(10), top, px + pw, top, px + pw - S(10), bottom, px, bottom,
                                               fill=fill, outline="")
-                        # маленький выключатель
-                        sw, sh = S(36), S(20)
-                        kx0, ky0 = px + S(14), sy - sh // 2
-                        track = BLACK if on else "#555555"
-                        canvas.create_oval(kx0, ky0, kx0 + sh, ky0 + sh, fill=track, outline="")
-                        canvas.create_oval(kx0 + sw - sh, ky0, kx0 + sw, ky0 + sh, fill=track, outline="")
-                        canvas.create_rectangle(kx0 + sh // 2, ky0, kx0 + sw - sh // 2, ky0 + sh, fill=track, outline="")
-                        knob = kx0 + sw - sh if on else kx0
-                        m = S(3)
-                        canvas.create_oval(knob + m, ky0 + m, knob + sh - m, ky0 + sh - m, fill=YELLOW if on else SOFT, outline="")
-                        if not on:   # выключенная программа — имя зачёркнуто
-                            canvas.create_line(px + S(58), sy, lx2, sy, fill=ink, width=max(2, S(2)))
+                        if switch:   # маленький выключатель
+                            sw, sh = S(36), S(20)
+                            kx0, ky0 = px + S(14), sy - sh // 2
+                            track = BLACK if on else "#555555"
+                            canvas.create_oval(kx0, ky0, kx0 + sh, ky0 + sh, fill=track, outline="")
+                            canvas.create_oval(kx0 + sw - sh, ky0, kx0 + sw, ky0 + sh, fill=track, outline="")
+                            canvas.create_rectangle(kx0 + sh // 2, ky0, kx0 + sw - sh // 2, ky0 + sh, fill=track, outline="")
+                            knob = kx0 + sw - sh if on else kx0
+                            m = S(3)
+                            canvas.create_oval(knob + m, ky0 + m, knob + sh - m, ky0 + sh - m, fill=YELLOW if on else SOFT, outline="")
+                            if not on:   # выключено — имя зачёркнуто
+                                canvas.create_line(lx, sy, lx2, sy, fill=ink, width=max(2, S(2)))
                         canvas.tag_raise(label)
                         menu["boxes"].append((px, top, px + pw, bottom, snd["id"]))
                         px += pw + S(14)
+                    rows_end = sy + S(19)
+                    sy += S(50)
 
             # последний клип и подсказка
             canvas.group = "g_last"
-            ly = h - S(128) + int((1 - e) * S(60))
+            ly = max(h - S(128), rows_end + S(34)) + int((1 - e) * S(60))   # строки выключателей могли занять место
             last = model.get("last", "")
             if last:
                 item = canvas.create_text(x0 + S(22), ly, text="ПОСЛЕДНИЙ КЛИП", anchor="w", fill=BLACK,
@@ -474,7 +482,7 @@ class Toast(threading.Thread):
                                       fill=YELLOW, outline="")
                 canvas.tag_raise(item)
                 canvas.create_text(x2 + S(40), ly, text=last, anchor="w", fill=WHITE, font=("Segoe UI", S(13), "bold"))
-            canvas.create_text(w // 2, h - S(66), text=model.get("hint", ""), fill=SOFT, font=("Segoe UI", S(12)))
+            canvas.create_text(w // 2, max(h - S(66), ly + S(52)), text=model.get("hint", ""), fill=SOFT, font=("Segoe UI", S(12)))
             menu["blink"] = None
             menu["tiles"] = len(tiles)
             menu["pose"] = {}

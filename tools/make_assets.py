@@ -58,6 +58,7 @@ if __name__ == "__main__":
     icon()
     tone("saved", [(784, 0.09), (1047, 0.09), (1568, 0.22)])
     tone("rec_on", [(660, 0.10), (990, 0.18)])
+    tone("marker", [(1319, 0.05), (1760, 0.09)], volume=0.26)
     tone("rec_off", [(990, 0.10), (660, 0.18)])
     tone("error", [(220, 0.14), (175, 0.26)])
     print("готово:", sorted(os.listdir(ROOT)))

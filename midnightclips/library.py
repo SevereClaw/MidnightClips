@@ -64,8 +64,11 @@ class Library:
             marks = self._load_marks()
             entry = dict(marks.get(self._rel(path), {}))
             entry.update(values)
-            if entry.get("fav") or entry.get("tags"):
-                marks[self._rel(path)] = {"fav": bool(entry.get("fav")), "tags": entry.get("tags") or []}
+            if entry.get("fav") or entry.get("tags") or entry.get("markers"):
+                clean = {"fav": bool(entry.get("fav")), "tags": entry.get("tags") or []}
+                if entry.get("markers"):
+                    clean["markers"] = entry["markers"]
+                marks[self._rel(path)] = clean
             else:
                 marks.pop(self._rel(path), None)
             self._save_marks()
@@ -82,6 +85,18 @@ class Library:
                 seen.add(tag.lower())
                 clean.append(tag)
         return self._set_mark(path, tags=clean[:8])
+
+    def set_markers(self, path, seconds):
+        """Отметки в клипе (секунды от начала): поставлены клавишей во время игры или в окне клипа."""
+        clean = []
+        for value in list(seconds or [])[:300]:
+            try:
+                value = round(float(value), 2)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0 and all(abs(value - v) > 0.3 for v in clean):
+                clean.append(value)
+        return self._set_mark(path, markers=sorted(clean))
 
     def forget(self, path):
         """Клип удалён — убрать его пометки."""
@@ -172,6 +187,7 @@ class Library:
                 clips.append({
                     "favorite": bool(mark.get("fav")),
                     "tags": list(mark.get("tags") or []),
+                    "markers": list(mark.get("markers") or []),
                     "path": path,
                     "name": os.path.splitext(name)[0],
                     "game": "" if rel == "." else rel.split(os.sep)[0],
