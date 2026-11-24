@@ -329,6 +329,22 @@ select { padding-right: 6px; max-width: 320px; }
 .row small { display: block; font-weight: 400; color: #555; font-size: 12.5px; margin-top: 2px; max-width: 420px; overflow-wrap: anywhere; }
 .row small.warn { color: var(--red); font-weight: 700; }
 .row-buttons { display: flex; gap: 10px; }
+.drives { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; max-width: 460px; }
+.drive {
+  background: var(--white); border: 3px solid var(--black); padding: 6px 12px 7px; text-align: left;
+  font-weight: 700; transform: skewX(-8deg); min-width: 128px; line-height: 1.2;
+}
+.drive small { display: block; font-weight: 400; font-size: 11.5px; color: #555; margin: 0; }
+.drive:hover { background: var(--orange); }
+.drive.is-current { background: var(--black); color: var(--yellow); cursor: default; }
+.drive.is-current small { color: var(--white); }
+.drive-fill { display: block; height: 4px; margin-top: 5px; background: #ddd; }
+.drive-fill i { display: block; height: 100%; background: var(--black); }
+.drive.is-current .drive-fill { background: #555; }
+.drive.is-current .drive-fill i { background: var(--yellow); }
+.drive.is-low .drive-fill i { background: var(--red); }
+.move-box { padding: 12px 0 4px; }
+.move-box .job span { min-width: 0; flex: 0 1 auto; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-top { align-items: flex-start; }
 .audio-list { border: 3px solid var(--black); margin: 10px 0 4px; background: var(--white); }
 .audio-row {

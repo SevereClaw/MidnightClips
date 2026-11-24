@@ -97,6 +97,7 @@ class Config:
         self.path = path or os.path.join(data_dir(), "settings.json")
         self._lock = threading.Lock()
         self.data = dict(DEFAULTS)
+        self.clips_dir_missing = ""
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
@@ -110,9 +111,20 @@ class Config:
         return self.data[key]
 
     def clips_dir(self):
+        """Папка клипов. Если выбранная недоступна (флешку или диск отключили) — клипы временно
+        идут в стандартную папку, чтобы не пропасть; clips_dir_missing — какая папка недоступна."""
         path = self.data["clips_dir"] or default_clips_dir()
-        os.makedirs(path, exist_ok=True)
-        return path
+        try:
+            os.makedirs(path, exist_ok=True)
+            self.clips_dir_missing = ""
+            return path
+        except OSError:
+            if not self.data["clips_dir"]:
+                raise
+            self.clips_dir_missing = path
+            fallback = default_clips_dir()
+            os.makedirs(fallback, exist_ok=True)
+            return fallback
 
     def update(self, values):
         """Возвращает множество реально изменившихся ключей."""

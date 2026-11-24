@@ -23,7 +23,28 @@ const demo = {
 };
 const demoApi = {
   get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", window_active: true, buffer_in_memory: true, buffer_mb: 99, fps_real: 59.8, fps_target: 60, slow: false, fallback: false, recording: !!demo.rec, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
-  get_settings: async () => demo.settings,
+  get_settings: async () => Object.assign(demo.settings, { clips_free: 412e9, moving: false }),
+  list_drives: async () => [
+    { root: "C:\\", label: "Windows", free: 84e9, total: 512e9, removable: false, network: false, current: !demo.settings.clips_dir },
+    { root: "D:\\", label: "Игры", free: 1.2e12, total: 2e12, removable: false, network: false, current: demo.settings.clips_dir.startsWith("D") },
+    { root: "E:\\", label: "", free: 30e9, total: 64e9, removable: true, network: false, current: demo.settings.clips_dir.startsWith("E") },
+  ],
+  use_drive: async (root) => {
+    const old = demo.settings.clips_dir_resolved;
+    Object.assign(demo.settings, { clips_dir: root + "MidnightClips", clips_dir_resolved: root + "MidnightClips" });
+    return { ok: true, error: "", settings: demo.settings, old, old_count: demo.clips.length, old_bytes: 1.4e9 };
+  },
+  use_default_folder: async () => demoApi.use_drive("C:\\Users\\you\\Videos\\"),
+  pick_folder: async () => demoApi.use_drive("D:\\Клипы\\"),
+  move_clips: async () => {
+    let n = 0;
+    const timer = setInterval(() => {
+      n += 7;
+      window.onBackendEvent("move", { percent: Math.min(n, 100), name: "P3R 2026-11-12 21-40-03.mp4" });
+      if (n >= 100) { clearInterval(timer); window.onBackendEvent("move_done", { ok: true, moved: 6, failed: 0, text: "Клипы перенесены: 6" }); }
+    }, 200);
+    return true;
+  },
   set_settings: async (v) => Object.assign(demo.settings, v),
   get_options: async () => ({ monitors: ["Монитор 1 — 2560×1440 (основной)", "Монитор 2 — 1920×1080"], mics: ["Микрофон (USB Audio)"] }),
   list_clips: async () => demo.clips,
@@ -214,6 +235,8 @@ window.onBackendEvent = (kind, data) => {
     loadClips();
   }
   else if (kind === "job_done") finishJob(data);
+  else if (kind === "move") showMove(data);
+  else if (kind === "move_done") finishMove(data);
   else if (kind === "saving") $("btnClip").classList.add("is-busy");
   else if (kind === "saved") {
     $("btnClip").classList.remove("is-busy");
@@ -843,6 +866,66 @@ $("edTrim").onclick = () => runAction("trim");
 $("edCompress").onclick = () => runAction("compress");
 $("edSend").onclick = () => runAction("send");
 
+// ---------------------------------------------------------------- где хранить клипы
+
+async function renderDrives() {
+  const list = (await api.list_drives()) || [];
+  $("rowDrives").hidden = list.length < 2;   // диск один — выбирать не из чего
+  const box = $("drives");
+  box.innerHTML = "";
+  list.forEach((d) => {
+    const b = document.createElement("button");
+    b.className = "drive" + (d.current ? " is-current" : "") + (d.free < 10 * 1073741824 ? " is-low" : "");
+    const kind = d.network ? "сетевой" : d.removable ? "съёмный" : "";
+    const name = document.createElement("span");
+    name.textContent = d.root.slice(0, 2) + (d.label ? " " + d.label : "");
+    const info = document.createElement("small");
+    info.textContent = "свободно " + fmtSize(d.free) + " из " + fmtSize(d.total) + (kind ? " · " + kind : "");
+    const fill = document.createElement("span");
+    fill.className = "drive-fill";
+    fill.innerHTML = "<i></i>";
+    fill.firstChild.style.width = Math.round(100 * (1 - d.free / Math.max(1, d.total))) + "%";
+    b.append(name, info, fill);
+    b.title = d.current ? "Клипы сохраняются на этот диск" : "Сохранять клипы в " + d.target;
+    b.onclick = () => { if (!d.current) changeFolder(api.use_drive(d.root)); };
+    box.appendChild(b);
+  });
+}
+
+async function changeFolder(request) {
+  const res = await request;
+  if (!res) return;   // окно выбора папки закрыли
+  applySettings(res.settings);
+  renderDrives();
+  if (!res.ok) { flash(res.error, true); return; }
+  if (!res.old) return;
+  loadClips();
+  flash("Новые клипы будут сохраняться в " + res.settings.clips_dir_resolved);
+  if (res.old_count > 0) {
+    const yes = await ask({
+      title: "Перенести старые клипы?",
+      text: "В прежней папке (" + res.old + ") осталось клипов: " + res.old_count + ", " + fmtSize(res.old_bytes)
+        + ". Перенести их в новую папку, чтобы они были в галерее? Избранное и теги сохранятся."
+        + (res.old_bytes > 5e9 ? " На другой диск это займёт какое-то время — запись при этом продолжается." : ""),
+      okLabel: "Перенести",
+    });
+    if (yes === true && await api.move_clips(res.old)) showMove({ percent: 0, name: "" });
+  }
+}
+
+function showMove(m) {
+  $("moveBox").hidden = false;
+  $("moveText").textContent = "Переношу" + (m.name ? ": " + m.name : " клипы…");
+  $("moveFill").style.width = (m.percent || 0) + "%";
+}
+function finishMove(result) {
+  $("moveBox").hidden = true;
+  flash(result.text, !result.ok);
+  loadClips();
+  api.get_settings().then(applySettings);
+  renderDrives();
+}
+
 // ---------------------------------------------------------------- настройки
 
 function applySettings(s) {
@@ -863,6 +946,12 @@ function applySettings(s) {
   $("kbdRec").textContent = s.hotkey_record || "кнопкой";
   $("clipLen").textContent = fmtBuffer(s.buffer_seconds);
   $("clipsDir").textContent = s.clips_dir_resolved || "";
+  $("clipsFree").textContent = s.clips_free != null ? "Свободно на диске: " + fmtSize(s.clips_free) : "";
+  $("clipsDirWarn").hidden = !s.clips_dir_missing;
+  $("clipsDirWarn").textContent = s.clips_dir_missing ? "Выбранная папка " + s.clips_dir_missing
+    + " сейчас недоступна (диск отключён?) — клипы временно сохраняются сюда" : "";
+  $("btnDefaultDir").hidden = !s.clips_dir;
+  if (s.moving) $("moveBox").hidden = false;
   $("edCompress").textContent = "Сжать до " + s.discord_limit_mb + " МБ";
   $("volText").textContent = s.sound_volume + "%" + (s.sound_volume > 100 ? " — громче исходного файла" : "");
   $("rowWindow").hidden = s.capture_target !== "window";
@@ -1203,13 +1292,16 @@ $("btnLog").onclick = () => api.open_log();
 $("btnCheckUpdate").onclick = () => api.check_update();
 $("btnUpdate").onclick = () => api.apply_update();
 $("btnRestart").onclick = () => { api.restart_capture(); flash("Перезапускаю захват"); };
-$("btnPick").onclick = async () => { applySettings(await api.pick_folder()); loadClips(); };
+$("btnPick").onclick = () => changeFolder(api.pick_folder());
+$("btnDefaultDir").onclick = () => changeFolder(api.use_default_folder());
+$("btnMoveCancel").onclick = () => { api.cancel_move(); $("moveText").textContent = "Останавливаю…"; };
 $("search").addEventListener("input", renderClips);
 document.querySelectorAll(".nav-item").forEach((item) => {
   item.onclick = () => {
     document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("is-active", n === item));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("is-active", v.id === "view-" + item.dataset.view));
     if (item.dataset.view === "clips") loadClips();
+    if (item.dataset.view === "settings") renderDrives();   // флешку могли вставить или вынуть
     syncPicked();
   };
 });
@@ -1219,6 +1311,7 @@ async function init() {
   applyState(await api.get_state());
   loadClips();
   loadPresets();
+  renderDrives();
   const options = await api.get_options();
   const mon = $("selMonitor");
   mon.innerHTML = "";

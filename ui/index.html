@@ -217,8 +217,16 @@
 
       <div class="panel">
         <h2>Файлы</h2>
-        <div class="row"><span>Папка клипов<small id="clipsDir"></small></span>
-          <button class="mini" id="btnPick">Выбрать папку</button></div>
+        <div class="row"><span>Папка клипов<small id="clipsDir"></small><small id="clipsFree"></small>
+          <small class="warn" id="clipsDirWarn" hidden></small></span>
+          <span class="row-buttons"><button class="mini" id="btnDefaultDir" hidden>Вернуть стандартную</button>
+          <button class="mini" id="btnPick">Выбрать папку</button></span></div>
+        <div class="row row-top" id="rowDrives" hidden><span>Сохранять на диск
+          <small>Клипы пойдут в папку MidnightClips на выбранном диске. Любую другую папку — кнопкой «Выбрать папку»</small></span>
+          <div class="drives" id="drives"></div></div>
+        <div class="move-box" id="moveBox" hidden>
+          <div class="job"><span id="moveText">Переношу клипы…</span><div class="job-bar"><i id="moveFill"></i></div>
+          <button class="mini" id="btnMoveCancel">Остановить</button></div></div>
         <label class="row"><span>Отдельная папка для каждой игры</span><input type="checkbox" data-key="folder_per_game"></label>
         <label class="row"><span>Удалять старые клипы
           <small>Избранное не удаляется. Клипы уходят в корзину</small></span>

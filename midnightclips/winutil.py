@@ -322,6 +322,36 @@ def recycle(path):
         return False
 
 
+def drives():
+    """Диски, на которые можно сохранять клипы: [{root, label, free, total, removable, network}].
+    Пустые картридеры и дисководы пропускаются."""
+    if not WIN:
+        return []
+    import shutil
+    import string
+    out = []
+    mask = kernel32.GetLogicalDrives()
+    for i, letter in enumerate(string.ascii_uppercase):
+        if not mask & (1 << i):
+            continue
+        root = letter + ":\\"
+        kind = kernel32.GetDriveTypeW(ctypes.c_wchar_p(root))   # 2 — съёмный, 3 — обычный, 4 — сетевой, 6 — RAM-диск
+        if kind not in (2, 3, 4, 6):
+            continue
+        try:
+            usage = shutil.disk_usage(root)
+        except OSError:
+            continue
+        name = ctypes.create_unicode_buffer(261)
+        try:
+            kernel32.GetVolumeInformationW(ctypes.c_wchar_p(root), name, 261, None, None, None, None, 0)
+        except Exception:
+            pass
+        out.append({"root": root, "label": name.value, "free": usage.free, "total": usage.total,
+                    "removable": kind == 2, "network": kind == 4})
+    return out
+
+
 def open_path(path):
     if WIN:
         os.startfile(path)  # noqa: S606

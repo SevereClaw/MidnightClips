@@ -164,7 +164,9 @@ class AudioPump(threading.Thread):
                     except (OSError, ValueError):
                         return
                     self.frames_written += take
-            extra = len(buf) // block - int(rate * 0.5)
-            if extra > 0:  # часы устройства убежали вперёд — срезаем лишнее
-                del buf[: (extra + int(rate * 0.4)) * block]
+            # Часы устройства идут чуть быстрее системных, и лишний звук копится в очереди — звук
+            # начинает отставать. Больше 150 мс не держим: срезаем лишнее, оставляя 30 мс на дрожание.
+            extra = len(buf) // block - int(rate * 0.15)
+            if extra > 0:
+                del buf[: (extra + int(rate * 0.12)) * block]
             time.sleep(0.01)

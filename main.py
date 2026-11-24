@@ -7,7 +7,7 @@ import threading
 import time
 
 from midnightclips import APP_NAME, __version__, winutil
-from midnightclips.config import CAPTURE_KEYS, Config, cache_dir, data_dir, resource_dir
+from midnightclips.config import CAPTURE_KEYS, Config, cache_dir, data_dir, default_clips_dir, resource_dir
 from midnightclips.hotkeys import Hotkeys
 from midnightclips.library import Library
 from midnightclips.recorder import Recorder, find_engine, find_ffmpeg
@@ -15,6 +15,7 @@ from midnightclips.media import MediaServer
 from midnightclips.presets import KEYS as PRESET_KEYS, VIDEO_KEYS, Presets
 from midnightclips.sounds import EVENTS as SOUND_EVENTS, SoundBank
 from midnightclips.toast import Toast
+from midnightclips import storage
 from midnightclips import tools as clip_tools
 from midnightclips.tools import ClipTools
 from midnightclips.updater import Updater
@@ -49,6 +50,7 @@ class App:
         self.library = Library(self.cfg, self.ffmpeg, cache_dir())
         self.sounds = SoundBank(self.cfg, self.ffmpeg, os.path.join(self.res, "assets"), cache_dir())
         self.media = MediaServer(self.library.inside)
+        self.mover = storage.Mover(self.on_move_event)
         self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event,
                                self.log_path)
         self.recorder = Recorder(
@@ -408,6 +410,9 @@ class App:
             if self.cfg["toast"]:
                 title = "Клип сохранён" if payload.get("kind") == "clip" else "Запись сохранена"
                 self.toast.show(title, os.path.basename(payload.get("path", "")))
+            if self.cfg.clips_dir_missing:   # выбранный диск отключён — клип ушёл в запасную папку
+                self.push("warning", {"text": "Папка %s недоступна (диск отключён?) — клип сохранён в %s" % (
+                    self.cfg.clips_dir_missing, os.path.dirname(payload.get("path", "")))})
         elif kind == "recording":
             if not payload.get("on") and self.cfg["clip_restore"]:
                 threading.Thread(target=self.restore_clip_settings, daemon=True).start()
@@ -418,6 +423,13 @@ class App:
             self.sound("error")
             if self.cfg["toast"]:
                 self.toast.show("Не получилось", payload.get("text", ""))
+        self.push(kind, payload)
+
+    def on_move_event(self, kind, payload):
+        if kind == "move_done":
+            with self.library._lock:
+                self.library._marks_dir = None   # избранное и теги переехали — перечитать
+            self.sound("saved" if payload.get("ok") else "error")
         self.push(kind, payload)
 
     def on_tool_event(self, kind, payload):
@@ -453,6 +465,10 @@ class Api:
     def get_settings(self):
         data = dict(self._app.cfg.data)
         data["clips_dir_resolved"] = self._app.cfg.clips_dir()
+        data["clips_dir_missing"] = self._app.cfg.clips_dir_missing
+        data["clips_dir_default"] = default_clips_dir()
+        data["clips_free"] = storage.free_space(data["clips_dir_resolved"])
+        data["moving"] = self._app.mover.busy
         return data
 
     def set_settings(self, values):
@@ -660,15 +676,71 @@ class Api:
         return True
 
     def pick_folder(self):
+        """Выбрать папку для клипов (на любом диске). Возвращает то же, что set_clips_dir, или None — если отменили."""
         import webview
         try:
-            result = self._app.window.create_file_dialog(webview.FOLDER_DIALOG)
+            result = self._app.window.create_file_dialog(webview.FOLDER_DIALOG, directory=self._app.cfg.clips_dir())
         except Exception:
-            result = None
-        if result:
-            folder = result[0] if isinstance(result, (list, tuple)) else result
-            self._app.cfg.update({"clips_dir": folder})
-        return self.get_settings()
+            try:
+                result = self._app.window.create_file_dialog(webview.FOLDER_DIALOG)
+            except Exception:
+                result = None
+        if not result:
+            return None
+        folder = result[0] if isinstance(result, (list, tuple)) else result
+        return self.set_clips_dir(folder)
+
+    def list_drives(self):
+        """Диски компьютера — чтобы одним нажатием сохранять клипы на другой диск."""
+        current = os.path.splitdrive(os.path.realpath(self._app.cfg.clips_dir()))[0].upper()
+        out = []
+        for d in winutil.drives():
+            d["current"] = d["root"][:2].upper() == current
+            d["target"] = storage.resolve_target(d["root"])
+            out.append(d)
+        return out
+
+    def use_drive(self, root):
+        """Сохранять клипы на этот диск — в папку MidnightClips в его корне."""
+        return self.set_clips_dir(root)
+
+    def use_default_folder(self):
+        return self.set_clips_dir(default_clips_dir())
+
+    def set_clips_dir(self, folder):
+        """Сменить папку клипов. Ответ: {ok, error, settings, old, old_count, old_bytes} — по old_count
+        интерфейс предлагает перенести уже сохранённые клипы."""
+        app = self._app
+        if app.mover.busy:
+            return {"ok": False, "error": "Сначала дождитесь, пока закончится перенос клипов.", "settings": self.get_settings()}
+        target = storage.resolve_target(folder)
+        error = storage.check_writable(target)
+        if error:
+            return {"ok": False, "error": error, "settings": self.get_settings()}
+        old = app.cfg.clips_dir()
+        if storage.same(old, target):
+            if app.cfg.clips_dir_missing:   # выбрали ту же папку, а она снова доступна
+                app.cfg.update({"clips_dir": "" if storage.same(target, default_clips_dir()) else target})
+            return {"ok": True, "error": "", "settings": self.get_settings(), "old": "", "old_count": 0, "old_bytes": 0}
+        if storage.inside(old, target):
+            return {"ok": False, "error": "Новая папка не может содержать старую — выберите другую.", "settings": self.get_settings()}
+        app.cfg.update({"clips_dir": "" if storage.same(target, default_clips_dir()) else target})
+        threading.Thread(target=app.run_cleanup, daemon=True).start()
+        info = storage.summary(old, skip=target if storage.inside(target, old) else None)
+        return {"ok": True, "error": "", "settings": self.get_settings(), "old": old,
+                "old_count": info["count"], "old_bytes": info["bytes"]}
+
+    def move_clips(self, old):
+        """Перенести клипы из прежней папки в текущую (в фоне, ход — событиями move / move_done)."""
+        app = self._app
+        new = app.cfg.clips_dir()
+        if not old or not os.path.isdir(old) or storage.same(old, new) or storage.inside(old, new):
+            return False
+        return app.mover.start(old, new)
+
+    def cancel_move(self):
+        self._app.mover.cancel()
+        return True
 
     def open_clips_folder(self):
         winutil.open_path(self._app.cfg.clips_dir())

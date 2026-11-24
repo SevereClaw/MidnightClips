@@ -31,6 +31,7 @@
 #include <objbase.h>
 #include <propidl.h>
 #include <mmdeviceapi.h>
+#include <cmath>
 #include <audioclient.h>
 #include <initguid.h>
 #include <functiondiscoverykeys_devpkey.h>
@@ -1521,9 +1522,9 @@ static const int kRate = 48000;
 static const double kAudioDelay = 0.08;   // звук отдаём с запасом 80 мс: за это время он точно успевает прийти
 static const GUID kFloatFormat = { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 static double g_t0 = 0;                    // начало общего отсчёта (0 — ещё не начался)
-static std::atomic<long long> g_audioSkip(0);
+static std::atomic<long long> g_videoSkipped(0);   // сколько кадров выброшено или пропущено: столько же звука убирается
 static int g_fps = 60;
-static void onVideoDrop() { g_audioSkip += kRate / g_fps; }
+static void onVideoDrop() { g_videoSkipped++; }
 
 static std::string narrow(const std::wstring& w) {
     if (w.empty()) return std::string();
@@ -1786,9 +1787,13 @@ struct AudioSource {
             BYTE* data = nullptr;
             UINT32 frames = 0;
             DWORD flags = 0;
-            hr = cap->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+            UINT64 devicePos = 0, qpcPos = 0;
+            hr = cap->GetBuffer(&data, &frames, &flags, &devicePos, &qpcPos);
             if (FAILED(hr)) break;
-            push((const float*)data, frames, (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+            // Время первого отсчёта порции по часам самого устройства (в единицах 100 нс того же
+            // счётчика, что и now()). Нет метки или она с ошибкой — считаем по моменту прихода.
+            const double when = (qpcPos && !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)) ? (double)qpcPos / 1e7 : 0.0;
+            push((const float*)data, frames, (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0, when);
             cap->ReleaseBuffer(frames);
         }
         if (FAILED(hr)) {   // устройство отключили или сменили — откроем заново
@@ -1798,14 +1803,34 @@ struct AudioSource {
         }
     }
 
-    void push(const float* data, UINT32 frames, bool silent) {
-        if (g_t0 == 0 || frames == 0 || now() < discardUntil) return;
-        const long long start = (long long)((now() - g_t0) * kRate) - frames;   // момент начала этой порции
+    // Очередь всё время сверяется с часами: у звуковой карты и микрофона свои часы, и они идут
+    // чуть быстрее или медленнее системных (десятки миллионных долей). Если только считать отсчёты,
+    // за несколько часов записи звук уезжает от картинки на секунду и больше — поэтому каждая порция
+    // ставится на своё настоящее время, а накопившаяся разница сразу убирается.
+    long long corrected = 0;   // сколько отсчётов поправлено (для журнала)
+    void push(const float* data, UINT32 frames, bool silent, double when) {
+        if (g_t0 == 0 || frames == 0) return;
+        const double t = now();
+        if (t < discardUntil) return;
+        // Метке устройства верим, если она правдоподобна: не из будущего и не старше полсекунды.
+        const bool stamped = when > 0 && when <= t + 0.005 && when >= t - 0.5;
+        const double begin = stamped ? when : t - (double)frames / kRate;
+        const long long start = (long long)floor((begin - g_t0) * kRate + 0.5);   // момент начала этой порции
         const long long have = (long long)(fifo.size() / 2);
         if (have == 0) frontPos = start;
         else {
-            const long long gap = start - (frontPos + have);
-            if (gap > kRate * 6 / 100) fifo.insert(fifo.end(), (size_t)std::min<long long>(gap, kRate) * 2, 0.0f);   // устройство молчало
+            const long long gap = start - (frontPos + have);   // > 0 — дыра (устройство молчало или отстаёт), < 0 — очередь убежала вперёд
+            // По метке устройства расхождение видно точно; по моменту прихода порции приходят то кучей,
+            // то с задержкой, поэтому там допуск шире.
+            const long long holeTol = stamped ? kRate * 8 / 1000 : kRate * 6 / 100;
+            const long long aheadTol = stamped ? kRate * 8 / 1000 : kRate / 10;
+            if (gap > holeTol) {
+                fifo.insert(fifo.end(), (size_t)std::min<long long>(gap, kRate * 2) * 2, 0.0f);
+                corrected += gap;
+            } else if (gap < -aheadTol) {
+                frontPos += gap;   // накопленное ставим на настоящее время; просроченное выбросит mixInto
+                corrected -= gap;
+            }
         }
         if (silent) fifo.insert(fifo.end(), (size_t)frames * 2, 0.0f);
         else fifo.insert(fifo.end(), data, data + (size_t)frames * 2);
@@ -2017,7 +2042,7 @@ static DWORD WINAPI audioThread(LPVOID) {
         InterlockedExchange(&g_audioFailed, 1);
         return 0;
     }
-    long long outPos = 0;
+    long long outPos = 0, skippedDone = 0;
     std::vector<float> mix;
     std::vector<int16_t> pcm;
     double nextRefresh = 0, nextInfo = 0;
@@ -2032,7 +2057,8 @@ static DWORD WINAPI audioThread(LPVOID) {
             std::string info;
             for (AudioSource* s : g_sources) {
                 char part[160];
-                snprintf(part, sizeof(part), " %s=%s/%lld", s->label().c_str(), s->cap ? "on" : "off", s->captured);
+                snprintf(part, sizeof(part), " %s=%s/%lld%s", s->label().c_str(), s->cap ? "on" : "off", s->captured,
+                         s->corrected ? (" sync=" + std::to_string(s->corrected)).c_str() : "");
                 info += part;
             }
             std::lock_guard<std::mutex> lock(g_audioInfoLock);
@@ -2040,7 +2066,13 @@ static DWORD WINAPI audioThread(LPVOID) {
             nextInfo = now() + 1.0;
         }
         if (g_t0 != 0) {
-            outPos += g_audioSkip.exchange(0);   // из видео выбросили кадры — выбрасываем столько же звука
+            // Из видео выбросили кадры — выбрасываем столько же звука. Считаем от общего числа кадров,
+            // а не по кадру: 48000 не делится на 144 нацело, и округление копилось бы.
+            const long long skipped = g_videoSkipped.load();
+            if (skipped != skippedDone) {
+                outPos += skipped * kRate / g_fps - skippedDone * kRate / g_fps;
+                skippedDone = skipped;
+            }
             const long long target = (long long)((now() - g_t0 - kAudioDelay) * kRate);
             const long long due = std::min<long long>(target - outPos, kRate);
             if (due > 0) {
@@ -2357,7 +2389,12 @@ int wmain(int argc, wchar_t** argv) {
         if (late > maxLate) maxLate = late;
         if (late > totalMaxLate) totalMaxLate = late;
         if (late > 0.002) lateOver2++;
-        if (late > 0.25) n = (long long)((now() - t0) * a.fps);   // система подвисала — не догоняем пачкой
+        if (late > 0.25) {   // система подвисала — не догоняем пачкой
+            const long long caught = (long long)((now() - t0) * a.fps);
+            // Пропущенных кадров в видео нет, а звук идёт по часам — столько же выбрасываем и из звука,
+            // иначе после каждой заминки звук отставал бы от картинки на её длину.
+            if (caught > n) { g_videoSkipped += caught - n; n = caught; }
+        }
 
         if (a.test) {
             FramePtr fresh = g_queue.acquire();
