@@ -24,6 +24,7 @@ SEGMENT = 2  # секунд в одном кусочке
 MEMORY_LIMIT_MB = 768   # буфер больше этого в режиме «авто» держим на диске
 CONCAT_LIMIT = 24000  # длиннее — склеиваем через общий файл
 TEST = bool(os.environ.get("MC_TEST_SOURCE"))  # проверка без Windows
+ENGINE_EXE = "mccap.exe"   # свой движок захвата экрана и звука
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 ABOVE_NORMAL = 0x00008000 if sys.platform == "win32" else 0   # приоритет процесса «выше среднего»
 
@@ -99,7 +100,7 @@ def find_engine(resource_dir):
     if getattr(sys, "frozen", False):
         places.insert(0, os.path.dirname(sys.executable))
     for place in places:
-        path = os.path.join(place, "mccap.exe")
+        path = os.path.join(place, ENGINE_EXE)
         if os.path.isfile(path):
             return path
     return None
@@ -751,6 +752,8 @@ class Recorder:
         rows = {}
         for key, value in (data.items() if isinstance(data, dict) else []):
             key = str(key).strip().lower()
+            if key == ENGINE_EXE:   # движок захвата не звучит — его строка могла остаться от старых версий
+                continue
             try:
                 if isinstance(value, dict):
                     rows[key] = (bool(value.get("on", True)), max(0, min(200, int(value.get("vol", 100)))))
@@ -856,7 +859,9 @@ class Recorder:
                                  timeout=8, creationflags=NO_WINDOW).stdout.decode("utf-8", "replace")
         except (OSError, subprocess.SubprocessError):
             return []
-        return sorted({line[4:].strip() for line in out.splitlines() if line.startswith("APP ") and line[4:].strip()})
+        apps = {line[4:].strip() for line in out.splitlines() if line.startswith("APP ") and line[4:].strip()}
+        apps.discard(ENGINE_EXE)   # старый движок мог выдать сам себя (его захват звука — тоже «сеанс»)
+        return sorted(apps)
 
     def _start_engine(self, gpu=True, audio=False, allow_window=True, encode=None, mux=False):
         """Запустить mccap и дождаться строки «READY ширина высота fps»."""

@@ -1846,6 +1846,7 @@ function appVolumes() {
   try { raw = JSON.parse(settings.app_volumes || "{}") || {}; } catch (e) { raw = {}; }
   const rows = {};
   Object.keys(raw).forEach((k) => {
+    if (k.toLowerCase() === "mccap.exe") return;   // движок захвата не звучит; строка могла остаться от старых версий
     const v = raw[k];
     rows[k] = (v && typeof v === "object") ? { on: v.on !== false, vol: parseInt(v.vol, 10) || 0 } : { on: true, vol: parseInt(v, 10) || 0 };
   });

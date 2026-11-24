@@ -1598,11 +1598,28 @@ static std::set<DWORD> sessionPids() {
 
 // «Корневые» процессы со звуком: у программы из нескольких процессов (браузер, Discord) берётся
 // самый верхний с тем же именем — захват идёт сразу по всему его дереву процессов.
+// Имя своего exe (mccap.exe) строчными буквами.
+static const std::wstring& ownExeName() {
+    static std::wstring name = [] {
+        wchar_t buf[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        std::wstring s(buf);
+        size_t slash = s.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) s = s.substr(slash + 1);
+        for (auto& c : s) c = (wchar_t)towlower(c);
+        return s;
+    }();
+    return name;
+}
+
 static std::set<DWORD> audioRoots(const std::map<DWORD, ProcInfo>& procs, DWORD skipA, DWORD skipB) {
     std::set<DWORD> roots;
     for (DWORD pid : sessionPids()) {
         auto it = procs.find(pid);
         if (it == procs.end() || pid == skipA || pid == skipB) continue;
+        // Сам движок не звучит, но его захват звука (loopback) Windows считает звуковым сеансом.
+        // Без этой проверки идущая запись попадала в список программ как «Mccap».
+        if (it->second.exe == ownExeName()) continue;
         DWORD r = pid;
         for (int depth = 0; depth < 32; depth++) {
             auto cur = procs.find(r);
