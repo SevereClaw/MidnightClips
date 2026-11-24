@@ -199,9 +199,10 @@ class Library:
         clips.sort(key=lambda c: c["mtime"], reverse=True)
         return clips
 
-    def thumb(self, path):
-        """Вернуть {'image': data-URL, 'duration': секунды} — кадр делает ffmpeg и кладёт в кэш."""
-        if not self.inside(path):
+    def thumb(self, path, force=False):
+        """Вернуть {'image': data-URL, 'duration': секунды} — кадр делает ffmpeg и кладёт в кэш.
+        force — файл вне папки клипов, но его можно показывать (видео, добавленное в монтаж)."""
+        if not force and not self.inside(path):
             return None
         try:
             stat = os.stat(path)

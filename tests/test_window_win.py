@@ -72,6 +72,10 @@ def check(window):
         winutil.minimize(hwnd)
         time.sleep(0.4)
         assert ctypes.windll.user32.IsIconic(hwnd), "не свернулось"
+        result["step"] = "перетаскивание файлов"
+        from webview.dom import DOMEventHandler   # то же, чем программа принимает видео из Проводника
+        window.events.loaded.wait(10)
+        window.dom.document.events.drop += DOMEventHandler(lambda e: None, True, True)
         result["ok"] = True
         print("ОКНО БЕЗ РАМКИ: OK", flush=True)
     except Exception as exc:  # noqa: BLE001

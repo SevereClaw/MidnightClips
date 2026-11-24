@@ -518,28 +518,61 @@ input.vol::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height:
 .cbtn-add { background: var(--white); color: var(--black); box-shadow: inset 0 0 0 3px var(--black); }
 #cutUndo { font-size: 17px; padding: 0 11px; }
 
-/* монтаж: куски из разных клипов, которые склеятся в один ролик */
-.montage { border-top: 4px solid var(--black); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; flex: none; }
-.mt-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.mt-head strong { font-family: var(--display); font-style: italic; font-size: 18px; text-transform: uppercase; background: var(--black); color: var(--yellow); padding: 0 10px; transform: skewX(-10deg); }
-.mt-head span { font-weight: 700; }
-.mt-head small { color: #4d4400; font-size: 12px; flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mt-head .mini-quiet { margin-left: 0; }
-.mt-list { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 8px; }
-.mt-card {
-  flex: none; width: 176px; background: var(--black); color: var(--white); position: relative; cursor: grab;
-  border: 3px solid var(--black); user-select: none;
+/* ------------------------------------------------ монтаж: дорожка, как в видеоредакторе */
+
+.nav-count { display: inline-block; margin-left: 8px; background: var(--yellow); color: var(--black); font-size: 13px; padding: 0 7px; transform: skewX(-10deg); vertical-align: middle; }
+.nav-item.is-active .nav-count { background: var(--black); color: var(--yellow); }
+.view-mv { display: none; }
+.view-mv.is-active { display: flex; flex-direction: column; gap: 10px; }
+.view-mv .view-head { margin-bottom: 2px; flex: none; }
+.mv-screen { position: relative; flex: none; height: clamp(180px, 36vh, 460px); background: #000; border: 4px solid var(--black); cursor: pointer; }
+#mvVideo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.mv-hello { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #bbb; font-size: 15px; pointer-events: none; text-align: center; }
+.mv-hello b { font-family: var(--display); font-style: italic; font-size: 24px; color: var(--yellow); }
+.mv-controls { display: flex; align-items: center; gap: 8px; flex: none; }
+.mv-controls .vol { width: 150px; }
+.mv-zoom-label { font-weight: 700; font-size: 13px; }
+.mv-timeline { position: relative; flex: none; background: var(--black); border: 4px solid var(--black); overflow-x: auto; overflow-y: hidden; min-height: 112px; }
+.mv-timeline::-webkit-scrollbar { height: 12px; }
+.mv-timeline::-webkit-scrollbar-thumb { background: var(--yellow); }
+.mv-timeline.is-target { box-shadow: 0 0 0 4px var(--orange); }
+.mv-inner { position: relative; height: 104px; min-width: 100%; }
+.mv-ruler { position: absolute; left: 0; right: 0; top: 0; height: 20px; cursor: pointer; }
+.mv-ruler span { position: absolute; top: 0; height: 8px; border-left: 2px solid var(--yellow); }
+.mv-ruler span em { position: absolute; left: 4px; top: 2px; font-style: normal; font-size: 11px; font-weight: 700; color: var(--yellow); white-space: nowrap; }
+.mv-track { position: absolute; left: 0; right: 0; top: 24px; height: 74px; cursor: pointer; touch-action: none; }
+.mv-block {
+  position: absolute; top: 0; height: 100%; background: #333 0 0 / cover no-repeat; border: 3px solid var(--black);
+  outline: 3px solid var(--yellow); outline-offset: -6px; overflow: hidden; cursor: grab; touch-action: none;
 }
-.mt-card.is-current { border-color: var(--orange); }
-.mt-card.is-drag { opacity: .4; }
-.mt-card.is-over { box-shadow: -7px 0 0 var(--orange); }
-.mt-thumb { height: 58px; background: #333 center / cover no-repeat; position: relative; }
-.mt-thumb em { position: absolute; left: 0; top: 0; background: var(--yellow); color: var(--black); font-family: var(--display); font-style: italic; font-size: 12px; padding: 0 7px; }
-.mt-thumb b { position: absolute; right: 0; bottom: 0; background: var(--black); color: var(--yellow); font-size: 11px; padding: 1px 6px; }
-.mt-name { font-size: 12px; font-weight: 700; padding: 4px 6px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mt-range { font-size: 11px; color: #bbb; padding: 0 6px 5px; font-variant-numeric: tabular-nums; }
-.mt-x { position: absolute; right: 0; top: 0; width: 24px; height: 22px; border: 0; background: var(--black); color: var(--white); font-weight: 700; padding: 0; }
-.mt-x:hover { background: var(--red); }
+.mv-block.is-sel { outline-color: var(--orange); outline-width: 4px; }
+.mv-block.is-moving { opacity: .75; z-index: 6; cursor: grabbing; box-shadow: 0 8px 0 rgba(0,0,0,.5); }
+.mv-block b { position: absolute; left: 14px; top: 6px; max-width: calc(100% - 44px); background: var(--black); color: var(--white); font-size: 12px; padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.mv-block em { position: absolute; left: 14px; bottom: 6px; background: var(--yellow); color: var(--black); font-family: var(--display); font-size: 11px; padding: 0 6px; font-style: italic; pointer-events: none; }
+.mv-block.is-sel em { background: var(--orange); }
+.mv-block .mv-x { position: absolute; right: 8px; top: 6px; width: 22px; height: 20px; border: 0; padding: 0; background: var(--black); color: var(--white); font-weight: 700; display: none; }
+.mv-block:hover .mv-x, .mv-block.is-sel .mv-x { display: block; }
+.mv-block .mv-x:hover { background: var(--red); }
+.mv-h { position: absolute; top: 0; bottom: 0; width: 12px; background: var(--yellow); cursor: ew-resize; z-index: 2; }
+.mv-h::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 16px; margin-top: -8px; border-left: 2px solid var(--black); border-right: 2px solid var(--black); }
+.mv-h.l { left: 0; } .mv-h.r { right: 0; }
+.mv-block.is-sel .mv-h { background: var(--orange); }
+.mv-drop { position: absolute; top: 18px; height: 86px; width: 6px; margin-left: -3px; background: var(--orange); z-index: 7; pointer-events: none; box-shadow: 0 0 0 2px var(--black); }
+.mv-playhead { position: absolute; top: 0; bottom: 0; width: 0; z-index: 8; pointer-events: none; }
+.mv-playhead::before { content: ""; position: absolute; left: -2px; top: 14px; bottom: 0; width: 4px; background: var(--white); box-shadow: 0 0 0 2px var(--black); }
+.mv-playhead i { position: absolute; left: -9px; top: 2px; border-style: solid; border-width: 12px 9px 0 9px; border-color: var(--white) transparent transparent transparent; }
+.mv-placeholder { position: absolute; left: 0; right: 0; top: 24px; height: 74px; display: flex; align-items: center; justify-content: center; color: #bbb; font-weight: 700; border: 3px dashed #555; pointer-events: none; }
+.mv-bin-head { display: flex; align-items: baseline; gap: 14px; margin-top: 6px; }
+.mv-bin-head h2 { font-family: var(--display); font-style: italic; font-size: 22px; margin: 0; }
+.mv-bin-head small { color: #4d4400; }
+.mv-bin { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; padding-bottom: 20px; }
+.mv-card { background: var(--black); color: var(--white); border: 3px solid var(--black); cursor: grab; position: relative; user-select: none; }
+.mv-card:hover { border-color: var(--orange); }
+.mv-card .mv-thumb { height: 86px; background: #333 center / cover no-repeat; position: relative; }
+.mv-card .mv-thumb em { position: absolute; right: 0; bottom: 0; background: var(--black); color: var(--yellow); font-size: 11px; font-style: normal; padding: 1px 6px; }
+.mv-card .mv-name { font-size: 12px; font-weight: 700; padding: 4px 34px 5px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mv-card .mv-plus { position: absolute; right: 0; bottom: 0; width: 30px; height: 26px; border: 0; background: var(--yellow); color: var(--black); font-weight: 900; font-size: 18px; line-height: 1; padding: 0; }
+.mv-card .mv-plus:hover { background: var(--orange); }
 .ed-keys { font-size: 12px; color: #4d4400; }
 @media (max-height: 700px) { .ed-keys { display: none; } }
 @media (max-width: 1080px) { #pPrevF, #pNextF { display: none; } }

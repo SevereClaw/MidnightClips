@@ -231,12 +231,13 @@ window.onBackendEvent = (kind, data) => {
   else if (kind === "open") { const item = document.querySelector('.nav-item[data-view="' + data.view + '"]'); if (item) item.click(); }
   else if (kind === "update") applyUpdate(data);
   else if (kind === "settings") api.get_settings().then(applySettings);
-  else if (kind === "job") showJob(data);
+  else if (kind === "job") (jobFrom === "montage" ? mvShowJob : showJob)(data);
   else if (kind === "cleaned") {
     flash("Автоочистка: в корзину ушло клипов — " + data.count + " (" + fmtSize(data.bytes) + ")");
     loadClips();
   }
-  else if (kind === "job_done") finishJob(data);
+  else if (kind === "job_done") { const from = jobFrom; jobFrom = "editor"; (from === "montage" ? mvFinishJob : finishJob)(data); }
+  else if (kind === "files_dropped") mvFilesDropped(data.items || []);
   else if (kind === "move") showMove(data);
   else if (kind === "move_done") finishMove(data);
   else if (kind === "saving") $("btnClip").classList.add("is-busy");
@@ -508,6 +509,7 @@ async function loadClips() {
   clips = (await api.list_clips()) || [];
   renderChips();
   renderClips();
+  if ($("view-montage").classList.contains("is-active")) mvRenderBin();
 }
 
 // ---------------------------------------------------------------- просмотр и обрезка
@@ -932,7 +934,6 @@ async function openEditor(clip) {
   $("tlCuts").innerHTML = ""; $("tlRuler").innerHTML = "";
   $("tlStrip").style.backgroundImage = "";
   api.clip_strip(clip.path).then((res) => { if (edClip === clip && res && res.image) $("tlStrip").style.backgroundImage = 'url("' + res.image + '")'; });
-  renderMontage();
   $("edJob").hidden = true;
   $("trimText").textContent = "Загружаю клип…";
   $("pSpeed").value = "1";
@@ -1057,7 +1058,6 @@ document.addEventListener("keyup", (e) => {
 function setEditorBusy(busy) {
   edBusy = busy;
   ["edCompress", "edSend"].forEach((id) => { $(id).disabled = busy; });
-  $("mtJoin").disabled = busy || montage.length < 2;
   drawTrim();
 }
 async function runAction(action) {
@@ -1089,95 +1089,445 @@ function finishJob(result) {
   setEditorBusy(false);
   $("edJob").hidden = true;
   flash(result.text, !result.ok);
-  if (result.action === "montage" && result.ok) { montage = []; renderMontage(); }
   if (result.path || (result.ok && result.action !== "send")) loadClips();   // при отправке рядом остаётся сжатая копия
 }
 $("edTrim").onclick = () => runAction("trim");
 $("edCompress").onclick = () => runAction("compress");
 $("edSend").onclick = () => runAction("send");
 
-// ---------------------------------------------------------------- монтаж: куски разных клипов в один ролик
+// ---------------------------------------------------------------- монтаж: дорожка, как в видеоредакторе
+// Куски лежат на дорожке друг за другом, ширина — по длительности. Клипы перетаскиваются на дорожку
+// из списка внизу или из Проводника, куски — мышью по дорожке, края кусков подрезаются ручками.
 
-let montage = [];   // [{path, name, a, b, tracks}] — b = null: до конца клипа
-let mtDrag = -1;
-function pieceLength(p) { return p.b != null ? p.b - p.a : null; }
+let montage = [];        // [{path, name, a, b, tracks}] — b = null: до конца (пока длина не известна)
+let jobFrom = "editor";  // чей ход работы показывать: окна клипа или монтажа
+const mvVideo = $("mvVideo");
+const mvInfo = {};       // path -> {duration}
+const mvStrip = {};      // path -> data-URL полосы кадров
+const mvUrls = {};       // path -> адрес для плеера
+let mvSel = -1, mvT = 0, mvPps = 20, mvUndo = [], mvSaveTimer = null;
+let mvCur = -1, mvPath = null, mvToken = 0, mvWantPlay = false;
+let mvDropIndex = null, mvDropAt = 0;   // куда класть видео, перетащенные из Проводника
+const MV_MIN = 0.2;
+
+function mvLen(p) { return Math.max(0, p.b != null ? p.b - p.a : (mvInfo[p.path] ? mvInfo[p.path].duration - p.a : 0)); }
+function mvStarts() { const out = []; let t = 0; montage.forEach((p) => { out.push(t); t += mvLen(p); }); return out; }
+function mvTotal() { return montage.reduce((sum, p) => sum + mvLen(p), 0); }
+function mvLocate(T) {
+  const starts = mvStarts();
+  for (let i = 0; i < montage.length; i++) if (T < starts[i] + mvLen(montage[i]) - 0.001) return { i, local: Math.max(0, T - starts[i]) };
+  const last = montage.length - 1;
+  return { i: last, local: last >= 0 ? mvLen(montage[last]) : 0 };
+}
+function mvRemember() { mvUndo.push(JSON.stringify({ montage, mvSel })); if (mvUndo.length > 80) mvUndo.shift(); }
+function mvUndoStep() {
+  const last = mvUndo.pop();
+  if (!last) { flash("Отменять нечего"); return; }
+  const st = JSON.parse(last);
+  montage = st.montage; mvSel = st.mvSel;
+  mvChanged();
+}
+function mvChanged() {   // что-то поменялось: сохранить, перерисовать, обновить счётчик
+  clearTimeout(mvSaveTimer);
+  mvSaveTimer = setTimeout(() => api.save_montage(montage), 400);
+  $("navMontage").hidden = !montage.length;
+  $("navMontage").textContent = montage.length;
+  montage.forEach((p) => mvEnsure(p.path));
+  if (mvSel >= montage.length) mvSel = montage.length - 1;
+  if ($("view-montage").classList.contains("is-active")) mvRender();
+}
+async function mvEnsure(path) {   // длина и полоса кадров для куска
+  if (!mvInfo[path]) {
+    mvInfo[path] = { duration: 0, loading: true };
+    const clip = clips.find((c) => c.path === path);
+    const info = (clip && clip.duration) ? { duration: clip.duration } : await api.clip_info(path);
+    mvInfo[path] = { duration: info && info.duration ? info.duration : 0 };
+    montage.forEach((p) => { if (p.path === path && p.b == null && mvInfo[path].duration) p.b = mvInfo[path].duration; });
+    mvChanged();
+  }
+  if (mvStrip[path] === undefined) {
+    mvStrip[path] = null;
+    const res = await api.clip_strip(path);
+    if (res && res.image) { mvStrip[path] = res.image; mvRender(); }
+  }
+}
+function mvAdd(items, index) {   // items: [{path, name, a?, b?, tracks?}]
+  if (!items.length) return;
+  mvRemember();
+  const pieces = items.map((it) => ({ path: it.path, name: it.name || "", a: it.a || 0, b: it.b != null ? it.b : null, tracks: it.tracks || null }));
+  const at = index == null || index < 0 || index > montage.length ? montage.length : index;
+  montage.splice(at, 0, ...pieces);
+  mvSel = at;
+  mvChanged();
+}
+
+// ---- дорожка
+function mvFitPps() {
+  const total = mvTotal(), width = ($("mvTimeline").clientWidth || 800) - 24;
+  return total > 0 ? Math.max(0.5, width / total) : 20;
+}
+function mvApplyZoom() { mvPps = mvFitPps() * Math.pow(2, parseFloat($("mvZoom").value) / 12.5); }
+function mvRender() {
+  mvApplyZoom();
+  const track = $("mvTrack"), starts = mvStarts(), total = mvTotal();
+  track.innerHTML = "";
+  $("mvPlaceholder").hidden = montage.length > 0;
+  $("mvHello").hidden = montage.length > 0;
+  $("mvInner").style.width = Math.max(($("mvTimeline").clientWidth || 0) - 8, total * mvPps + 40) + "px";
+  montage.forEach((p, i) => {
+    const len = mvLen(p);
+    const el = document.createElement("div");
+    el.className = "mv-block" + (i === mvSel ? " is-sel" : "");
+    el.dataset.i = i;
+    el.style.left = starts[i] * mvPps + "px";
+    el.style.width = Math.max(14, len * mvPps) + "px";
+    const dur = mvInfo[p.path] && mvInfo[p.path].duration;
+    if (mvStrip[p.path] && dur) {   // кадры именно той части клипа, что осталась в куске
+      el.style.backgroundImage = 'url("' + mvStrip[p.path] + '")';
+      el.style.backgroundSize = dur * mvPps + "px 100%";
+      el.style.backgroundPosition = (-p.a * mvPps) + "px 0";
+    }
+    el.title = p.name + " · " + fmtTime(p.a) + " – " + fmtTime(p.a + len) + "\nТащите — поменять порядок, края — подрезать";
+    el.innerHTML = '<div class="mv-h l" data-side="l"></div><div class="mv-h r" data-side="r"></div>';
+    const name = document.createElement("b"); name.textContent = (i + 1) + ". " + p.name;
+    const time = document.createElement("em"); time.textContent = fmtTime(len);
+    const x = document.createElement("button"); x.className = "mv-x"; x.textContent = "×"; x.title = "Убрать с дорожки";
+    x.addEventListener("pointerdown", (e) => e.stopPropagation());
+    x.onclick = (e) => { e.stopPropagation(); mvRemember(); montage.splice(i, 1); mvSel = -1; mvChanged(); };
+    el.append(name, time, x);
+    track.appendChild(el);
+  });
+  // деления
+  const ruler = $("mvRuler");
+  ruler.innerHTML = "";
+  const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
+  const step = steps.find((v) => v * mvPps >= 70) || 3600;
+  for (let t = 0; t <= total + 0.001; t += step) {
+    const tick = document.createElement("span");
+    tick.style.left = t * mvPps + "px";
+    const label = document.createElement("em");
+    const m = Math.floor(t / 60), sec = t - m * 60;
+    label.textContent = m + ":" + String(Math.floor(sec)).padStart(2, "0") + (step < 1 ? "." + Math.round((sec % 1) * 10) : "");
+    tick.appendChild(label);
+    ruler.appendChild(tick);
+  }
+  $("mvDelete").disabled = mvSel < 0;
+  $("mvUndo").disabled = !mvUndo.length;
+  $("mvJoin").disabled = !montage.length || jobFrom === "montage";
+  $("mvClear").disabled = !montage.length;
+  mvDrawHead();
+}
+function mvDrawHead() {
+  const total = mvTotal();
+  mvT = Math.max(0, Math.min(mvT, total));
+  $("mvHead").style.left = mvT * mvPps + "px";
+  $("mvTime").textContent = fmtTime(mvT) + " / " + fmtTime(total);
+  const icon = mvVideo.paused ? "play" : "pause";
+  if ($("mvPlay").dataset.icon !== icon) { $("mvPlay").dataset.icon = icon; $("mvPlay").innerHTML = ICONS[icon]; }
+}
+function mvTimeAt(clientX) {
+  const r = $("mvInner").getBoundingClientRect();
+  return Math.max(0, (clientX - r.left) / mvPps);
+}
+function mvIndexAt(clientX) {   // куда вставить: перед первым куском, середина которого правее курсора
+  const T = mvTimeAt(clientX), starts = mvStarts();
+  for (let i = 0; i < montage.length; i++) if (T < starts[i] + mvLen(montage[i]) / 2) return i;
+  return montage.length;
+}
+function mvShowDrop(index) {
+  const starts = mvStarts();
+  const at = index < montage.length ? starts[index] : mvTotal();
+  $("mvDrop").hidden = false;
+  $("mvDrop").style.left = at * mvPps + "px";
+}
+
+// мышь на дорожке: перемотка, выбор, перестановка кусков, подрезка краёв
+let mvDrag = null;
+$("mvTrack").addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  const block = e.target.closest(".mv-block");
+  $("mvTrack").setPointerCapture(e.pointerId);
+  if (!block) { mvSel = -1; mvSeek(mvTimeAt(e.clientX)); mvRender(); mvDrag = { kind: "seek" }; return; }
+  const i = parseInt(block.dataset.i, 10);
+  const handle = e.target.closest(".mv-h");
+  mvVideo.pause();
+  if (handle) {
+    mvRemember();
+    const p = montage[i];
+    mvDrag = { kind: "trim", i, side: handle.dataset.side, x0: e.clientX, a0: p.a, b0: p.b != null ? p.b : p.a + mvLen(p) };
+  } else {
+    mvDrag = { kind: "move", i, x0: e.clientX, moved: false, el: block };
+  }
+  mvSel = i;
+  block.classList.add("is-sel");
+});
+$("mvTrack").addEventListener("pointermove", (e) => {
+  if (!mvDrag) return;
+  if (mvDrag.kind === "seek") { mvSeek(mvTimeAt(e.clientX)); return; }
+  const dx = e.clientX - mvDrag.x0;
+  if (mvDrag.kind === "trim") {
+    const p = montage[mvDrag.i], dur = (mvInfo[p.path] && mvInfo[p.path].duration) || mvDrag.b0;
+    if (mvDrag.side === "l") p.a = Math.max(0, Math.min(mvDrag.a0 + dx / mvPps, mvDrag.b0 - MV_MIN));
+    else p.b = Math.min(dur, Math.max(mvDrag.b0 + dx / mvPps, p.a + MV_MIN));
+    mvRender();
+    const starts = mvStarts();
+    mvSeek(starts[mvDrag.i] + (mvDrag.side === "l" ? 0 : mvLen(p) - 0.04));   // видно кадр, на котором встанет край
+    return;
+  }
+  if (!mvDrag.moved && Math.abs(dx) < 6) return;
+  mvDrag.moved = true;
+  mvDrag.el.classList.add("is-moving");
+  mvDrag.el.style.transform = "translateX(" + dx + "px)";
+  mvDrag.to = mvIndexAt(e.clientX);
+  mvShowDrop(mvDrag.to);
+});
+["pointerup", "pointercancel"].forEach((name) => $("mvTrack").addEventListener(name, (e) => {
+  const d = mvDrag;
+  mvDrag = null;
+  $("mvDrop").hidden = true;
+  if (!d) return;
+  if (d.kind === "trim") { mvChanged(); return; }
+  if (d.kind !== "move") return;
+  if (d.moved && d.to != null && d.to !== d.i && d.to !== d.i + 1) {
+    mvRemember();
+    const [piece] = montage.splice(d.i, 1);
+    const to = d.to > d.i ? d.to - 1 : d.to;
+    montage.splice(to, 0, piece);
+    mvSel = to;
+    mvCur = -1;
+    mvChanged();
+  } else {
+    if (!d.moved) mvSeek(mvTimeAt(e.clientX));
+    mvRender();
+  }
+}));
+$("mvRuler").addEventListener("pointerdown", (e) => { mvSeek(mvTimeAt(e.clientX)); });
+$("mvTimeline").addEventListener("wheel", (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  const z = $("mvZoom");
+  z.value = Math.max(0, Math.min(100, parseFloat(z.value) + (e.deltaY < 0 ? 6 : -6)));
+  mvRender();
+}, { passive: false });
+$("mvZoom").addEventListener("input", mvRender);
+$("mvFit").onclick = () => { $("mvZoom").value = 0; mvRender(); };
+
+// перетаскивание на дорожку: клип из списка внизу или видео из Проводника
+$("mvTimeline").addEventListener("dragover", (e) => {
+  const types = [...(e.dataTransfer.types || [])];
+  if (!types.includes("text/x-mc-clip") && !types.includes("Files")) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+  $("mvTimeline").classList.add("is-target");
+  mvShowDrop(mvIndexAt(e.clientX));
+});
+$("mvTimeline").addEventListener("dragleave", (e) => {
+  if (!$("mvTimeline").contains(e.relatedTarget)) { $("mvTimeline").classList.remove("is-target"); $("mvDrop").hidden = true; }
+});
+$("mvTimeline").addEventListener("drop", (e) => {
+  e.preventDefault();
+  $("mvTimeline").classList.remove("is-target");
+  $("mvDrop").hidden = true;
+  const index = mvIndexAt(e.clientX);
+  const path = e.dataTransfer.getData("text/x-mc-clip");
+  if (path) {
+    const clip = clips.find((c) => c.path === path);
+    if (clip) mvAdd([{ path: clip.path, name: clip.name, b: clip.duration || null }], index);
+    return;
+  }
+  mvDropIndex = index; mvDropAt = Date.now();   // пути к файлам пришлёт программа (files_dropped)
+});
+// файл, брошенный мимо дорожки, не должен открываться в окне вместо интерфейса
+document.addEventListener("dragover", (e) => { if ([...(e.dataTransfer.types || [])].includes("Files")) e.preventDefault(); });
+document.addEventListener("drop", (e) => { if ([...(e.dataTransfer.types || [])].includes("Files")) e.preventDefault(); });
+function mvFilesDropped(items) {
+  const index = Date.now() - mvDropAt < 5000 ? mvDropIndex : null;
+  mvDropIndex = null;
+  mvAdd(items, index);
+  if ($("editor").hidden) openView("montage");   // окно клипа открыто — не уводить из него
+  flash("В монтаж: " + items.length + " " + plural(items.length, "видео", "видео", "видео"));
+}
+
+// ---- просмотр всей склейки
+async function mvUrl(path) { if (!mvUrls[path]) mvUrls[path] = await api.media_url(path); return mvUrls[path]; }
+async function mvLoad(i, local, play) {
+  const token = ++mvToken, p = montage[i];
+  if (!p) return;
+  if (mvPath !== p.path) {
+    const url = await mvUrl(p.path);
+    if (token !== mvToken) return;
+    mvPath = p.path;
+    mvVideo.src = url;
+    await new Promise((ok) => { mvVideo.addEventListener("loadedmetadata", ok, { once: true }); mvVideo.addEventListener("error", ok, { once: true }); });
+    if (token !== mvToken) return;
+  }
+  mvCur = i;
+  mvVideo.currentTime = p.a + local;
+  if (play) mvVideo.play().catch(() => {});
+}
+function mvSeek(T) {
+  if (!montage.length) return;
+  mvT = Math.max(0, Math.min(T, mvTotal()));
+  const { i, local } = mvLocate(mvT);
+  mvLoad(i, Math.min(local, Math.max(0, mvLen(montage[i]) - 0.04)), !mvVideo.paused);
+  mvDrawHead();
+}
+function mvToggle() {
+  if (!montage.length) return;
+  if (!mvVideo.paused) { mvVideo.pause(); mvDrawHead(); return; }
+  if (mvT >= mvTotal() - 0.05) mvT = 0;
+  const { i, local } = mvLocate(mvT);
+  if (mvCur !== i || mvPath !== montage[i].path) mvLoad(i, local, true);
+  else mvVideo.play().catch(() => {});
+}
+function mvLoop() {
+  if (!mvVideo.paused && mvCur >= 0 && montage[mvCur]) {
+    const p = montage[mvCur], t = mvVideo.currentTime;
+    const end = p.a + mvLen(p);
+    if (t >= end - 0.03) {   // кусок кончился — следующий
+      if (mvCur + 1 < montage.length) mvLoad(mvCur + 1, 0, true);
+      else { mvVideo.pause(); mvT = mvTotal(); }
+    } else mvT = mvStarts()[mvCur] + Math.max(0, t - p.a);
+    mvDrawHead();
+    const box = $("mvTimeline"), x = mvT * mvPps;   // метка не уходит за край
+    if (x > box.scrollLeft + box.clientWidth - 40) box.scrollLeft = x - 80;
+  }
+  requestAnimationFrame(mvLoop);
+}
+requestAnimationFrame(mvLoop);
+["play", "pause"].forEach((n) => mvVideo.addEventListener(n, mvDrawHead));
+$("mvPlay").onclick = mvToggle;
+$("mvScreen").addEventListener("click", mvToggle);
+
+// ---- резка и прочее
+function mvSplit() {
+  if (!montage.length) return;
+  const { i, local } = mvLocate(mvT), p = montage[i], len = mvLen(p);
+  if (local < MV_MIN || len - local < MV_MIN) { flash("Слишком близко к краю куска"); return; }
+  mvRemember();
+  const cut = p.a + local;
+  montage.splice(i, 1, Object.assign({}, p, { b: cut }), Object.assign({}, p, { a: cut, b: p.a + len }));
+  mvSel = i + 1;
+  mvChanged();
+}
+function mvDelete() {
+  const i = mvSel >= 0 ? mvSel : (montage.length ? mvLocate(mvT).i : -1);
+  if (i < 0) return;
+  mvRemember();
+  montage.splice(i, 1);
+  mvSel = Math.min(i, montage.length - 1);
+  mvCur = -1; mvPath = null;
+  mvChanged();
+  mvSeek(mvT);
+}
+$("mvSplit").onclick = mvSplit;
+$("mvDelete").onclick = mvDelete;
+$("mvUndo").onclick = mvUndoStep;
+$("mvClear").onclick = async () => {
+  if (await ask({ title: "Очистить монтаж?", text: "Все куски уйдут с дорожки. Сами клипы и видео не удаляются.", okLabel: "Очистить" }) !== true) return;
+  mvRemember();
+  montage = []; mvSel = -1; mvT = 0; mvCur = -1; mvPath = null;
+  mvVideo.pause(); mvVideo.removeAttribute("src"); mvVideo.load();
+  mvChanged();
+};
+$("mvAdd").onclick = async () => {
+  const items = (await api.add_videos()) || [];
+  if (items.length) { mvAdd(items, null); flash("В монтаж: " + items.length + " видео"); }
+};
+$("mvJoin").onclick = async () => {
+  if (!montage.length || jobFrom === "montage") return;
+  mvVideo.pause();
+  jobFrom = "montage";
+  mvShowJob({ stage: "Начинаю склейку…", percent: null });
+  mvRender();
+  const pieces = montage.map((p) => ({ path: p.path, start: p.a, end: p.b != null ? p.b : 0, tracks: p.tracks }));
+  if (!(await api.montage(pieces))) mvFinishJob({ ok: false, text: "Сейчас занято другой задачей — подождите." });
+};
+$("mvCancel").onclick = () => api.cancel_job();
+function mvShowJob(job) {
+  $("mvJob").hidden = false;
+  $("mvJobText").textContent = job.stage + (job.percent != null ? " " + job.percent + "%" : "");
+  $("mvJobFill").parentElement.classList.toggle("is-unknown", job.percent == null);
+  $("mvJobFill").style.width = job.percent != null ? job.percent + "%" : "";
+}
+function mvFinishJob(result) {
+  jobFrom = "editor";
+  $("mvJob").hidden = true;
+  flash(result.text, !result.ok);
+  if (result.ok) loadClips();
+  mvRender();
+}
+document.addEventListener("keydown", (e) => {
+  if (!$("view-montage").classList.contains("is-active") || !$("editor").hidden || !$("modal").hidden) return;
+  const el = e.target, tag = el.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable || (tag === "INPUT" && !["range", "checkbox"].includes(el.type))) return;
+  if (e.ctrlKey && e.code === "KeyZ") { e.preventDefault(); mvUndoStep(); return; }
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const keys = {
+    Space: mvToggle, KeyK: mvToggle, KeyS: mvSplit, Delete: mvDelete, Backspace: mvDelete,
+    ArrowLeft: () => mvSeek(mvT - (e.shiftKey ? 1 : 5)), ArrowRight: () => mvSeek(mvT + (e.shiftKey ? 1 : 5)),
+    Home: () => mvSeek(0), End: () => mvSeek(mvTotal()),
+  };
+  const action = keys[e.code];
+  if (!action) return;
+  e.preventDefault();
+  if (tag === "BUTTON") el.blur();
+  action();
+});
+window.addEventListener("resize", () => { if ($("view-montage").classList.contains("is-active")) mvRender(); });
+
+// ---- список клипов внизу
+function mvRenderBin() {
+  const box = $("mvBin");
+  box.innerHTML = "";
+  clips.forEach((clip) => {
+    const card = document.createElement("div");
+    card.className = "mv-card";
+    card.draggable = true;
+    card.title = clip.name + " — перетащите на дорожку";
+    const thumb = document.createElement("div");
+    thumb.className = "mv-thumb";
+    if (clip.duration != null) thumb.innerHTML = "<em>" + fmtDuration(clip.duration) + "</em>";
+    api.get_thumb(clip.path).then((res) => { if (res && res.image) thumb.style.backgroundImage = 'url("' + res.image + '")'; });
+    const name = document.createElement("div");
+    name.className = "mv-name"; name.textContent = clip.name;
+    const plus = document.createElement("button");
+    plus.className = "mv-plus"; plus.textContent = "+"; plus.title = "В конец дорожки";
+    plus.onclick = () => mvAdd([{ path: clip.path, name: clip.name, b: clip.duration || null }], null);
+    card.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData("text/x-mc-clip", clip.path);
+      e.dataTransfer.effectAllowed = "copy";
+    });
+    card.addEventListener("dragend", () => { $("mvTimeline").classList.remove("is-target"); $("mvDrop").hidden = true; });
+    card.append(thumb, name, plus);
+    box.appendChild(card);
+  });
+}
+function openView(name) {
+  const item = document.querySelector('.nav-item[data-view="' + name + '"]');
+  if (item && !item.classList.contains("is-active")) item.click();
+}
+
+// ---- из окна клипа и из галереи
 function addToMontage() {
   if (!edClip || !edDur()) return;
   const tracks = pickedTracks();
-  segs.forEach((g) => montage.push({ path: edClip.path, name: edClip.name, a: g.a, b: g.b, tracks }));
-  renderMontage();
-  flash("В монтаж: " + segs.length + " " + plural(segs.length, "кусок", "куска", "кусков") + " из «" + edClip.name + "»");
+  mvAdd(segs.map((g) => ({ path: edClip.path, name: edClip.name, a: g.a, b: g.b, tracks })), null);
+  flash("В монтаж: " + segs.length + " " + plural(segs.length, "кусок", "куска", "кусков") + " — раздел «Монтаж» слева");
 }
-function renderMontage() {
-  const box = $("mtList");
-  $("montage").hidden = montage.length === 0;
-  box.innerHTML = "";
-  let total = 0, known = true;
-  montage.forEach((p, i) => {
-    const len = pieceLength(p);
-    if (len == null) known = false; else total += len;
-    const card = document.createElement("div");
-    card.className = "mt-card" + (edClip && p.path === edClip.path ? " is-current" : "");
-    card.draggable = true;
-    card.title = "Открыть этот клип — нажатие. Перетащите, чтобы поменять порядок";
-    const thumb = document.createElement("div");
-    thumb.className = "mt-thumb";
-    thumb.innerHTML = "<em>" + (i + 1) + "</em><b>" + (len != null ? fmtTime(len) : "весь") + "</b>";
-    api.get_thumb(p.path).then((res) => { if (res && res.image) thumb.style.backgroundImage = 'url("' + res.image + '")'; });
-    const name = document.createElement("div");
-    name.className = "mt-name"; name.textContent = p.name;
-    const range = document.createElement("div");
-    range.className = "mt-range";
-    range.textContent = p.b != null ? fmtTime(p.a) + " – " + fmtTime(p.b) : "весь клип";
-    const del = document.createElement("button");
-    del.className = "mt-x"; del.textContent = "×"; del.title = "Убрать из монтажа";
-    del.onclick = (e) => { e.stopPropagation(); montage.splice(i, 1); renderMontage(); };
-    card.append(thumb, name, range, del);
-    card.onclick = () => {
-      const clip = clips.find((c) => c.path === p.path);
-      if (!clip) { flash("Этого клипа больше нет в папке", true); return; }
-      if (edClip && edClip.path === p.path) seekTo(p.a);
-      else { edSeekTo = p.a; openEditor(clip); }
-    };
-    card.addEventListener("dragstart", (e) => { mtDrag = i; card.classList.add("is-drag"); e.dataTransfer.effectAllowed = "move"; });
-    card.addEventListener("dragend", () => { mtDrag = -1; renderMontage(); });
-    card.addEventListener("dragover", (e) => { if (mtDrag >= 0) { e.preventDefault(); card.classList.add("is-over"); } });
-    card.addEventListener("dragleave", () => card.classList.remove("is-over"));
-    card.addEventListener("drop", (e) => {
-      e.preventDefault();
-      if (mtDrag < 0 || mtDrag === i) return;
-      const [moved] = montage.splice(mtDrag, 1);
-      montage.splice(mtDrag < i ? i - 1 : i, 0, moved);
-      mtDrag = -1;
-      renderMontage();
-    });
-    box.appendChild(card);
-  });
-  $("mtInfo").textContent = montage.length + " " + plural(montage.length, "кусок", "куска", "кусков") +
-    (known ? " · " + fmtTime(total) : "");
-  $("mtJoin").disabled = edBusy || montage.length < 2;
-}
-$("mtClear").onclick = () => { montage = []; renderMontage(); };
-$("mtJoin").onclick = async () => {
-  if (edBusy || montage.length < 2) return;
-  video.pause();
-  setEditorBusy(true);
-  showJob({ stage: "Начинаю склейку…", percent: null });
-  const pieces = montage.map((p) => ({ path: p.path, start: p.a, end: p.b != null ? p.b : 0, tracks: p.tracks }));
-  if (!(await api.montage(pieces))) finishJob({ ok: false, text: "Сейчас занято другой задачей — подождите." });
-};
 $("selJoin").onclick = () => {
   const chosen = clips.filter((c) => picked.has(c.path)).sort((x, y) => x.mtime - y.mtime);   // по порядку записи
-  if (chosen.length < 2) { flash("Выберите хотя бы два клипа", true); return; }
-  chosen.forEach((c) => montage.push({ path: c.path, name: c.name, a: 0, b: c.duration || null, tracks: null }));
+  if (!chosen.length) return;
+  mvAdd(chosen.map((c) => ({ path: c.path, name: c.name, b: c.duration || null })), null);
   picked.clear();
   syncPicked();
-  openEditor(chosen[0]);
-  renderMontage();
-  flash("Клипы в монтаже. Подрежьте их, если нужно, и нажмите «Склеить в один ролик»");
+  openView("montage");
+  flash("Клипы на дорожке монтажа: подрежьте их и нажмите «Склеить в один ролик»");
 };
-
-// ---------------------------------------------------------------- где хранить клипы
+async function loadMontage() {   // монтаж сохраняется между запусками
+  const list = await api.get_montage();
+  if (Array.isArray(list) && list.length) { montage = list; mvChanged(); }
+}
 
 // Steal Your Voice запущен — можно выбрать его пресет на время записи
 async function renderSyv() {
@@ -1626,6 +1976,7 @@ document.querySelectorAll(".nav-item").forEach((item) => {
     document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("is-active", n === item));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("is-active", v.id === "view-" + item.dataset.view));
     if (item.dataset.view === "clips") loadClips();
+    if (item.dataset.view === "montage") { mvRenderBin(); requestAnimationFrame(mvRender); } else mvVideo.pause();
     if (item.dataset.view === "settings") { renderDrives(); renderSyv(); }   // флешку могли вставить, панель — запустить
     $("tbWhere").textContent = VIEW_NAMES[item.dataset.view] || "";   // флешку могли вставить или вынуть
     syncPicked();
@@ -1634,7 +1985,7 @@ document.querySelectorAll(".nav-item").forEach((item) => {
 
 // ---------------------------------------------------------------- своя полоса заголовка
 
-const VIEW_NAMES = { clips: "Клипы", settings: "Настройки" };
+const VIEW_NAMES = { clips: "Клипы", montage: "Монтаж", settings: "Настройки" };
 function setMaxState(max) {
   document.body.classList.toggle("is-max", !!max);
   $("tbMax").title = max ? "Вернуть размер" : "Развернуть";
@@ -1675,6 +2026,7 @@ async function init() {
   loadPresets();
   renderDrives();
   renderSyv();
+  loadMontage();
   const options = await api.get_options();
   const mon = $("selMonitor");
   mon.innerHTML = "";

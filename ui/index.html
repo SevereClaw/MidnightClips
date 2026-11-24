@@ -55,6 +55,7 @@
 
     <nav class="nav">
       <button class="nav-item is-active" data-view="clips">Клипы</button>
+      <button class="nav-item" data-view="montage">Монтаж<span class="nav-count" id="navMontage" hidden></span></button>
       <button class="nav-item" data-view="settings">Настройки</button>
     </nav>
   </aside>
@@ -74,6 +75,44 @@
         <h2>Здесь пока пусто</h2>
         <p>Нажмите <kbd id="kbdEmpty">Alt+F10</kbd> во время игры — и последние секунды сохранятся сюда.</p>
       </div>
+    </section>
+
+    <section class="view view-mv" id="view-montage">
+      <header class="view-head">
+        <h1>Монтаж</h1>
+        <div class="head-tools">
+          <button class="mini mini-quiet" id="mvAdd" title="Выбрать видео на компьютере. Их можно и просто перетащить в окно из Проводника">Добавить видео…</button>
+          <button class="mini mini-quiet" id="mvClear">Очистить</button>
+          <button class="mini" id="mvJoin">Склеить в один ролик</button>
+        </div>
+      </header>
+      <div class="mv-screen" id="mvScreen">
+        <video id="mvVideo" preload="auto"></video>
+        <div class="mv-hello" id="mvHello"><b>Перетащите клипы на дорожку</b>из списка внизу или видео прямо из Проводника</div>
+      </div>
+      <div class="mv-controls">
+        <button class="pbtn pbtn-main" id="mvPlay" title="Играть / пауза (Пробел)" aria-label="Играть или пауза"></button>
+        <span class="ptime" id="mvTime">0:00.0 / 0:00.0</span>
+        <button class="cbtn" id="mvSplit" title="Разрезать кусок там, где метка (S)"><svg viewBox="0 0 24 24"><path d="M9.6 7.2a3.6 3.6 0 10-1.4 1.6L10.6 12l-2.4 3.2a3.6 3.6 0 101.4 1.6L12 13.6l7.6 10H23L13.4 12 23 .4h-3.4L12 10.4zM6.6 7.4a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6zm0 12.8a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6z"/></svg>Разрезать</button>
+        <button class="cbtn" id="mvDelete" title="Убрать выбранный кусок (Delete)">Убрать кусок</button>
+        <button class="cbtn" id="mvUndo" title="Отменить (Ctrl+Z)">↶</button>
+        <span class="pgap"></span>
+        <span class="mv-zoom-label">Масштаб</span>
+        <input type="range" class="vol" id="mvZoom" min="0" max="100" step="1" value="0" title="Масштаб дорожки (Ctrl + колесо мыши)" tabindex="-1">
+        <button class="cbtn" id="mvFit" title="Вся дорожка на экране">Уместить</button>
+      </div>
+      <div class="mv-timeline" id="mvTimeline">
+        <div class="mv-inner" id="mvInner">
+          <div class="mv-ruler" id="mvRuler"></div>
+          <div class="mv-track" id="mvTrack"></div>
+          <div class="mv-drop" id="mvDrop" hidden></div>
+          <div class="mv-playhead" id="mvHead"><i></i></div>
+        </div>
+        <div class="mv-placeholder" id="mvPlaceholder">Перетащите сюда клипы снизу или видео из Проводника</div>
+      </div>
+      <div class="job" id="mvJob" hidden><span id="mvJobText"></span><div class="job-bar"><i id="mvJobFill"></i></div><button class="mini" id="mvCancel">Отменить</button></div>
+      <div class="mv-bin-head"><h2>Клипы</h2><small>Перетащите на дорожку — или «+», чтобы добавить в конец. Куски в окне клипа: «＋ В монтаж»</small></div>
+      <div class="mv-bin" id="mvBin"></div>
     </section>
 
     <section class="view" id="view-settings">
@@ -366,15 +405,6 @@
       <button class="mini" id="edCompress">Сжать</button>
       <button class="mini mini-discord" id="edSend">Отправить в Discord</button>
       <button class="mini mini-quiet" id="edOpen">Открыть в плеере</button>
-    </div>
-    <div class="montage" id="montage" hidden>
-      <div class="mt-head">
-        <strong>Монтаж</strong><span id="mtInfo"></span>
-        <small>Перетаскивайте куски, чтобы поменять порядок. Добавляйте куски из других клипов: ‹ › или PageUp / PageDown — другой клип</small>
-        <button class="mini mini-quiet" id="mtClear">Очистить</button>
-        <button class="mini" id="mtJoin">Склеить в один ролик</button>
-      </div>
-      <div class="mt-list" id="mtList"></div>
     </div>
     <small class="ed-keys">Пробел — пауза · ← → — 5 с (с Shift — 1 с) · , . — по кадру · S — разрезать · Delete — убрать кусок · B — отметка, Q / E — к отметкам · I и O — начало и конец куска · Ctrl+Z — отменить · F — на весь экран · PageUp и PageDown — другой клип</small>
     <div class="job" id="edJob" hidden>

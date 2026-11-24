@@ -50,7 +50,13 @@ class App:
         self.toast = Toast()
         self.library = Library(self.cfg, self.ffmpeg, cache_dir())
         self.sounds = SoundBank(self.cfg, self.ffmpeg, os.path.join(self.res, "assets"), cache_dir())
-        self.media = MediaServer(self.library.inside)
+        # видео не из папки клипов, которые пользователь сам перетащил или выбрал для монтажа
+        self.external = set()
+        self.montage_path = os.path.join(data_dir(), "montage.json")
+        for piece in self.load_montage():
+            if not self.library.inside(piece["path"]):
+                self.external.add(os.path.normcase(os.path.abspath(piece["path"])))
+        self.media = MediaServer(self.allowed)
         self.mover = storage.Mover(self.on_move_event)
         self.syv = syv.Link()   # Steal Your Voice: мьют, эффект голоса и пресеты — в меню поверх игры
         self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event,
@@ -64,6 +70,71 @@ class App:
 
     # ---------------------------------------------------------------- запуск
 
+    VIDEO_EXT = (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts", ".flv", ".wmv", ".mpg", ".mpeg")
+
+    def allowed(self, path):
+        """Файл можно показывать и монтировать: он в папке клипов или его добавили в монтаж сами."""
+        try:
+            return self.library.inside(path) or os.path.normcase(os.path.abspath(path)) in self.external
+        except (TypeError, ValueError):
+            return False
+
+    def add_external(self, paths):
+        """Видео с компьютера — в монтаж (без копирования). Возвращает [{path, name}] того, что подошло."""
+        out = []
+        for path in paths or []:
+            if not path or not os.path.isfile(path) or not path.lower().endswith(self.VIDEO_EXT):
+                continue
+            path = os.path.abspath(path)
+            if not self.library.inside(path):
+                self.external.add(os.path.normcase(path))
+            out.append({"path": path, "name": os.path.splitext(os.path.basename(path))[0]})
+        return out
+
+    def load_montage(self):
+        try:
+            with open(self.montage_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return []
+        out = []
+        for p in data if isinstance(data, list) else []:
+            try:
+                out.append({"path": str(p["path"]), "name": str(p.get("name") or ""), "a": float(p.get("a") or 0),
+                            "b": float(p["b"]) if p.get("b") is not None else None,
+                            "tracks": [int(t) for t in p["tracks"]] if p.get("tracks") is not None else None})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out[:200]
+
+    def bind_file_drop(self):
+        """Видео, перетащенные из Проводника в окно, — в монтаж. Полный путь к файлу даёт pywebview."""
+        try:
+            from webview.dom import DOMEventHandler
+        except ImportError:
+            return
+
+        def on_drop(event):
+            try:
+                files = (event.get("dataTransfer") or {}).get("files") or []
+                paths = [f.get("pywebviewFullPath") for f in files if isinstance(f, dict)]
+            except AttributeError:
+                return
+            paths = [p for p in paths if p]
+            if not paths:
+                return   # перетаскивание внутри окна (клип на дорожку) — его ведёт интерфейс
+            items = self.add_external(paths)
+            if items:
+                self.push("files_dropped", {"items": items})
+            else:
+                self.push("warning", {"text": "Это не видео — в монтаж можно добавить mp4, mkv, mov, webm и похожие файлы."})
+
+        try:
+            self.window.events.loaded.wait(30)   # обработчик вешается на уже загруженную страницу
+            self.window.dom.document.events.drop += DOMEventHandler(on_drop, True, True)
+        except Exception as exc:
+            self.recorder._log("перетаскивание файлов недоступно: %s" % exc)
+
     def hwnd(self):
         """Окно программы для Windows (своя полоса заголовка двигает и растягивает его через систему)."""
         if not getattr(self, "_hwnd", None):
@@ -74,6 +145,7 @@ class App:
     def on_start(self):
         """Вызывается, когда окно готово."""
         threading.Thread(target=self.hwnd, daemon=True).start()
+        threading.Thread(target=self.bind_file_drop, daemon=True).start()
         self.hotkeys.start()
         self.bind_hotkeys()
         self.toast.start()
@@ -676,13 +748,62 @@ class Api:
         return self._app.library.list()
 
     def get_thumb(self, path):
-        return self._app.library.thumb(path)
+        return self._app.library.thumb(path, force=self._app.allowed(path))
 
     def media_url(self, path):
         """Адрес клипа для встроенного плеера."""
-        if self._app.library.inside(path) and os.path.isfile(path):
+        if self._app.allowed(path) and os.path.isfile(path):
             return self._app.media.url(path)
         return ""
+
+    def clip_info(self, path):
+        """Длительность и размер кадра — для дорожки монтажа."""
+        if not (self._app.allowed(path) and os.path.isfile(path) and self._app.ffmpeg):
+            return None
+        try:
+            info = clip_tools.media_info(self._app.ffmpeg, path)
+        except clip_tools.Fail:
+            return None
+        info["name"] = os.path.splitext(os.path.basename(path))[0]
+        return info
+
+    def get_montage(self):
+        return self._app.load_montage()
+
+    def save_montage(self, pieces):
+        """Монтаж сохраняется между запусками программы."""
+        clean = []
+        for p in list(pieces or [])[:200]:
+            try:
+                path = str(p["path"])
+                if not self._app.allowed(path):
+                    continue
+                clean.append({"path": path, "name": str(p.get("name") or ""), "a": round(float(p.get("a") or 0), 3),
+                              "b": round(float(p["b"]), 3) if p.get("b") is not None else None,
+                              "tracks": [int(t) for t in p["tracks"]] if p.get("tracks") is not None else None})
+            except (KeyError, TypeError, ValueError):
+                continue
+        try:
+            tmp = self._app.montage_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(clean, f, ensure_ascii=False)
+            os.replace(tmp, self._app.montage_path)
+        except OSError:
+            return False
+        return True
+
+    def add_videos(self):
+        """«Добавить видео…»: выбрать файлы на компьютере (их можно и просто перетащить в окно)."""
+        import webview
+        types = ("Видео (*.mp4;*.mkv;*.mov;*.webm;*.avi;*.m4v;*.ts;*.flv;*.wmv)", "Все файлы (*.*)")
+        try:
+            result = self._app.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True, file_types=types)
+        except Exception:
+            try:
+                result = self._app.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True)
+            except Exception:
+                result = None
+        return self._app.add_external(list(result or []))
 
     def clip_tracks(self, path):
         """Звуковые дорожки клипа — для галочек в окне клипа."""
@@ -744,8 +865,8 @@ class Api:
         return self._app.tools.start(path, action, start, end, tracks, segments)
 
     def clip_strip(self, path):
-        """Полоса кадров для шкалы в окне клипа."""
-        if not (self._app.library.inside(path) and os.path.isfile(path) and self._app.ffmpeg):
+        """Полоса кадров для шкалы в окне клипа и для кусков на дорожке монтажа."""
+        if not (self._app.allowed(path) and os.path.isfile(path) and self._app.ffmpeg):
             return None
         return clip_tools.film_strip(self._app.ffmpeg, path, os.path.join(cache_dir(), "strips"))
 
@@ -756,7 +877,7 @@ class Api:
         for p in list(pieces or [])[:80]:
             try:
                 path = str(p["path"])
-                if not (self._app.library.inside(path) and os.path.isfile(path)):
+                if not (self._app.allowed(path) and os.path.isfile(path)):
                     return False
                 tracks = p.get("tracks")
                 clean.append({"path": path, "start": float(p["start"]), "end": float(p["end"]),
@@ -765,7 +886,9 @@ class Api:
                 return False
         if not clean:
             return False
-        folder = os.path.dirname(clean[0]["path"])
+        # ролик — рядом с первым клипом; если первый кусок — видео с компьютера, то в папку клипов
+        first = clean[0]["path"]
+        folder = os.path.dirname(first) if self._app.library.inside(first) else self._app.cfg.clips_dir()
         out = os.path.join(folder, "Монтаж %s.mp4" % time.strftime("%Y-%m-%d %H-%M-%S"))
         return self._app.tools.montage(clean, clip_tools.unique(out))
 
