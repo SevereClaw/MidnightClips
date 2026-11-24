@@ -35,6 +35,8 @@ def drag(hwnd, edge, start, delta):
 
 def check(window):
     try:
+        result["step"] = "ждём окно"
+        print("окно создаётся…", flush=True)
         time.sleep(3)
         hwnd = winutil.app_window("MidnightClips")
         assert hwnd, "окно не найдено"
@@ -42,16 +44,19 @@ def check(window):
         x, y, w, h = winutil._rect(hwnd)
         print("окно:", (x, y, w, h), flush=True)
 
+        result["step"] = "перетаскивание"
         assert drag(hwnd, "move", (x + 300, y + 15), (140, 80)), "перетаскивание не началось"
         nx, ny, nw, nh = winutil._rect(hwnd)
         print("после перетаскивания:", (nx, ny, nw, nh), flush=True)
         assert abs(nx - x - 140) <= 6 and abs(ny - y - 80) <= 6 and (nw, nh) == (w, h), "окно не переехало за мышью"
 
+        result["step"] = "растягивание"
         assert drag(hwnd, "br", (nx + nw - 3, ny + nh - 3), (90, 50)), "растягивание не началось"
         rx, ry, rw, rh = winutil._rect(hwnd)
         print("после растягивания:", (rx, ry, rw, rh), flush=True)
         assert (rx, ry) == (nx, ny) and abs(rw - nw - 90) <= 6 and abs(rh - nh - 50) <= 6, "окно не растянулось"
 
+        result["step"] = "разворачивание"
         before = winutil._rect(hwnd)
         assert winutil.toggle_maximize(hwnd) and winutil.is_maximized(hwnd), "не развернулось"
         assert winutil._rect(hwnd) == winutil._work_area(hwnd), "развёрнутое окно не на рабочей области"
@@ -63,21 +68,30 @@ def check(window):
         time.sleep(0.4)
         assert ctypes.windll.user32.IsIconic(hwnd), "не свернулось"
         result["ok"] = True
+        print("ОКНО БЕЗ РАМКИ: OK", flush=True)
     except Exception as exc:  # noqa: BLE001
         result["errors"].append(repr(exc))
     finally:
-        window.destroy()
+        print("шаг:", result.get("step"), "ошибки:", result["errors"], flush=True)
+        if result.get("ok") or result["errors"]:
+            os._exit(0 if result.get("ok") else 1)   # закрывать окно незачем: проверка закончена
 
 
 if __name__ == "__main__":
     if sys.platform != "win32":
         print("только для Windows — пропуск")
         sys.exit(0)
+    import threading
     import webview
+
+    def watchdog():   # окно или WebView2 повисли — не держать сборку, показать, где встали
+        time.sleep(90)
+        print("ЗАВИСЛО. ошибки:", result["errors"], "шаг:", result.get("step"), flush=True)
+        os._exit(1)
+    threading.Thread(target=watchdog, daemon=True).start()
     winutil.set_dpi_aware()
     win = webview.create_window("MidnightClips", html=HTML, frameless=True, easy_drag=False,
                                 width=900, height=600, x=120, y=120, min_size=(400, 300))
     webview.start(check, win)
-    print("ошибки:", result["errors"])
-    assert result.get("ok"), result["errors"]
-    print("ОКНО БЕЗ РАМКИ: OK")
+    print("ОКНО БЕЗ РАМКИ: окно закрылось раньше проверки", result["errors"])
+    sys.exit(1)
