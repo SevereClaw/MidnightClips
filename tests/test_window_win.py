@@ -23,14 +23,19 @@ def drag(hwnd, edge, start, delta):
     time.sleep(0.15)
     mouse(True)
     time.sleep(0.15)
-    ok = winutil.begin_drag(hwnd, edge)
+    import threading
+    out = {}
+    worker = threading.Thread(target=lambda: out.update(ok=winutil.begin_drag(hwnd, edge)), daemon=True)
+    worker.start()   # как вызов из интерфейса: возвращается, когда кнопку отпустят
     time.sleep(0.15)
     for i in range(1, 21):
         user32.SetCursorPos(start[0] + delta[0] * i // 20, start[1] + delta[1] * i // 20)
         time.sleep(0.025)
+    time.sleep(0.1)
     mouse(False)
-    time.sleep(0.6)
-    return ok
+    worker.join(3)
+    time.sleep(0.3)
+    return out.get("ok") and not worker.is_alive()
 
 
 def check(window):

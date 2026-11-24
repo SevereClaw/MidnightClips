@@ -415,28 +415,63 @@ def toggle_maximize(hwnd):
     return True
 
 
-def begin_drag(hwnd, edge="move"):
-    """Начать перетаскивание (edge="move") или растягивание за край (l, r, t, b, tl, tr, bl, br) мышью —
-    дальше окно ведёт сама Windows, пока кнопка мыши зажата."""
+def begin_drag(hwnd, edge="move", min_size=(400, 300)):
+    """Перетаскивание (edge="move") или растягивание за край (l, r, t, b, tl, tr, bl, br): пока зажата левая
+    кнопка мыши, окно идёт за курсором. Вызывается из потока js_api и возвращается, когда кнопку отпустили.
+    (Системный способ — WM_NCLBUTTONDOWN — из чужого потока для окна с WebView2 не срабатывает.)"""
     if not WIN or not hwnd or edge not in _HIT:
         return False
-    if not user32.GetAsyncKeyState(0x01) & 0x8000:   # кнопку уже отпустили — не начинать «липкое» перетаскивание
+    down = lambda: bool(user32.GetAsyncKeyState(0x01) & 0x8000)
+    if not down():   # кнопку уже отпустили — не начинать «липкое» перетаскивание
         return False
+    pt = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
     if is_maximized(hwnd):
         if edge != "move":
             return False
         # тащат развёрнутое окно — вернуть прежний размер под курсором, как делает Windows
-        pt = wintypes.POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
         wx, wy, ww, _wh = _rect(hwnd)
-        nx, ny, nw, nh = _normal_rect.pop(hwnd)
+        _nx, _ny, nw, nh = _normal_rect.pop(hwnd)
         share = (pt.x - wx) / max(1, ww)
         user32.SetWindowPos(hwnd, None, int(pt.x - nw * share), wy, nw, nh, 0x0004)
-    pt = wintypes.POINT()
-    user32.GetCursorPos(ctypes.byref(pt))
-    user32.ReleaseCapture()
-    lparam = (pt.y & 0xFFFF) << 16 | (pt.x & 0xFFFF)
-    user32.PostMessageW(hwnd, 0x00A1, _HIT[edge], lparam)   # WM_NCLBUTTONDOWN
+    try:
+        dpi = user32.GetDpiForWindow(hwnd) or 96
+    except Exception:
+        dpi = 96
+    min_w, min_h = int(min_size[0] * dpi / 96), int(min_size[1] * dpi / 96)
+    x0, y0, w0, h0 = _rect(hwnd)
+    sx, sy = pt.x, pt.y
+    last = None
+    while down():
+        user32.GetCursorPos(ctypes.byref(pt))
+        dx, dy = pt.x - sx, pt.y - sy
+        x, y, w, h = x0, y0, w0, h0
+        if edge == "move":
+            x, y = x0 + dx, y0 + dy
+        else:
+            if "l" in edge:
+                w = max(min_w, w0 - dx)
+                x = x0 + w0 - w
+            if "r" in edge:
+                w = max(min_w, w0 + dx)
+            if "t" in edge:
+                h = max(min_h, h0 - dy)
+                y = y0 + h0 - h
+            if "b" in edge:
+                h = max(min_h, h0 + dy)
+        if (x, y, w, h) != last:
+            last = (x, y, w, h)
+            flags = 0x0004 | 0x0010 | (0x0001 if edge == "move" else 0)   # NOZORDER | NOACTIVATE (| NOSIZE)
+            user32.SetWindowPos(hwnd, None, x, y, w, h, flags)
+        time.sleep(0.006)
+    if edge == "move":
+        # отпустили у верхнего края экрана — развернуть, как обычное окно Windows
+        user32.GetCursorPos(ctypes.byref(pt))
+        _wx, wy, _ww, _wh = _work_area(hwnd)
+        if pt.y <= wy + 1 and (dx or dy):
+            _normal_rect[hwnd] = (x0 + dx, max(wy, y0 + dy), w0, h0)
+            x, y, w, h = _work_area(hwnd)
+            user32.SetWindowPos(hwnd, None, x, y, w, h, 0x0004 | 0x0010)
     return True
 
 

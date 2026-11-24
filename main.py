@@ -638,7 +638,7 @@ class Api:
         return {"maximized": winutil.is_maximized(self._app.hwnd())}
 
     def win_drag(self, edge="move"):
-        return winutil.begin_drag(self._app.hwnd(), edge)
+        return winutil.begin_drag(self._app.hwnd(), edge, min_size=(940, 620))
 
     def win_minimize(self):
         winutil.minimize(self._app.hwnd())
