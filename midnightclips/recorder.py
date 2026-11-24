@@ -257,6 +257,18 @@ class Recorder:
         self.markers = [m for m in self.markers if m >= oldest] + [now]
         return True
 
+    def _span(self, out_path, ended):
+        """[начало, конец] сохранённого файла в секундах Unix: конец — момент нажатия, начало — на длину файла раньше."""
+        try:
+            text = subprocess.run([self.ffmpeg, "-hide_banner", "-i", out_path], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30,
+                                  creationflags=NO_WINDOW).stderr.decode("utf-8", "replace")
+            found = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
+            duration = int(found.group(1)) * 3600 + int(found.group(2)) * 60 + float(found.group(3))
+        except (OSError, subprocess.SubprocessError, AttributeError, ValueError):
+            return None
+        return [ended - duration, ended]
+
     def _markers_for(self, out_path, ended):
         """Отметки внутри сохранённого файла — секунды от его начала. Конец файла — момент нажатия."""
         if not self.markers:
@@ -1571,7 +1583,7 @@ class Recorder:
             ok = self._mux(chosen, out_path, skip)
         if ok:
             self.on_event("saved", {"path": out_path, "kind": "clip", "seconds": length,
-                                    "markers": self._markers_for(out_path, pressed)})
+                                    "markers": self._markers_for(out_path, pressed), "span": self._span(out_path, pressed)})
         else:
             self._remove(out_path)
             self.on_event("error", {"text": "Не получилось сохранить клип. Подробности — в журнале."})
@@ -1599,7 +1611,7 @@ class Recorder:
         self._emit_state()
         if ok:
             self.on_event("saved", {"path": out_path, "kind": "recording", "seconds": len(chosen) * SEGMENT,
-                                    "markers": self._markers_for(out_path, pressed)})
+                                    "markers": self._markers_for(out_path, pressed), "span": self._span(out_path, pressed)})
         else:
             if out_path:
                 self._remove(out_path)

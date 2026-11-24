@@ -19,7 +19,9 @@ const demo = {
     ["hl2 запись 2026-11-11 19-05-10", "hl2", 754, 1.1e9, 1], ["Тройное убийство", "cs2", 30, 44e6, 0],
     ["cs2 2026-11-10 23-58-31", "cs2", 30, 46e6, 0], ["Рабочий стол 2026-11-09 14-02-00", "Рабочий стол", 15, 9e6, 0],
   ].map((c, i) => ({ path: "demo" + i, name: c[0], game: c[1], duration: c[2], size: c[3], recording: !!c[4], mtime: Date.now() / 1000 - i * 5400,
-    favorite: i === 0 || i === 3, markers: i === 0 ? [5.5, 18.2, 33] : [], tags: [["босс"], [], [], ["эйс", "смешное"], ["эйс"], []][i] })),
+    favorite: i === 0 || i === 3, markers: i === 0 ? [5.5, 18.2, 33] : [],
+    voices: i === 0 ? [{ name: "Вася", s: 2, e: 4.5 }, { name: "Петя", s: 6, e: 9 }, { name: "Вася", s: 12, e: 13.2 }, { name: "Петя", s: 12.8, e: 16 }, { name: "Вася", s: 24, e: 29 }] : [],
+    voices_off: i === 0 ? ["Вася"] : [], tags: [["босс"], [], [], ["эйс", "смешное"], ["эйс"], []][i] })),
 };
 const demoApi = {
   get_state: async () => ({ state: "on", message: "", encoder: "NVIDIA NVENC", capture: "Desktop Duplication", audio_note: "", window_active: true, buffer_in_memory: true, buffer_mb: 99, fps_real: 59.8, fps_target: 60, slow: false, fallback: false, recording: !!demo.rec, hotkeys: { clip: true, record: true }, version: "демо", update: { status: "ready", latest: "0.1.7", current: "0.1.5", message: "" } }),
@@ -71,6 +73,7 @@ const demoApi = {
   cleanup_preview: async (days, gb) => ({ count: days || gb ? 3 : 0, bytes: 1.25e9 }),
   media_url: async () => window.DEMO_VIDEO || "",
   clip_tracks: async () => ["Всё вместе", "Микрофон", "Игра", "Discord", "Остальное"],
+  set_voices_off: async () => true,
   clip_track_urls: async () => window.DEMO_TRACKS || [],
   set_fullscreen: async (on) => on,
   clip_action: async (p, action) => {
@@ -238,6 +241,10 @@ window.onBackendEvent = (kind, data) => {
   }
   else if (kind === "job_done") { const from = jobFrom; jobFrom = "editor"; (from === "montage" ? mvFinishJob : finishJob)(data); }
   else if (kind === "files_dropped") mvFilesDropped(data.items || []);
+  else if (kind === "clip_meta") loadClips().then(() => {   // к клипу добавились фразы друзей из Discord
+    const fresh = clips.find((c) => c.path === data.path);
+    if (fresh && edClip && edClip.path === data.path) { edClip.voices = fresh.voices; renderFriends(); }
+  });
   else if (kind === "move") showMove(data);
   else if (kind === "move_done") finishMove(data);
   else if (kind === "saving") $("btnClip").classList.add("is-busy");
@@ -624,9 +631,10 @@ function drawTrim() {
   $("trimText").textContent = whole ? "Весь клип, " + fmtTime(dur)
     : segs.length === 1 ? "Отрезок " + fmtTime(segs[0].a) + " – " + fmtTime(segs[0].b) + ", длина " + fmtTime(kept)
     : "Кусков: " + segs.length + " · вместе " + fmtTime(kept) + " из " + fmtTime(dur);
-  const picked = pickedTracks() !== null;
+  const picked = pickedTracks() !== null || friendsOff();
   $("edTrim").disabled = (whole && !picked) || edBusy;
   $("edTrim").textContent = segs.length > 1 ? "Сохранить склейку из " + segs.length + " " + plural(segs.length, "куска", "кусков", "кусков")
+    : whole && pickedTracks() === null && friendsOff() ? "Сохранить без выключенных друзей"
     : whole && picked ? "Сохранить с этими дорожками" : "Сохранить обрезку";
   $("edCompress").textContent = (segs.length > 1 ? "Склеить и сжать до " : "Сжать до ") + settings.discord_limit_mb + " МБ";
   $("cutDelete").disabled = segs.length < 2;
@@ -738,6 +746,10 @@ function playerLoop() {   // пока идёт воспроизведение, �
       }
     }
     playLast = video.currentTime;
+    if (edSplit && edDiscord >= 0 && edAudio[edDiscord]) {   // выключенный друг говорит — Discord молчит
+      const mute = edMuted || !edTracks[edDiscord].checked || voiceMuteAt(video.currentTime);
+      if (edAudio[edDiscord].muted !== mute) edAudio[edDiscord].muted = mute;
+    }
     requestAnimationFrame(playerLoop);
   }
 }
@@ -872,6 +884,66 @@ $("edTrack").addEventListener("pointermove", (e) => {
 $("edTrack").addEventListener("pointerleave", () => { if (!scrubbing && !edgeDrag) $("trimTip").hidden = true; });
 
 let edTracks = [];
+let edDiscord = -1;   // какая из отдельных дорожек — Discord (номер в edTracks), -1 — нет такой
+const VOICE_COLORS = ["#3EC6FF", "#FF5DA2", "#7CFF6B", "#B48CFF", "#FF9F1C", "#00E0C6", "#FFFFFF", "#FF4D4D"];
+function edVoices() { return (edClip && edClip.voices) || []; }
+function edPeople() { const seen = []; edVoices().forEach((v) => { if (!seen.includes(v.name)) seen.push(v.name); }); return seen; }
+function friendsOff() { return edDiscord >= 0 && ((edClip && edClip.voices_off) || []).some((n) => edPeople().includes(n)); }
+function voiceMuteAt(t) {
+  const off = (edClip && edClip.voices_off) || [];
+  return edVoices().some((v) => off.includes(v.name) && t >= v.s - 0.12 && t <= v.e + 0.12);
+}
+function renderFriends() {
+  const people = edPeople(), off = (edClip && edClip.voices_off) || [];
+  $("edFriends").hidden = !people.length;
+  $("tlVoices").hidden = !people.length;
+  const dur = edDur();
+  const lanes = $("tlVoices"), list = $("edFriendList");
+  lanes.innerHTML = ""; list.innerHTML = "";
+  if (!people.length) return;
+  people.forEach((name, k) => {
+    const color = VOICE_COLORS[k % VOICE_COLORS.length];
+    const row = document.createElement("div");
+    row.className = "tl-vrow" + (off.includes(name) ? " is-off" : "");
+    const label = document.createElement("b"); label.textContent = name;
+    row.appendChild(label);
+    edVoices().filter((v) => v.name === name).forEach((v) => {
+      const bar = document.createElement("i");
+      bar.style.left = (dur ? v.s / dur * 100 : 0) + "%";
+      bar.style.width = (dur ? (v.e - v.s) / dur * 100 : 0) + "%";
+      bar.style.background = color;
+      row.appendChild(bar);
+    });
+    row.onclick = (e) => {   // к ближайшей фразе этого человека
+      const r = row.getBoundingClientRect(), t = (e.clientX - r.left) / r.width * dur;
+      const near = edVoices().filter((v) => v.name === name).sort((x, y) => Math.abs(x.s - t) - Math.abs(y.s - t))[0];
+      if (near) seekTo(near.s);
+    };
+    lanes.appendChild(row);
+    const item = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.checked = !off.includes(name); box.tabIndex = -1; box.disabled = edDiscord < 0;
+    box.onchange = () => {
+      const now = new Set((edClip.voices_off || []).filter((n) => n !== name));
+      if (!box.checked) now.add(name);
+      edClip.voices_off = [...now];
+      api.set_voices_off(edClip.path, edClip.voices_off);
+      renderFriends(); drawTrim(); applyTracks();
+      osd(box.checked ? name + " — слышно" : name + " — приглушён в Discord");
+    };
+    const dot = document.createElement("i"); dot.style.background = color;
+    item.append(box, dot, document.createTextNode(name));
+    list.appendChild(item);
+  });
+  // где выключенный друг говорил одновременно с другим, приглушится и тот: звук Discord — общий на всех
+  const offSpans = edVoices().filter((v) => off.includes(v.name));
+  const overlap = edVoices().some((v) => !off.includes(v.name) && offSpans.some((o) => v.s < o.e && o.s < v.e));
+  const note = $("edFriendNote");
+  note.hidden = edDiscord >= 0 && !overlap;
+  note.textContent = edDiscord < 0
+    ? "Выключать друзей можно, когда у клипа есть отдельная дорожка Discord: Настройки → Звук → «Отдельные дорожки» и Discord в списке программ (для новых клипов)"
+    : "Discord отдаёт звук всех друзей одним потоком: где выключенный друг говорил одновременно с другими, приглушатся и они";
+}
 // Номера оставленных дорожек; null — все на месте (звук как есть).
 function pickedTracks() {
   if (!edTracks.length || edTracks.every((b) => b.checked)) return null;
@@ -895,7 +967,7 @@ function syncAudio(force) {
   });
 }
 function applyTracks() {
-  const want = pickedTracks() !== null && edAudio.length === edTracks.length && edAudio.length > 0;
+  const want = (pickedTracks() !== null || friendsOff()) && edAudio.length === edTracks.length && edAudio.length > 0;
   $("edTrackNote").hidden = pickedTracks() === null || want;
   if (!want && edSplit) edAudio.forEach((a) => a.pause());
   edSplit = want;
@@ -939,8 +1011,10 @@ async function openEditor(clip) {
   $("pSpeed").value = "1";
   // отдельные звуковые дорожки: переключателями выбирается, что слышно здесь и что останется в сохранённом клипе
   edTracks = [];
+  edDiscord = -1;
   dropAudio();
   $("edTracks").hidden = true;
+  renderFriends();
   video.autoplay = true;   // открыли клип — он сразу играет
   video.src = await api.media_url(clip.path);
   $("edStage").focus();
@@ -959,6 +1033,8 @@ async function openEditor(clip) {
     edTracks.push(box);
   });
   $("edTracks").hidden = false;
+  edDiscord = names.indexOf("Discord", 1) - 1;
+  renderFriends();
   drawTrim();
   const urls = (await api.clip_track_urls(clip.path)) || [];
   if (edClip !== clip || urls.length !== edTracks.length) return;
@@ -978,6 +1054,7 @@ function closeEditor() {
 video.addEventListener("loadedmetadata", () => {
   segUndo = [];
   setSegs([{ a: 0, b: video.duration }], -1);
+  renderFriends();   // полоски фраз — по длине клипа
   if (edSeekTo != null) { seekTo(edSeekTo); edSeekTo = null; }
   applyVolume();
 });

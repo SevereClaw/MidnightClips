@@ -67,6 +67,31 @@ if __name__ == "__main__":
         print("склейка кусков:", info, flush=True)
         assert abs(info["duration"] - 4.0) < 0.15, info
 
+        # друг из Discord выключен: его фразы (2–4 с) молчат и в обрезке, и в склейке, остальное звучит
+        g = os.path.join(work, "g.mp4")
+        subprocess.run([FF, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+                        "-f", "lavfi", "-i", "sine=frequency=500:sample_rate=48000", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+                        "-t", "8", "-filter_complex", "[1:a]asplit=2[all][dc]", "-map", "0:v", "-map", "[all]", "-map", "2:a",
+                        "-map", "[dc]", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-c:a", "aac", "-shortest", g], check=True)
+
+        def level(path, a, b):
+            out = subprocess.run([FF, "-hide_banner", "-ss", str(a), "-t", str(b - a), "-i", path, "-map", "0:a:0",
+                                  "-af", "volumedetect", "-f", "null", "-"], capture_output=True).stderr.decode("utf-8", "replace")
+            import re
+            return float(re.search(r"max_volume: (-?[\d.]+|-inf) dB", out).group(1).replace("-inf", "-200"))
+        gate = {2: [(2.0, 4.0)]}   # дорожка 2 — Discord
+        res = run(tools_obj.start, g, "trim", 1.0, 7.0, None, None, gate)
+        assert res["ok"], res
+        quiet, loud = level(res["path"], 1.4, 2.6), level(res["path"], 3.6, 5.5)   # в обрезке время сдвинуто на 1 с
+        print("обрезка с выключенным другом: тишина %.1f дБ, звук %.1f дБ" % (quiet, loud), flush=True)
+        assert quiet < -60 and loud > -30, (quiet, loud)
+        out2 = os.path.join(work, "Монтаж друзья.mp4")
+        res = run(tools_obj.montage, [{"path": g, "start": 1.0, "end": 7.0, "tracks": None, "gate": gate}], out2)
+        assert res["ok"], res
+        quiet, loud = level(out2, 1.4, 2.6), level(out2, 3.6, 5.5)
+        print("склейка с выключенным другом: тишина %.1f дБ, звук %.1f дБ" % (quiet, loud), flush=True)
+        assert quiet < -60 and loud > -30, (quiet, loud)
+
         strip = tools.film_strip(FF, a, os.path.join(work, "strips"))
         assert strip and strip["image"].startswith("data:image/jpeg;base64,") and len(strip["image"]) > 2000, strip
         print("полоса кадров: ok, %d байт" % len(strip["image"]), flush=True)

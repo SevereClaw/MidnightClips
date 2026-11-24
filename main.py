@@ -281,6 +281,35 @@ class App:
             if self.cfg["toast"]:
                 self.toast.show("Отметку не поставить", "Захват не идёт или клипы выключены")
 
+    def attach_voices(self, path, span):
+        """Фразы друзей из Discord за время клипа — в клип (под шкалой видно, кто где говорил)."""
+        start, end = span
+        reply = syv.call("voices", timeout=3.0, since=start, until=end)
+        voices = (reply or {}).get("voices") or []
+        out = []
+        for v in voices:
+            try:
+                s, e = max(0.0, float(v["s"]) - start), min(end - start, float(v["e"]) - start)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if e - s >= 0.05:
+                out.append({"name": v.get("name") or "Друг", "s": s, "e": e})
+        if out:
+            self.library.set_voices(path, out)
+            self.push("clip_meta", {"path": path})
+
+    def gate_for(self, path):
+        """Моменты, когда звук Discord в клипе молчит (выключенные друзья): {номер дорожки Discord: [(с, по)]}."""
+        mark = self.library.marks_of(path)
+        off = set(mark.get("voices_off") or [])
+        spans = [(v["s"], v["e"]) for v in mark.get("voices") or [] if v.get("name") in off]
+        if not spans or not self.ffmpeg:
+            return None
+        names = [n.lower() for n in clip_tools.audio_tracks(self.ffmpeg, path)]
+        if "discord" not in names[1:]:
+            return None
+        return {names.index("discord", 1): spans}
+
     def save_clip(self, seconds=None):
         """Сохранить клип: весь буфер или только последние seconds секунд."""
         self.recorder.save_clip(winutil.foreground_app(), seconds)
@@ -589,6 +618,8 @@ class App:
         if kind == "saved":
             if payload.get("markers"):
                 self.library.set_markers(payload["path"], payload["markers"])
+            if payload.get("span"):   # кто говорил в Discord за время клипа — у Steal Your Voice
+                threading.Thread(target=self.attach_voices, args=(payload["path"], payload["span"]), daemon=True).start()
             threading.Thread(target=self.run_cleanup, daemon=True).start()
             self.sound("saved")
             if self.cfg["toast"]:
@@ -862,7 +893,7 @@ class Api:
             segments = [[float(a), float(b)] for a, b in (segments or [])][:80]
         except (TypeError, ValueError):
             segments = []
-        return self._app.tools.start(path, action, start, end, tracks, segments)
+        return self._app.tools.start(path, action, start, end, tracks, segments, self._app.gate_for(path))
 
     def clip_strip(self, path):
         """Полоса кадров для шкалы в окне клипа и для кусков на дорожке монтажа."""
@@ -881,7 +912,8 @@ class Api:
                     return False
                 tracks = p.get("tracks")
                 clean.append({"path": path, "start": float(p["start"]), "end": float(p["end"]),
-                              "tracks": [int(t) for t in tracks] if tracks is not None else None})
+                              "tracks": [int(t) for t in tracks] if tracks is not None else None,
+                              "gate": self._app.gate_for(path) if self._app.library.inside(path) else None})
             except (KeyError, TypeError, ValueError):
                 return False
         if not clean:
@@ -952,6 +984,10 @@ class Api:
         """Состояние Steal Your Voice (для настроек): запущена ли панель и какие в ней пресеты."""
         self._app.syv.refresh(wait=True)
         return self._app.syv.state
+
+    def set_voices_off(self, path, names):
+        """Выключить в клипе друзей из Discord (их фразы приглушаются)."""
+        return self._app.library.set_voices_off(path, names)
 
     def set_markers(self, path, seconds):
         """Отметки в клипе — из окна клипа (поставить, убрать)."""

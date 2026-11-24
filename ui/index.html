@@ -367,6 +367,7 @@
         <div class="tl-tip" id="trimTip" hidden></div>
       </div>
       <div class="tl-ruler" id="tlRuler"></div>
+      <div class="tl-voices" id="tlVoices" hidden title="Кто когда говорил в Discord (из Steal Your Voice). Нажмите на полоску — перейти к фразе"></div>
       <div class="player">
         <button class="pbtn pbtn-main" id="pPlay" title="Играть / пауза (Пробел)" aria-label="Играть или пауза"></button>
         <button class="pbtn" id="pBack" title="Назад на 5 секунд (←), с Shift — на 1 секунду">−5 с</button>
@@ -399,6 +400,11 @@
       <strong>Звук в клипе</strong>
       <span id="edTrackList"></span>
       <small id="edTrackNote" hidden>В этом окне пока слышно всё — выбор применится в сохранённом клипе</small>
+    </div>
+    <div class="tracks" id="edFriends" hidden>
+      <strong>Друзья в Discord</strong>
+      <span id="edFriendList"></span>
+      <small id="edFriendNote" hidden></small>
     </div>
     <div class="editor-actions" id="edActions">
       <button class="mini" id="edTrim">Сохранить обрезку</button>

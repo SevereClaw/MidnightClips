@@ -64,10 +64,11 @@ class Library:
             marks = self._load_marks()
             entry = dict(marks.get(self._rel(path), {}))
             entry.update(values)
-            if entry.get("fav") or entry.get("tags") or entry.get("markers"):
+            if any(entry.get(k) for k in ("fav", "tags", "markers", "voices", "voices_off")):
                 clean = {"fav": bool(entry.get("fav")), "tags": entry.get("tags") or []}
-                if entry.get("markers"):
-                    clean["markers"] = entry["markers"]
+                for key in ("markers", "voices", "voices_off"):
+                    if entry.get(key):
+                        clean[key] = entry[key]
                 marks[self._rel(path)] = clean
             else:
                 marks.pop(self._rel(path), None)
@@ -97,6 +98,27 @@ class Library:
             if value >= 0 and all(abs(value - v) > 0.3 for v in clean):
                 clean.append(value)
         return self._set_mark(path, markers=sorted(clean))
+
+    def set_voices(self, path, voices):
+        """Кто и когда говорил в Discord (из Steal Your Voice): [{"name", "s", "e"}] — секунды от начала клипа."""
+        clean = []
+        for v in list(voices or [])[:5000]:
+            try:
+                s, e = round(float(v["s"]), 2), round(float(v["e"]), 2)
+                name = str(v["name"]).strip()[:40] or "Друг"
+            except (KeyError, TypeError, ValueError):
+                continue
+            if e - s >= 0.05:
+                clean.append({"name": name, "s": s, "e": e})
+        return self._set_mark(path, voices=clean)
+
+    def set_voices_off(self, path, names):
+        """Друзья, которых в этом клипе не должно быть слышно (Discord приглушается в их фразы)."""
+        return self._set_mark(path, voices_off=sorted({str(n)[:40] for n in names or [] if str(n).strip()}))
+
+    def marks_of(self, path):
+        with self._lock:
+            return dict(self._load_marks().get(self._rel(path), {})) if self.inside(path) else {}
 
     def forget(self, path):
         """Клип удалён — убрать его пометки."""
@@ -188,6 +210,8 @@ class Library:
                     "favorite": bool(mark.get("fav")),
                     "tags": list(mark.get("tags") or []),
                     "markers": list(mark.get("markers") or []),
+                    "voices": list(mark.get("voices") or []),
+                    "voices_off": list(mark.get("voices_off") or []),
                     "path": path,
                     "name": os.path.splitext(name)[0],
                     "game": "" if rel == "." else rel.split(os.sep)[0],
