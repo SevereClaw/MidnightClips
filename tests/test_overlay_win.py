@@ -37,7 +37,7 @@ if __name__ == "__main__":
     time.sleep(0.5)
     # меню поверх игры (Alt+Z): открывается, плитки нажимаются, закрывается
     pressed = []
-    flags = {"rec": False}
+    flags = {"rec": False, "discord": True}
 
     def model():
         return {"status": "Идёт запись  00:12" if flags["rec"] else "Клипы включены — в буфере последние 60 с",
@@ -54,12 +54,17 @@ if __name__ == "__main__":
                           {"id": "mic", "title": "Микрофон", "sub": "Не записывается", "active": False, "switch": False},
                           {"id": "copy", "title": "Скопировать", "sub": "Последний клип — и Ctrl+V в Discord", "active": True, "icon": "copy"},
                           {"id": "clips", "title": "Галерея", "sub": "Сегодня клипов: 4", "active": True, "icon": "grid"},
-                          {"id": "settings", "title": "Настройки", "sub": "Открыть настройки программы", "active": True, "icon": "gear"}]}
+                          {"id": "settings", "title": "Настройки", "sub": "Открыть настройки программы", "active": True, "icon": "gear"}],
+                "sounds": [{"id": "snd:@game", "name": "Игра", "on": True},
+                           {"id": "snd:discord.exe", "name": "Discord", "on": flags["discord"]},
+                           {"id": "snd:mp3player.exe", "name": "Mp3player", "on": False}]}
 
     def action(ident):
         pressed.append(ident)
         if ident == "record":
             flags["rec"] = not flags["rec"]
+        if ident == "snd:discord.exe":
+            flags["discord"] = not flags["discord"]
         return ident == "clip"
 
     toast.toggle_menu(rect, model, action)
@@ -77,6 +82,9 @@ if __name__ == "__main__":
         data = base64.b64encode(open(small, "rb").read()).decode()
         for i in range(0, len(data), 3000):
             print("SHOT:" + data[i:i + 3000], flush=True)
+    toast.menu_press("snd:discord.exe")
+    time.sleep(0.6)
+    assert toast.menu_open and not flags["discord"], "выключатель звука программы должен сработать, меню — остаться"
     toast.menu_press("record")
     time.sleep(1.0)
     assert toast.menu_open and flags["rec"], "после «записи» меню должно остаться открытым"
@@ -87,7 +95,7 @@ if __name__ == "__main__":
     time.sleep(0.7)
     toast.toggle_menu(rect, model, action)   # повторное нажатие Alt+Z закрывает
     time.sleep(0.7)
-    assert not toast.menu_open and pressed == ["record", "clip"], (toast.menu_open, pressed)
+    assert not toast.menu_open and pressed == ["snd:discord.exe", "record", "clip"], (toast.menu_open, pressed)
     print("меню поверх игры: открытие, нажатия и закрытие — ok", flush=True)
 
     # анимация: меню появляется и исчезает плавно — много кадров, а не десяток

@@ -1918,8 +1918,10 @@ static void refreshApps() {
     const std::map<DWORD, ProcInfo> procs = snapshotProcesses();
     std::set<DWORD> roots = audioRoots(procs, GetCurrentProcessId(), g_includeParent ? 0 : g_parentPid);
     // Захват идёт по дереву процессов. Если одна программа со звуком запущена из другой (игра из
-    // лаунчера), их нельзя снять обе, не записав игру дважды: при одинаковой громкости берём
-    // верхнюю (она включает нижнюю), при разной — нижнюю.
+    // лаунчера, плеер из Проводника), их нельзя снять обе, не записав нижнюю дважды. Если обе пишутся
+    // одинаково (та же громкость, та же дорожка) — берём верхнюю, она включает нижнюю. Иначе — нижнюю:
+    // у неё своя громкость или своя дорожка, и выключить её в клипе должно быть можно. Раньше дорожку
+    // не учитывали: плеер, запущенный из Проводника, целиком уходил в «Остальное» через Проводник.
     std::set<DWORD> drop;
     for (DWORD r : roots) {
         DWORD cur = r;
@@ -1928,8 +1930,10 @@ static void refreshApps() {
             if (it == procs.end() || it->second.parent == cur) break;
             cur = it->second.parent;
             if (roots.count(cur)) {
-                const float g1 = gainOf(procs.at(cur).exe), g2 = gainOf(procs.at(r).exe);
-                drop.insert(g1 == g2 ? r : cur);
+                const std::wstring& upper = procs.at(cur).exe;
+                const std::wstring& lower = procs.at(r).exe;
+                const bool same = gainOf(upper) == gainOf(lower) && trackOf(upper) == trackOf(lower);
+                drop.insert(same ? r : cur);
             }
         }
     }

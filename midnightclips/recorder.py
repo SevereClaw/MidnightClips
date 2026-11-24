@@ -717,6 +717,16 @@ class Recorder:
                 pass
         return rows
 
+    def menu_only_apps(self):
+        """Программы, выключенные из меню поверх игры, но не добавленные в список в настройках:
+        своей дорожки у них нет — иначе выключение меняло бы набор дорожек и сбрасывало буфер."""
+        try:
+            data = json.loads(self.cfg["app_volumes"] or "{}")
+        except (ValueError, TypeError):
+            return set()
+        return {str(k).strip().lower() for k, v in (data.items() if isinstance(data, dict) else [])
+                if isinstance(v, dict) and v.get("menu")}
+
     def audio_plan(self):
         """Что и с какой громкостью пишет движок и как звук раскладывается по дорожкам."""
         rows = self.audio_rows()
@@ -747,14 +757,17 @@ class Recorder:
                 return len(plan["names"]) - 1
             if mic:
                 plan["mic_track"] = add("Микрофон")
-            # Дорожка игры есть всегда, когда записывается игра или окно, — даже пока игра не запущена:
-            # иначе набор дорожек менялся бы при входе в игру, и буфер приходилось бы начинать заново.
-            if target in ("game", "window") and rows.get("@game", (True, 100))[0]:
+            # Дорожка игры есть всегда, когда записывается игра или окно, — даже пока игра не запущена
+            # или выключена: иначе набор дорожек менялся бы при входе в игру или нажатии выключателя,
+            # и буфер приходилось бы начинать заново. Выключенная программа просто молчит на своей дорожке.
+            if target in ("game", "window"):
                 index = add("Игра")
-                if game and gains.get(game, default) > 0:
+                if game:
                     plan["app_track"][game] = index
+            menu_only = self.menu_only_apps()
             for exe in sorted(gains):
-                if exe not in (game, own) and gains[exe] > 0 and len(plan["names"]) < 7:
+                if (exe not in (game, own) and not exe.startswith("@") and exe not in menu_only
+                        and len(plan["names"]) < 7):
                     plan["app_track"][exe] = add(exe[:-4].capitalize() if exe.endswith(".exe") else exe)
             if default > 0 or include_parent:
                 plan["other_track"] = add("Остальное")

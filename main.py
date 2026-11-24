@@ -253,7 +253,56 @@ class App:
     # ------------------------------------------------ меню поверх игры (Alt+Z)
 
     def toggle_overlay(self):
+        if not self.toast.menu_open:   # какие программы сейчас звучат — для переключателей звука в меню
+            threading.Thread(target=self.refresh_heard_apps, daemon=True, name="heard-apps").start()
         self.toast.toggle_menu(self.monitor_rect(), self.overlay_model, self.overlay_action)
+
+    def refresh_heard_apps(self):
+        try:
+            self._heard_apps = self.recorder.list_audio_apps()
+        except Exception:
+            pass
+
+    def overlay_sounds(self):
+        """Выключатели звука программ в меню: игра, программы из списка в настройках и те, что звучат сейчас."""
+        cfg, rec = self.cfg, self.recorder
+        if not cfg["audio"]:
+            return []
+        rows = rec.audio_rows()
+        specific = cfg["audio_mode"] == "apps"
+        own = os.path.basename(sys.executable).lower()
+        out = []
+        if cfg["capture_target"] in ("game", "window"):
+            out.append({"id": "snd:@game", "name": "Игра", "on": rows.get("@game", (True, 100))[0]})
+        listed = sorted(k for k in rows if not k.startswith("@"))
+        heard = [exe for exe in sorted(getattr(self, "_heard_apps", None) or []) if exe not in rows and exe != own]
+        for exe in (listed + heard)[:8]:
+            on = rows[exe][0] if exe in rows else not specific   # в режиме «только отмеченные» неотмеченные не пишутся
+            name = exe[:-4] if exe.endswith(".exe") else exe
+            out.append({"id": "snd:" + exe, "name": name[:1].upper() + name[1:], "on": on})
+        return out
+
+    def toggle_app_sound(self, key):
+        """Включить или выключить звук программы в записи (без перезапуска захвата, буфер не теряется)."""
+        try:
+            data = json.loads(self.cfg["app_volumes"] or "{}")
+            if not isinstance(data, dict):
+                data = {}
+        except (ValueError, TypeError):
+            data = {}
+        rows = self.recorder.audio_rows()
+        if key in rows:
+            on, vol = rows[key]
+            entry = data.get(key) if isinstance(data.get(key), dict) else {}
+            entry = dict(entry, on=not on, vol=vol)
+        elif key == "@game":   # игра по умолчанию пишется — выключаем
+            entry = {"on": False, "vol": 100}
+        else:   # программы ещё нет в списке: выключаем (а в режиме «только отмеченные» она не пишется — включаем)
+            entry = {"on": self.cfg["audio_mode"] == "apps", "vol": 100}
+            if self.cfg["separate_tracks"]:
+                entry["menu"] = True   # без своей дорожки — набор дорожек не меняется, буфер сохраняется
+        data[key] = entry
+        self.apply_settings({"app_volumes": json.dumps(data, ensure_ascii=False)})
 
     def overlay_facts(self):
         """Последний клип, клипы за сегодня и свободное место — для меню. Папку перечитываем не чаще раза в 4 секунды."""
@@ -349,7 +398,8 @@ class App:
                 "%d ч назад" % (ago // 3600) if ago < 86400 else "%d дн назад" % (ago // 86400)
             last_text = "%s  ·  %s  ·  %.0f МБ" % (last["name"][:48], when, last["size"] / 1048576)
         hint = "Цифры 1–9, стрелки с Enter или мышь — выбрать.   %s или Esc — закрыть" % (cfg["hotkey_overlay"] or "Esc")
-        return {"status": status, "recording": recording, "tiles": tiles, "chips": chips, "last": last_text, "hint": hint}
+        return {"status": status, "recording": recording, "tiles": tiles, "chips": chips, "last": last_text, "hint": hint,
+                "sounds": self.overlay_sounds()}
 
     def overlay_action(self, ident):
         """Нажатие плитки. True — меню после этого закрыть."""
@@ -372,6 +422,9 @@ class App:
         if ident == "mic":
             if self.cfg["mic"]:
                 self.apply_settings({"mic_on": not self.cfg["mic_on"]})
+            return False
+        if ident.startswith("snd:"):
+            self.toggle_app_sound(ident[4:])
             return False
         if ident == "copy":
             last = self.overlay_facts()["last"]

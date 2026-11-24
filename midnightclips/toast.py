@@ -200,7 +200,19 @@ class Toast(threading.Thread):
                     tags = (tags,) if isinstance(tags, str) else tuple(tags)
                     if self.group:
                         tags += (self.group,)
-                    return target(*args, tags=tags, **kw)
+                    item = target(*args, tags=tags, **kw)
+                    font = kw.get("font")
+                    if name == "create_text" and isinstance(font, tuple) and "italic" in font[2:]:
+                        # Наклонные буквы вылезают за рамку, которую Tk считает для текста. Когда такой
+                        # текст двигается или меняется, хвосты букв за рамкой не перерисовываются и
+                        # остаются на экране «следами» (сильнее всего — у крупных часов). Невидимый
+                        # прямоугольник с запасом расширяет область перерисовки на эти хвосты.
+                        box = self.canvas.bbox(item)
+                        if box:
+                            pad = abs(int(font[1])) // 2 + 6
+                            self.canvas.create_rectangle(box[0] - pad, box[1] - pad // 2, box[2] + pad, box[3] + pad // 2,
+                                                         fill="", outline="", tags=tuple(t for t in tags if t != "clock"))
+                    return item
                 return create
 
         def timer_precision(on):
@@ -400,6 +412,56 @@ class Toast(threading.Thread):
                 elif tile.get("icon"):
                     menu_icon(canvas, tile["icon"], x + tw - skew - S(62), y + th // 2 + S(14), S(24), ink, fill)
 
+            # звук программ в записи: выключатели в одну строку под плитками
+            sounds = model.get("sounds") or []
+            canvas.group = "g_snd"
+            if sounds and tiles:
+                sy = y0 + rows * (th + gap) - gap + S(46)
+                if sy + S(18) < h - S(150):
+                    item = canvas.create_text(x0 + S(22), sy, text="ЗВУК В ЗАПИСИ", anchor="w", fill=BLACK,
+                                              font=("Arial Black", S(11), "italic"))
+                    x2 = canvas.bbox(item)[2]
+                    canvas.create_polygon(x0 + S(10), sy - S(16), x2 + S(26), sy - S(16), x2 + S(16), sy + S(16), x0, sy + S(16),
+                                          fill=YELLOW, outline="")
+                    canvas.tag_raise(item)
+                    px = x2 + S(40)
+                    right = x0 + cols * tw + (cols - 1) * gap
+                    for snd in sounds:
+                        on = bool(snd.get("on"))
+                        hover = menu["hover"] == snd["id"]
+                        flash = snd["id"] == flash_id
+                        fill = WHITE if flash else (YELLOW if on else GREY)
+                        ink = BLACK if (on or flash) else SOFT
+                        label = canvas.create_text(px + S(58), sy, text=snd.get("name", ""), anchor="w", fill=ink,
+                                                   font=("Segoe UI", S(12), "bold"))
+                        lx2 = canvas.bbox(label)[2]
+                        pw = lx2 - px + S(22)
+                        if px + pw > right and px > x2 + S(40):   # не влезает — остальные не показываем
+                            canvas.delete(label)
+                            break
+                        top, bottom = sy - S(19), sy + S(19)
+                        if hover:
+                            d = S(6)
+                            canvas.create_polygon(px + S(10) + d, top + d, px + pw + d, top + d, px + pw - S(10) + d, bottom + d,
+                                                  px + d, bottom + d, fill=WHITE, outline="")
+                        canvas.create_polygon(px + S(10), top, px + pw, top, px + pw - S(10), bottom, px, bottom,
+                                              fill=fill, outline="")
+                        # маленький выключатель
+                        sw, sh = S(36), S(20)
+                        kx0, ky0 = px + S(14), sy - sh // 2
+                        track = BLACK if on else "#555555"
+                        canvas.create_oval(kx0, ky0, kx0 + sh, ky0 + sh, fill=track, outline="")
+                        canvas.create_oval(kx0 + sw - sh, ky0, kx0 + sw, ky0 + sh, fill=track, outline="")
+                        canvas.create_rectangle(kx0 + sh // 2, ky0, kx0 + sw - sh // 2, ky0 + sh, fill=track, outline="")
+                        knob = kx0 + sw - sh if on else kx0
+                        m = S(3)
+                        canvas.create_oval(knob + m, ky0 + m, knob + sh - m, ky0 + sh - m, fill=YELLOW if on else SOFT, outline="")
+                        if not on:   # выключенная программа — имя зачёркнуто
+                            canvas.create_line(px + S(58), sy, lx2, sy, fill=ink, width=max(2, S(2)))
+                        canvas.tag_raise(label)
+                        menu["boxes"].append((px, top, px + pw, bottom, snd["id"]))
+                        px += pw + S(14)
+
             # последний клип и подсказка
             canvas.group = "g_last"
             ly = h - S(128) + int((1 - e) * S(60))
@@ -426,7 +488,8 @@ class Toast(threading.Thread):
             t = menu["intro"]
             e = 1 - ease(t)
             want = {"g_head": (-int(e * 820 * k), 0, True), "g_clock": (int(e * 420 * k), 0, True),
-                    "g_chips": (0, int(e * 30 * k), True), "g_last": (0, int(e * 60 * k), True)}
+                    "g_chips": (0, int(e * 30 * k), True), "g_last": (0, int(e * 60 * k), True),
+                    "g_snd": (0, int(e * 60 * k), True)}
             for i in range(menu["tiles"]):
                 ti = ease(t * 1.7 - i * 0.075)
                 want["g_t%d" % i] = (int((1 - ti) * 220 * k), 0, ti > 0)
@@ -453,14 +516,24 @@ class Toast(threading.Thread):
                     x += period
             menu["march"] = 0.0
 
-        def menu_refresh():
+        def menu_reload(force=False):
+            """Перечитать состояние и перерисовать — только если что-то поменялось. Полная перерисовка
+            два раза в секунду без нужды давала мелькание и следы на экране."""
             if menu["win"] is None or menu["closing"]:
                 return
             try:
-                menu["model"] = menu["get"]()
+                model = menu["get"]()
             except Exception as exc:
                 self.errors.append("menu model: %s" % exc)
-            menu_draw()
+                return
+            if force or model != menu["model"]:
+                menu["model"] = model
+                menu_draw()
+
+        def menu_refresh():
+            if menu["win"] is None or menu["closing"]:
+                return
+            menu_reload(force=menu["model"] is None)
             menu["timer"] = root.after(500, menu_refresh)
 
         @guard
@@ -499,10 +572,8 @@ class Toast(threading.Thread):
                 menu["blink"] = blink
                 canvas.itemconfigure("pulse_a", fill=RED if blink else "#6E0014")
                 canvas.itemconfigure("pulse_b", state="normal" if blink else "hidden")
-            clock = time.strftime("%H:%M")
-            if clock != menu["clock"]:
-                menu["clock"] = clock
-                canvas.itemconfigure("clock", text=clock)
+            if time.strftime("%H:%M") != menu["clock"] and not menu["closing"]:
+                menu_draw()   # новая минута — перерисовать целиком: при замене текста на месте оставались следы цифр
             win.update_idletasks()   # показать кадр сейчас, а не «когда-нибудь»
 
         def menu_anim():
@@ -528,6 +599,8 @@ class Toast(threading.Thread):
                 try:
                     if act(ident):
                         self._queue.put(("menu_close",))
+                    else:
+                        self._queue.put(("menu_reload",))   # выключатель — сразу показать новое положение
                 except Exception as exc:
                     self.errors.append("menu action: %s" % exc)
             threading.Thread(target=work, daemon=True).start()
@@ -575,7 +648,7 @@ class Toast(threading.Thread):
                 strip = tk.Canvas(win, width=rect["w"], height=int(20 * scale), bg=BLACK, highlightthickness=0)
                 strip.place(x=0, y=0 if top else rect["h"] - int(20 * scale))
                 bands.append(strip)
-            menu.update(win=win, canvas=canvas, get=get_model, act=on_action, hover=None, size=(rect["w"], rect["h"]),
+            menu.update(win=win, canvas=canvas, get=get_model, act=on_action, hover=None, model=None, size=(rect["w"], rect["h"]),
                         t0=time.perf_counter(), last=time.perf_counter(), intro=1.0 if instant else 0.0, flash=(None, 0.0),
                         blink=None, bands=bands, closing=False, pose={})
             bands_draw()
@@ -659,6 +732,8 @@ class Toast(threading.Thread):
                     menu_close()
                 elif item[0] == "menu_press":
                     menu_act(item[1])
+                elif item[0] == "menu_reload":
+                    menu_reload()
             root.after(15, poll)   # часто: от нажатия клавиши до появления меню не должно быть заметной паузы
 
         root.after(50, poll)
