@@ -379,6 +379,7 @@ class App:
 
     def toggle_overlay(self):
         if not self.toast.menu_open:   # какие программы сейчас звучат — для переключателей звука в меню
+            self.overlay_page, self.overlay_gpage, self.overlay_sel = "main", 0, None
             threading.Thread(target=self.refresh_heard_apps, daemon=True, name="heard-apps").start()
             self.syv.refresh()
         self.toast.toggle_menu(self.monitor_rect(), self.overlay_model, self.overlay_action)
@@ -442,6 +443,7 @@ class App:
             midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
             facts["today"] = sum(1 for c in clips if c["mtime"] >= midnight)
             facts["last"] = clips[0] if clips else None
+            facts["clips"] = clips
         except Exception:
             pass
         try:
@@ -499,7 +501,7 @@ class App:
              "sub": "Последний клип — и Ctrl+V в Discord" if last else "Клипов пока нет"},
             {"id": "clips", "title": "Галерея", "active": True, "icon": "grid",
              "sub": "Сегодня клипов: %d" % facts["today"] if facts["today"] else "Все клипы и записи"},
-            {"id": "settings", "title": "Настройки", "active": True, "sub": "Открыть настройки программы", "icon": "gear"},
+            {"id": "settings", "title": "Настройки", "active": True, "sub": "Быстрые настройки прямо здесь", "icon": "gear"},
         ]
 
         snap = rec.snapshot()
@@ -531,8 +533,159 @@ class App:
         voice = self.overlay_voice()
         if voice:
             rows.append({"label": "STEAL YOUR VOICE", "items": voice})
-        return {"status": status, "recording": recording, "tiles": tiles, "chips": chips, "last": last_text, "hint": hint,
-                "rows": rows}
+            hint += "   ·   ПКМ по пресету — спрятать"
+        model = {"status": status, "recording": recording, "tiles": tiles, "chips": chips, "last": last_text, "hint": hint,
+                 "rows": rows, "page": "main"}
+        page = getattr(self, "overlay_page", "main")
+        if page == "settings":
+            model.update(self.overlay_settings_page(), page="settings", back=True)
+        elif page == "gallery":
+            model.update(self.overlay_gallery_page(facts.get("clips") or []), page="gallery", back=True)
+        return model
+
+    # ---- свои разделы меню поверх игры: настройки и галерея прямо поверх игры, без окна программы
+
+    def syv_hidden(self):
+        try:
+            data = json.loads(self.cfg["syv_hidden_presets"] or "[]")
+            return [str(x) for x in data] if isinstance(data, list) else []
+        except (ValueError, TypeError):
+            return []
+
+    def overlay_settings_page(self):
+        cfg = self.cfg
+
+        def span(v):
+            return "%d мин" % (v // 60) if v >= 60 and v % 60 == 0 else "%d с" % v
+
+        def switch(key, title, on_sub, off_sub, extra=None):
+            on = bool(cfg[key])
+            tile = {"id": "set:" + key, "title": title, "active": on, "switch": on, "sub": on_sub if on else off_sub}
+            tile.update(extra or {})
+            return tile
+        tiles = [
+            {"id": "set:buffer_seconds", "title": "Длина клипа", "active": True, "value": span(int(cfg["buffer_seconds"])),
+             "sub": "Сколько последних секунд сохраняет клип. Нажмите — дальше"},
+            {"id": "set:fps", "title": "Кадров в секунду", "active": True, "value": str(int(cfg["fps"])),
+             "sub": "30 / 60 / 120. Перезапустит захват — буфер начнётся заново"},
+            switch("audio", "Звук компьютера", "Игра и программы попадают в запись", "Запись без звука компьютера"),
+            switch("mic_on", "Микрофон в записи", "Голос попадает в клипы", "Голос не записывается")
+            if cfg["mic"] else {"id": "set:none", "title": "Микрофон в записи", "active": False, "sub": "Устройство не выбрано в настройках программы"},
+            switch("cursor", "Курсор в записи", "Курсор мыши виден в клипах", "Курсор не записывается"),
+            switch("indicator", "Точка записи", "Красная точка в углу, пока идёт запись", "Без точки"),
+            switch("toast", "Уведомления", "Сообщение в углу при сохранении", "Без сообщений"),
+            switch("sound", "Звуковые сигналы", "Сигнал при сохранении и записи", "Без звуков"),
+        ]
+        state = self.syv.state
+        presets = [p for p in ((state or {}).get("presets") or [])]
+        if presets:
+            current = cfg["syv_preset_record"]
+            tiles.append({"id": "set:syv_preset_record", "title": "Голос на запись", "active": bool(current),
+                          "value": current or "не менять",
+                          "sub": "Пресет Steal Your Voice на время записи. Нажмите — следующий"})
+        else:
+            tiles.append(switch("separate_tracks", "Отдельные дорожки", "Микрофон, Discord, игра — отдельно в клипе",
+                                "Всё одним звуком"))
+        rows = []
+        hidden = self.syv_hidden()
+        if hidden:
+            rows.append({"label": "СПРЯТАННЫЕ ПРЕСЕТЫ", "items": [{"id": "unhide:" + n, "name": "↺ " + n} for n in hidden[:8]]})
+        rows.append({"label": "ЕЩЁ", "items": [{"id": "open:settings", "name": "Все настройки — в программе"},
+                                                {"id": "page:main", "name": "← Назад   Esc"}]})
+        return {"tiles": tiles, "rows": rows,
+                "hint": "Нажатие — переключить или следующее значение.   Esc — назад, %s — закрыть" % (self.cfg["hotkey_overlay"] or "Esc")}
+
+    def overlay_gallery_page(self, clips):
+        per = 6
+        pages = max(1, (len(clips) + per - 1) // per)
+        self.overlay_gpage = max(0, min(getattr(self, "overlay_gpage", 0), pages - 1))
+        chunk = clips[self.overlay_gpage * per:(self.overlay_gpage + 1) * per]
+        if not getattr(self, "overlay_sel", None) or not any(c["path"] == self.overlay_sel for c in clips):
+            self.overlay_sel = chunk[0]["path"] if chunk else None
+        tiles = []
+        missing = []
+        for clip in chunk:
+            ago = max(0, int(time.time() - clip["mtime"]))
+            when = "только что" if ago < 60 else "%d мин назад" % (ago // 60) if ago < 3600 else \
+                "%d ч назад" % (ago // 3600) if ago < 86400 else "%d дн назад" % (ago // 86400)
+            dur = clip.get("duration")
+            length = "%d:%02d" % (int(dur) // 60, int(dur) % 60) if dur else ""
+            jpg = self.library.thumb_file(clip["path"])
+            if not jpg:
+                missing.append(clip["path"])
+            tiles.append({"id": "gal:" + clip["path"], "title": clip["name"][:60], "image": jpg or "",
+                          "sub": "  ·  ".join(x for x in (when, length, "%.0f МБ" % (clip["size"] / 1048576)) if x),
+                          "active": clip["path"] == self.overlay_sel, "key": "★" if clip.get("favorite") else ""})
+        if missing and not getattr(self, "_thumbs_busy", False):   # превью делаются в фоне, меню не ждёт
+            self._thumbs_busy = True
+
+            def make(paths):
+                try:
+                    for path in paths:
+                        self.library.thumb(path)
+                finally:
+                    self._thumbs_busy = False
+            threading.Thread(target=make, args=(missing,), daemon=True).start()
+        sel = next((c for c in clips if c["path"] == self.overlay_sel), None)
+        rows = []
+        if sel:
+            items = [{"id": "gact:copy", "name": "Скопировать — Ctrl+V в Discord"}]
+            if self.cfg["discord_webhook"].strip():
+                items.append({"id": "gact:send", "name": "Отправить в Discord"})
+            items.append({"id": "gact:fav", "name": "★ Убрать из избранного" if sel.get("favorite") else "★ В избранное"})
+            items.append({"id": "gact:open", "name": "Открыть в программе"})
+            rows.append({"label": "ВЫБРАН: " + sel["name"][:28].upper(), "items": items})
+        rows.append({"label": "СТРАНИЦА %d ИЗ %d" % (self.overlay_gpage + 1, pages),
+                     "items": [{"id": "gal:prev", "name": "◀  Новее"}, {"id": "gal:next", "name": "Старее  ▶"},
+                               {"id": "page:main", "name": "← Назад   Esc"}]})
+        return {"tiles": tiles, "rows": rows,
+                "hint": "Нажмите на клип, чтобы выбрать.   ПКМ по клипу — в избранное.   Esc — назад" if clips
+                else "Клипов пока нет.   Esc — назад"}
+
+    def overlay_setting(self, key):
+        """Переключить настройку из меню поверх игры (переключатель или следующее значение)."""
+        cfg = self.cfg
+
+        def after(values, current):
+            values = list(values)
+            return values[(values.index(current) + 1) % len(values)] if current in values else values[0]
+        if key == "buffer_seconds":
+            self.apply_settings({key: after([15, 30, 60, 120, 300, 600], int(cfg[key]))})
+        elif key == "fps":
+            self.apply_settings({key: after([30, 60, 120], int(cfg[key]))})
+        elif key == "syv_preset_record":
+            names = [""] + [p for p in ((self.syv.state or {}).get("presets") or [])]
+            self.apply_settings({key: after(names, cfg[key])})
+        elif key in ("audio", "mic_on", "cursor", "indicator", "toast", "sound", "separate_tracks"):
+            if key == "mic_on" and not cfg["mic"]:
+                return
+            self.apply_settings({key: not cfg[key]})
+
+    def overlay_gallery_action(self, what):
+        path = getattr(self, "overlay_sel", None)
+        if not path or not os.path.isfile(path):
+            return False
+        name = os.path.splitext(os.path.basename(path))[0]
+        if what == "copy":
+            if winutil.copy_file_to_clipboard(path):
+                self.toast.show("Клип скопирован", "Вставьте в Discord: Ctrl+V")
+                return True
+        elif what == "send":
+            if self.tools.start(path, "send"):
+                self._overlay_job = True   # результат — уведомлением, меню можно закрыть
+                self.toast.show("Отправляю в Discord", name)
+                return True
+            self.toast.show("Подождите", "Сейчас идёт другая работа с клипом")
+        elif what == "fav":
+            clip = next((c for c in (self.overlay_facts().get("clips") or []) if c["path"] == path), None)
+            self.library.set_favorite(path, not (clip or {}).get("favorite"))
+            self._overlay_facts = None   # перечитать — звёздочка сразу на месте
+            self.push("clip_meta", {"path": path})
+        elif what == "open":
+            self.show_window()
+            self.push("open_clip", {"path": path})
+            return True
+        return False
 
     def overlay_voice(self):
         """Строка Steal Your Voice в меню: мьют микрофона, эффект голоса и пресеты (если панель запущена)."""
@@ -545,7 +698,8 @@ class App:
         items = [{"id": "syv:mute", "name": "Микрофон везде", "on": not state.get("muted")},
                  {"id": "syv:fx", "name": "Голос: " + (voice.capitalize() if voice else "эффект"), "on": bool(state.get("fx"))}]
         active = str(state.get("active") or "")
-        for name in (state.get("presets") or [])[:8]:
+        hidden = {h.lower() for h in self.syv_hidden()}
+        for name in [p for p in (state.get("presets") or []) if p.lower() not in hidden][:8]:
             items.append({"id": "syv:preset:" + name, "name": name.capitalize() if name.isupper() else name,
                           "active": name.lower() == active.lower()})
         return items
@@ -584,16 +738,53 @@ class App:
         if ident.startswith("syv:preset:"):
             self.syv.send("preset", name=ident[len("syv:preset:"):])
             return False
+        if ident.startswith("ctx:"):   # правая кнопка
+            target = ident[4:]
+            if target.startswith("syv:preset:"):   # спрятать пресет из меню (вернуть — в «Настройках» меню)
+                name = target[len("syv:preset:"):]
+                hidden = self.syv_hidden()
+                if name not in hidden:
+                    self.apply_settings({"syv_hidden_presets": json.dumps(hidden + [name], ensure_ascii=False)})
+            elif target.startswith("gal:") and len(target) > 4 and target[4:] not in ("prev", "next"):
+                self.overlay_sel = target[4:]
+                self.overlay_gallery_action("fav")
+            return False
+        if ident.startswith("page:"):
+            self.overlay_page = ident[5:]
+            if self.overlay_page == "gallery":
+                self._overlay_facts = None   # свежий список клипов
+            return False
+        if ident.startswith("set:"):
+            self.overlay_setting(ident[4:])
+            return False
+        if ident.startswith("unhide:"):
+            self.apply_settings({"syv_hidden_presets": json.dumps([h for h in self.syv_hidden() if h != ident[7:]],
+                                                                  ensure_ascii=False)})
+            return False
+        if ident == "open:settings":
+            self.show_window()
+            self.push("open", {"view": "settings"})
+            return True
+        if ident in ("gal:prev", "gal:next"):
+            self.overlay_gpage = max(0, getattr(self, "overlay_gpage", 0) + (1 if ident == "gal:next" else -1))
+            self.overlay_sel = None
+            return False
+        if ident.startswith("gal:"):
+            self.overlay_sel = ident[4:]
+            return False
+        if ident.startswith("gact:"):
+            return self.overlay_gallery_action(ident[5:])
         if ident == "copy":
             last = self.overlay_facts()["last"]
             if last and os.path.isfile(last["path"]) and winutil.copy_file_to_clipboard(last["path"]):
                 self.toast.show("Клип скопирован", "Вставьте в Discord: Ctrl+V")
                 return True
             return False
-        if ident in ("clips", "settings"):
-            self.show_window()
-            self.push("open", {"view": ident})
-            return True
+        if ident in ("clips", "settings"):   # свои разделы меню — прямо поверх игры
+            self.overlay_page = "gallery" if ident == "clips" else "settings"
+            if ident == "clips":
+                self._overlay_facts = None
+            return False
         return False
 
     def apply_settings(self, values):
@@ -654,6 +845,9 @@ class App:
         self.push(kind, payload)
 
     def on_tool_event(self, kind, payload):
+        if kind == "job_done" and getattr(self, "_overlay_job", False):   # отправка из меню поверх игры — итог уведомлением
+            self._overlay_job = False
+            self.toast.show("Discord" if payload.get("ok") else "Не получилось", payload.get("text", ""))
         if kind == "job_done":
             self.sound("saved" if payload.get("ok") else "error")
         self.push(kind, payload)

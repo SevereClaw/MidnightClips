@@ -37,9 +37,22 @@ if __name__ == "__main__":
     time.sleep(0.5)
     # меню поверх игры (Alt+Z): открывается, плитки нажимаются, закрывается
     pressed = []
-    flags = {"rec": False, "discord": True}
+    flags = {"rec": False, "discord": True, "page": "main", "hidden": []}
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    thumb = os.path.join(root_dir, "assets", "icon.png")   # картинка для плиток галереи
+
+    def gallery():
+        return {"page": "gallery", "back": True, "status": "Галерея", "recording": False, "chips": [], "last": "",
+                "hint": "Esc — назад",
+                "tiles": [{"id": "gal:%d" % i, "title": "Клип %d" % i, "sub": "%d мин назад  ·  0:30  ·  40 МБ" % i,
+                           "image": thumb, "active": i == 0, "key": "★" if i == 1 else ""} for i in range(6)],
+                "rows": [{"label": "ВЫБРАН: КЛИП 0", "items": [{"id": "gact:copy", "name": "Скопировать"}, {"id": "gact:open", "name": "Открыть в программе"}]},
+                         {"label": "СТРАНИЦА 1 ИЗ 2", "items": [{"id": "gal:prev", "name": "◀  Новее"}, {"id": "gal:next", "name": "Старее  ▶"},
+                                                                {"id": "page:main", "name": "← Назад   Esc"}]}]}
 
     def model():
+        if flags["page"] == "gallery":
+            return gallery()
         return {"status": "Идёт запись  00:12" if flags["rec"] else "Клипы включены — в буфере последние 60 с",
                 "recording": flags["rec"], "hint": "Цифры 1–9, стрелки с Enter или мышь — выбрать.   Alt+Z или Esc — закрыть",
                 "last": "Проверка 2026-11-16  ·  3 мин назад  ·  48 МБ",
@@ -72,6 +85,12 @@ if __name__ == "__main__":
             flags["rec"] = not flags["rec"]
         if ident == "snd:discord.exe":
             flags["discord"] = not flags["discord"]
+        if ident == "clips":
+            flags["page"] = "gallery"
+        if ident == "page:main":
+            flags["page"] = "main"
+        if ident.startswith("ctx:"):
+            flags["hidden"].append(ident[4:])
         return ident == "clip"
 
     toast.toggle_menu(rect, model, action)
@@ -92,6 +111,20 @@ if __name__ == "__main__":
     toast.menu_press("snd:discord.exe")
     time.sleep(0.6)
     assert toast.menu_open and not flags["discord"], "выключатель звука программы должен сработать, меню — остаться"
+    toast.menu_press("clips")   # галерея прямо в меню: плитки с картинками
+    time.sleep(0.9)
+    assert toast.menu_open and flags["page"] == "gallery", "галерея меню не открылась"
+    subprocess.run([os.path.join(root_dir, "ffmpeg.exe"), "-hide_banner", "-loglevel", "error", "-y", "-f", "gdigrab",
+                    "-i", "desktop", "-frames:v", "1", "-q:v", "6", os.path.join(root_dir, "overlay_gallery.jpg")])
+    if os.path.isfile(os.path.join(root_dir, "overlay_gallery.jpg")):
+        data = base64.b64encode(open(os.path.join(root_dir, "overlay_gallery.jpg"), "rb").read()).decode()
+        for i in range(0, len(data), 3000):
+            print("SHOT2:" + data[i:i + 3000], flush=True)
+    toast.menu_press("ctx:gal:1")   # правая кнопка
+    time.sleep(0.4)
+    toast.menu_press("page:main")
+    time.sleep(0.6)
+    assert flags["page"] == "main" and flags["hidden"] == ["gal:1"], flags
     toast.menu_press("record")
     time.sleep(1.0)
     assert toast.menu_open and flags["rec"], "после «записи» меню должно остаться открытым"
@@ -102,7 +135,7 @@ if __name__ == "__main__":
     time.sleep(0.7)
     toast.toggle_menu(rect, model, action)   # повторное нажатие Alt+Z закрывает
     time.sleep(0.7)
-    assert not toast.menu_open and pressed == ["snd:discord.exe", "record", "clip"], (toast.menu_open, pressed)
+    assert not toast.menu_open and pressed == ["snd:discord.exe", "clips", "ctx:gal:1", "page:main", "record", "clip"], (toast.menu_open, pressed)
     print("меню поверх игры: открытие, нажатия и закрытие — ok", flush=True)
 
     # анимация: меню появляется и исчезает плавно — много кадров, а не десяток

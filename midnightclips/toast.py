@@ -300,6 +300,26 @@ class Toast(threading.Thread):
                     kx = cx + int(r * pos)
                     canvas.create_oval(kx - width * 2, y - width * 2, kx + width * 2, y + width * 2, fill=ink, outline="")
 
+        def tile_image(path, w, h):
+            """Кадр клипа для плитки галереи (JPEG из кэша превью) — один раз на размер."""
+            key = (path, w, h)
+            images = menu.setdefault("images", {})
+            if key not in images:
+                try:
+                    from PIL import Image, ImageTk
+                    with Image.open(path) as im:
+                        im = im.convert("RGB")
+                        im.thumbnail((w, h))
+                        framed = Image.new("RGB", (w, h), (0, 0, 0))
+                        framed.paste(im, ((w - im.width) // 2, (h - im.height) // 2))
+                    images[key] = ImageTk.PhotoImage(framed, master=root)
+                except Exception:
+                    images[key] = None
+                if len(images) > 60:   # не копить картинки бесконечно
+                    for old in list(images)[:20]:
+                        images.pop(old, None)
+            return images.get(key)
+
         @guard
         def menu_draw():
             real, model = menu["canvas"], menu["model"] or {}
@@ -391,11 +411,30 @@ class Toast(threading.Thread):
                 if tile.get("key"):
                     canvas.create_text(x + tw - S(22), y + S(28), text=tile["key"], anchor="e", fill=ink,
                                        font=("Segoe UI", S(11), "bold"))
-                room = tw - S(170)
-                canvas.create_text(x + S(44), y + S(82), text=tile.get("title", ""), anchor="w", fill=ink,
-                                   font=("Arial Black", S(18), "italic"), width=room + S(20))
-                canvas.create_text(x + S(30), y + S(128), text=tile.get("sub", ""), anchor="w", fill=ink,
-                                   font=("Segoe UI", S(12)), width=room)
+                photo = tile_image(tile.get("image"), S(170), S(96)) if tile.get("image") else None
+                if tile.get("image"):   # клип в галерее: кадр слева, название и подробности справа
+                    ix, iy = x + skew + S(2), y + S(52)
+                    canvas.create_rectangle(ix - S(3), iy - S(3), ix + S(173), iy + S(99), fill=ink, outline="")
+                    if photo is not None:
+                        canvas.create_image(ix, iy, image=photo, anchor="nw")
+                    tx, room = ix + S(186), tw - skew - S(204)
+                    canvas.create_text(tx, y + S(76), text=tile.get("title", ""), anchor="w", fill=ink,
+                                       font=("Segoe UI", S(12), "bold"), width=room)
+                    canvas.create_text(tx, y + S(124), text=tile.get("sub", ""), anchor="w", fill=ink,
+                                       font=("Segoe UI", S(11)), width=room)
+                else:
+                    room = tw - S(170)
+                    canvas.create_text(x + S(44), y + S(82), text=tile.get("title", ""), anchor="w", fill=ink,
+                                       font=("Arial Black", S(18), "italic"), width=room + S(20))
+                    canvas.create_text(x + S(30), y + S(128), text=tile.get("sub", ""), anchor="w", fill=ink,
+                                       font=("Segoe UI", S(12)), width=room)
+                if tile.get("value"):   # настройка со значением: значение — в чёрном ярлыке справа
+                    vx, vy = x + tw - skew - S(26), y + th - S(40)
+                    item = canvas.create_text(vx, vy, text=tile["value"], anchor="e", fill=fill, font=("Arial Black", S(13), "italic"))
+                    bx = canvas.bbox(item)
+                    canvas.create_polygon(bx[0] - S(12), vy - S(16), bx[2] + S(8), vy - S(16), bx[2], vy + S(16), bx[0] - S(20), vy + S(16),
+                                          fill=ink, outline="")
+                    canvas.tag_raise(item)
                 if "switch" in tile:   # выключатель
                     on = bool(tile["switch"])
                     pw, ph = S(66), S(32)
@@ -409,7 +448,7 @@ class Toast(threading.Thread):
                     canvas.create_oval(kx + m, py + m, kx + ph - m, py + ph - m, fill=YELLOW if on else SOFT, outline="")
                     canvas.create_text(px + pw // 2, py - S(14), text="ВКЛ" if on else "ВЫКЛ", fill=ink,
                                        font=("Arial Black", S(10), "italic"))
-                elif tile.get("icon"):
+                elif tile.get("icon") and not tile.get("value") and not tile.get("image"):
                     menu_icon(canvas, tile["icon"], x + tw - skew - S(62), y + th // 2 + S(14), S(24), ink, fill)
 
             # строки выключателей под плитками: звук программ в записи, Steal Your Voice
@@ -535,6 +574,11 @@ class Toast(threading.Thread):
                 self.errors.append("menu model: %s" % exc)
                 return
             if force or model != menu["model"]:
+                if menu["model"] is not None and model.get("page") != menu["model"].get("page"):
+                    # другой раздел меню (настройки, галерея) — плитки въезжают заново
+                    menu["hover"] = None
+                    menu["intro"] = 0.45
+                    menu["t0"] = time.perf_counter() - 0.45 * OPEN_TIME
                 menu["model"] = model
                 menu_draw()
 
@@ -676,7 +720,9 @@ class Toast(threading.Thread):
                 moves = {"Left": (-1, 0), "Right": (1, 0), "Up": (0, -1), "Down": (0, 1)}
                 if menu["closing"]:
                     return
-                if event.keysym == "Escape":
+                if event.keysym in ("Escape", "BackSpace") and (menu["model"] or {}).get("back"):
+                    menu_act("page:main")   # из настроек или галереи меню — назад, а не закрыть
+                elif event.keysym == "Escape":
                     menu_close()
                 elif event.keysym in moves:
                     menu_step(*moves[event.keysym])
@@ -690,6 +736,12 @@ class Toast(threading.Thread):
 
             canvas.bind("<Motion>", motion)
             canvas.bind("<Button-1>", lambda e: menu_act(menu_at(e.x, e.y)))
+
+            def context(event):   # правая кнопка — дополнительное действие (спрятать пресет, в избранное…)
+                ident = menu_at(event.x, event.y)
+                if ident:
+                    menu_act("ctx:" + ident)
+            canvas.bind("<Button-3>", context)
             win.bind("<Key>", key)
             if WIN:   # в запись меню не попадает; фокус берём, чтобы работали Esc и цифры
                 try:

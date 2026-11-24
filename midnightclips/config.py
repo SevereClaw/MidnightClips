@@ -66,7 +66,8 @@ DEFAULTS = {
     "clip_b_seconds": 15,
     "hotkey_overlay": "Alt+Z",  # меню поверх игры
     "hotkey_marker": "Alt+F6",
-    "syv_preset_record": "",    # пресет Steal Your Voice на время записи; пусто — не трогать  # отметка «вот тут было круто» — видна на шкале клипа
+    "syv_preset_record": "",
+    "syv_hidden_presets": "",   # пресеты Steal Your Voice, спрятанные из меню поверх игры (JSON-список)    # пресет Steal Your Voice на время записи; пусто — не трогать  # отметка «вот тут было круто» — видна на шкале клипа
     "folder_per_game": True,
     "sound": True,
     "toast": True,

@@ -241,6 +241,10 @@ window.onBackendEvent = (kind, data) => {
   }
   else if (kind === "job_done") { const from = jobFrom; jobFrom = "editor"; (from === "montage" ? mvFinishJob : finishJob)(data); }
   else if (kind === "files_dropped") mvFilesDropped(data.items || []);
+  else if (kind === "open_clip") {   // «Открыть в программе» из галереи меню поверх игры
+    openView("clips");
+    loadClips().then(() => { const clip = clips.find((c) => c.path === data.path); if (clip) openEditor(clip); });
+  }
   else if (kind === "clip_meta") loadClips().then(() => {   // к клипу добавились фразы друзей из Discord
     const fresh = clips.find((c) => c.path === data.path);
     if (fresh && edClip && edClip.path === data.path) { edClip.voices = fresh.voices; renderFriends(); }
@@ -1618,7 +1622,12 @@ async function renderSyv() {
   if (settings.syv_preset_record && !presets.includes(settings.syv_preset_record))
     sel.add(new Option(settings.syv_preset_record + " (нет в Steal Your Voice)", settings.syv_preset_record));
   sel.value = settings.syv_preset_record || "";
+  let hidden = [];
+  try { hidden = JSON.parse(settings.syv_hidden_presets || "[]"); } catch (e) { hidden = []; }
+  $("rowSyvHidden").hidden = !hidden.length;
+  $("syvHiddenText").textContent = hidden.join(", ");
 }
+$("btnSyvUnhide").onclick = () => saveSetting("syv_hidden_presets", "").then(renderSyv);
 
 async function renderDrives() {
   const list = (await api.list_drives()) || [];

@@ -223,6 +223,14 @@ class Library:
         clips.sort(key=lambda c: c["mtime"], reverse=True)
         return clips
 
+    def thumb_file(self, path):
+        """Готовый кадр-превью (JPEG) клипа или None, если его ещё не делали."""
+        try:
+            jpg = os.path.join(self.thumbs, self._key(path, os.stat(path)) + ".jpg")
+        except OSError:
+            return None
+        return jpg if os.path.isfile(jpg) else None
+
     def thumb(self, path, force=False):
         """Вернуть {'image': data-URL, 'duration': секунды} — кадр делает ffmpeg и кладёт в кэш.
         force — файл вне папки клипов, но его можно показывать (видео, добавленное в монтаж)."""
