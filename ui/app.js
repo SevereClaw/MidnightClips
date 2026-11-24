@@ -507,6 +507,7 @@ async function loadClips() {
 const video = $("edVideo");
 let edClip = null;
 let edBusy = false;
+let edSeekTo = null;   // куда перемотать, когда клип загрузится (открыли кусок из монтажа)
 let edVol = 1, edMuted = false;   // громкость плеера — одна на видео и на отдельные дорожки
 try { const saved = parseFloat(localStorage.getItem("mc_volume")); if (saved >= 0 && saved <= 1) edVol = saved; } catch (e) { /* без памяти */ }
 
@@ -524,38 +525,166 @@ function fmtTime(sec) {
   const m = Math.floor(sec / 60), s = sec - m * 60;
   return m + ":" + (s < 9.95 ? "0" : "") + s.toFixed(1);
 }
-function trimValues() {
-  return [parseFloat($("trimStart").value), parseFloat($("trimEnd").value)];
+// Куски клипа, которые остаются: [{a, b}] по порядку. Всё между ними вырезано.
+let segs = [];
+let segSel = -1;        // выбранный кусок (тянуть ручки, убрать, I / O)
+let segUndo = [];       // прошлые состояния — для Ctrl+Z
+const MIN_SEG = 0.2;    // короче кусок не бывает
+function edDur() { return video.duration || 0; }
+function segsWhole() {
+  const dur = edDur();
+  return !dur || (segs.length === 1 && segs[0].a < 0.05 && segs[0].b > dur - 0.05);
 }
-function trimmed() {
-  const dur = video.duration || 0;
-  const [a, b] = trimValues();
-  return dur > 0 && !(a < 0.05 && b > dur - 0.05);
+function trimmed() { return !segsWhole(); }
+function segAt(t) { return segs.findIndex((g) => t >= g.a - 0.001 && t < g.b - 0.001); }
+function keptLength() { return segs.reduce((sum, g) => sum + g.b - g.a, 0); }
+function rememberSegs() {
+  segUndo.push(JSON.stringify({ segs, segSel }));
+  if (segUndo.length > 60) segUndo.shift();
 }
-function drawTrim() {
-  const dur = video.duration || 0;
-  if (!dur) return;
-  const [a, b] = trimValues();
-  $("trimRange").style.left = (a / dur * 100) + "%";
-  $("trimRange").style.width = ((b - a) / dur * 100) + "%";
-  const whole = !trimmed();
-  $("trimText").textContent = whole
-    ? "Весь клип, " + fmtTime(dur)
-    : "Отрезок " + fmtTime(a) + " – " + fmtTime(b) + ", длина " + fmtTime(b - a);
-  const picked = pickedTracks() !== null;
-  $("edTrim").disabled = (whole && !picked) || edBusy;
-  $("edTrim").textContent = whole && picked ? "Сохранить с этими дорожками" : "Сохранить обрезку";
-  $("trimPlayRange").hidden = whole;
-  $("trimReset").hidden = whole;
+function undoSegs() {
+  const last = segUndo.pop();
+  if (!last) { osd("Отменять нечего"); return; }
+  const state = JSON.parse(last);
+  segs = state.segs; segSel = state.segSel;
+  drawTrim();
+  osd("Отменено");
 }
-function setTrim(a, b) {
-  const dur = video.duration || 0;
-  a = Math.max(0, Math.min(a, dur - 0.5));
-  b = Math.max(a + 0.5, Math.min(b, dur));
-  $("trimStart").value = a;
-  $("trimEnd").value = b;
+function setSegs(list, sel) {
+  segs = list.map((g) => ({ a: g.a, b: g.b })).sort((x, y) => x.a - y.a);
+  segSel = sel == null ? -1 : Math.min(sel, segs.length - 1);
   drawTrim();
 }
+function setTrim(a, b) {   // один кусок [a, b] — как прежняя обрезка
+  const dur = edDur();
+  a = Math.max(0, Math.min(a, dur - MIN_SEG));
+  b = Math.max(a + MIN_SEG, Math.min(b, dur));
+  setSegs([{ a, b }], 0);
+}
+function pct(t) { const dur = edDur(); return dur ? t / dur * 100 : 0; }
+function drawTrim() {
+  const dur = edDur();
+  if (!dur) return;
+  // куски и вырезанные промежутки между ними
+  const box = $("tlCuts");
+  box.innerHTML = "";
+  let from = 0;
+  const gap = (a, b) => {
+    if (b - a < 0.01) return;
+    const el = document.createElement("div");
+    el.className = "tl-gap";
+    el.style.left = pct(a) + "%"; el.style.width = pct(b - a) + "%";
+    box.appendChild(el);
+  };
+  const width = $("edTrack").clientWidth || 1;
+  segs.forEach((g, i) => {
+    gap(from, g.a);
+    from = g.b;
+    const el = document.createElement("div");
+    el.className = "tl-seg" + (i === segSel ? " is-sel" : "");
+    el.dataset.seg = i;
+    el.style.left = pct(g.a) + "%"; el.style.width = pct(g.b - g.a) + "%";
+    if ((g.b - g.a) / dur * width > 70) {
+      const label = document.createElement("b");
+      label.textContent = (segs.length > 1 ? (i + 1) + " · " : "") + fmtTime(g.b - g.a);
+      el.appendChild(label);
+    }
+    ["l", "r"].forEach((side) => {
+      const h = document.createElement("div");
+      h.className = "tl-h " + side;
+      h.dataset.seg = i; h.dataset.side = side;
+      h.title = side === "l" ? "Начало куска — тяните" : "Конец куска — тяните";
+      el.appendChild(h);
+    });
+    box.appendChild(el);
+  });
+  gap(from, dur);
+
+  const whole = segsWhole();
+  const kept = keptLength();
+  $("trimText").textContent = whole ? "Весь клип, " + fmtTime(dur)
+    : segs.length === 1 ? "Отрезок " + fmtTime(segs[0].a) + " – " + fmtTime(segs[0].b) + ", длина " + fmtTime(kept)
+    : "Кусков: " + segs.length + " · вместе " + fmtTime(kept) + " из " + fmtTime(dur);
+  const picked = pickedTracks() !== null;
+  $("edTrim").disabled = (whole && !picked) || edBusy;
+  $("edTrim").textContent = segs.length > 1 ? "Сохранить склейку из " + segs.length + " " + plural(segs.length, "куска", "кусков", "кусков")
+    : whole && picked ? "Сохранить с этими дорожками" : "Сохранить обрезку";
+  $("edCompress").textContent = (segs.length > 1 ? "Склеить и сжать до " : "Сжать до ") + settings.discord_limit_mb + " МБ";
+  $("cutDelete").disabled = segs.length < 2;
+  $("cutUndo").disabled = !segUndo.length;
+  $("trimReset").hidden = whole;
+  drawRuler();
+}
+function plural(n, one, few, many) {
+  const m = Math.abs(n) % 100, d = m % 10;
+  return m >= 11 && m <= 19 ? many : d === 1 ? one : d >= 2 && d <= 4 ? few : many;
+}
+function drawRuler() {
+  const dur = edDur(), box = $("tlRuler");
+  const width = box.clientWidth || 1;
+  box.innerHTML = "";
+  if (!dur) return;
+  const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+  const step = steps.find((v) => v / dur * width >= 64) || 3600;
+  for (let t = 0; t <= dur + 0.001; t += step) {
+    const tick = document.createElement("span");
+    tick.style.left = pct(t) + "%";
+    const label = document.createElement("em");
+    const m = Math.floor(t / 60), sec = t - m * 60;
+    label.textContent = m + ":" + String(Math.floor(sec)).padStart(2, "0") + (step < 1 ? "." + Math.round((sec % 1) * 10) : "");
+    if (pct(t) < 96) tick.appendChild(label);
+    box.appendChild(tick);
+  }
+}
+// ---- монтаж и резка
+function splitHere() {
+  const t = video.currentTime, k = segAt(t);
+  if (k < 0) { osd("Метка во вырезанном месте"); return; }
+  const g = segs[k];
+  if (t - g.a < MIN_SEG || g.b - t < MIN_SEG) { osd("Слишком близко к краю куска"); return; }
+  rememberSegs();
+  const list = segs.slice();
+  list.splice(k, 1, { a: g.a, b: t }, { a: t, b: g.b });
+  setSegs(list, k + 1);
+  osd("Разрезано");
+}
+function deleteSeg() {
+  if (segs.length < 2) { osd(segs.length ? "Последний кусок не убрать — сначала разрежьте" : ""); return; }
+  let k = segSel >= 0 ? segSel : segAt(video.currentTime);
+  if (k < 0) { osd("Выберите кусок — нажмите на него"); return; }
+  rememberSegs();
+  const list = segs.slice();
+  list.splice(k, 1);
+  setSegs(list, Math.min(k, list.length - 1));
+  const next = segs[Math.min(k, segs.length - 1)];
+  if (next && segAt(video.currentTime) < 0) seekTo(next.a);
+  osd("Кусок убран");
+}
+function markStart() {
+  const t = video.currentTime;
+  let k = segSel >= 0 && t < segs[segSel].b ? segSel : segAt(t);
+  if (k < 0) k = segs.findIndex((g) => g.a > t);   // во вырезанном месте — тянем к метке начало следующего куска
+  if (k < 0) { osd("Дальше кусков нет"); return; }
+  const lo = k > 0 ? segs[k - 1].b : 0;
+  const a = Math.max(lo, Math.min(t, segs[k].b - MIN_SEG));
+  rememberSegs();
+  segs[k].a = a; segSel = k;
+  drawTrim();
+  osd("Начало куска");
+}
+function markEnd() {
+  const t = video.currentTime;
+  let k = segSel >= 0 && t > segs[segSel].a ? segSel : segAt(t);
+  if (k < 0) { for (let i = segs.length - 1; i >= 0; i--) if (segs[i].b <= t) { k = i; break; } }
+  if (k < 0) { osd("Раньше кусков нет"); return; }
+  const hi = k < segs.length - 1 ? segs[k + 1].a : edDur();
+  const b = Math.min(hi, Math.max(t, segs[k].a + MIN_SEG));
+  rememberSegs();
+  segs[k].b = b; segSel = k;
+  drawTrim();
+  osd("Конец куска");
+}
+window.addEventListener("resize", () => { if (!$("editor").hidden) drawTrim(); });
 
 // ---- плеер: своя панель вместо встроенной
 
@@ -569,25 +698,39 @@ function osd(text) {
 function drawPlayer() {
   const dur = video.duration || 0;
   $("pTime").textContent = fmtTime(video.currentTime) + " / " + fmtTime(dur);
-  if (dur) $("trimPlay").style.left = (video.currentTime / dur * 100) + "%";
-  $("pPlay").innerHTML = video.paused ? ICONS.play : ICONS.pause;
+  if (dur) $("tlHead").style.left = (video.currentTime / dur * 100) + "%";
+  // Значок меняем только когда меняется состояние. Раньше он перерисовывался каждый кадр, и нажатие,
+  // попавшее между кадрами, терялось: пауза срабатывала через раз.
+  const icon = video.paused ? "play" : "pause";
+  if ($("pPlay").dataset.icon !== icon) { $("pPlay").dataset.icon = icon; $("pPlay").innerHTML = ICONS[icon]; }
   $("edBig").hidden = !video.paused || !dur || scrubbing;
 }
 function playerLoop() {   // пока идёт воспроизведение, метка времени движется плавно
   if ($("editor").hidden) return;
   drawPlayer();
   if (!video.paused) {
-    const [a, b] = trimValues();
-    if (trimmed() && video.currentTime >= b) { video.pause(); video.currentTime = a; }
+    // вырезанное при просмотре пропускается: дошли до конца куска — прыжок к следующему
+    if (trimmed() && !scrubbing) {
+      const t = video.currentTime;
+      const k = segAt(playLast);
+      if (k >= 0 && t >= segs[k].b - 0.02) {
+        if (k + 1 < segs.length) video.currentTime = segs[k + 1].a;
+        else { video.pause(); video.currentTime = segs[0].a; }
+      }
+    }
+    playLast = video.currentTime;
     requestAnimationFrame(playerLoop);
   }
 }
+let playLast = 0;
 function togglePlay() {
   if (!video.duration) return;
   if (video.paused) {
-    const [a, b] = trimValues();
-    if (trimmed() && (video.currentTime >= b - 0.05 || video.currentTime < a - 0.05)) video.currentTime = a;
-    else if (video.ended) video.currentTime = 0;
+    if (trimmed() && segAt(video.currentTime) < 0) {   // метка во вырезанном месте — играть со следующего куска
+      const next = segs.find((g) => g.a > video.currentTime) || segs[0];
+      video.currentTime = next.a;
+    } else if (video.ended) video.currentTime = trimmed() ? segs[0].a : 0;
+    playLast = video.currentTime;
     video.play().catch(() => {});
   } else video.pause();
 }
@@ -658,17 +801,31 @@ $("edScreen").addEventListener("click", () => {   // одиночное нажа
 $("edScreen").addEventListener("dblclick", () => { clearTimeout(screenClick); toggleFull(); });
 $("edScreen").addEventListener("wheel", (e) => { e.preventDefault(); setVolume(edVol + (e.deltaY < 0 ? 0.05 : -0.05)); }, { passive: false });
 
-// шкала: нажатие и протяжка перематывают, наведение показывает время
+// шкала: нажатие и протяжка перематывают, ручки тянут края кусков, наведение показывает время
 let scrubbing = false;
+let edgeDrag = null;   // {seg, side}
 function trackTime(e) {
   const r = $("edTrack").getBoundingClientRect();
   const part = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
   return [part * (video.duration || 0), part * 100];
 }
 $("edTrack").addEventListener("pointerdown", (e) => {
-  if (e.target.tagName === "INPUT" || e.button !== 0 || !video.duration) return;   // за ручки тянут границы отрезка
-  scrubbing = true;
+  if (e.button !== 0 || !video.duration) return;
   $("edTrack").setPointerCapture(e.pointerId);
+  const handle = e.target.closest(".tl-h");
+  if (handle) {   // тянут край куска
+    rememberSegs();
+    edgeDrag = { seg: parseInt(handle.dataset.seg, 10), side: handle.dataset.side };
+    segSel = edgeDrag.seg;
+    video.pause();
+    drawTrim();
+    return;
+  }
+  const seg = e.target.closest(".tl-seg");
+  const was = segSel;
+  segSel = seg ? parseInt(seg.dataset.seg, 10) : -1;
+  if (segSel !== was) drawTrim();
+  scrubbing = true;
   seekTo(trackTime(e)[0]);
 });
 $("edTrack").addEventListener("pointermove", (e) => {
@@ -677,10 +834,21 @@ $("edTrack").addEventListener("pointermove", (e) => {
   $("trimTip").textContent = fmtTime(time);
   $("trimTip").style.left = percent + "%";
   $("trimTip").hidden = false;
-  if (scrubbing) seekTo(time);
+  if (edgeDrag) {
+    const k = edgeDrag.seg, g = segs[k];
+    if (!g) return;
+    if (edgeDrag.side === "l") g.a = Math.max(k > 0 ? segs[k - 1].b : 0, Math.min(time, g.b - MIN_SEG));
+    else g.b = Math.min(k < segs.length - 1 ? segs[k + 1].a : video.duration, Math.max(time, g.a + MIN_SEG));
+    seekTo(edgeDrag.side === "l" ? g.a : g.b);   // видно кадр, на котором встанет край
+    drawTrim();
+  } else if (scrubbing) seekTo(time);
 });
-["pointerup", "pointercancel"].forEach((name) => $("edTrack").addEventListener(name, () => { scrubbing = false; drawPlayer(); }));
-$("edTrack").addEventListener("pointerleave", () => { if (!scrubbing) $("trimTip").hidden = true; });
+["pointerup", "pointercancel"].forEach((name) => $("edTrack").addEventListener(name, () => {
+  scrubbing = false;
+  edgeDrag = null;
+  drawPlayer();
+}));
+$("edTrack").addEventListener("pointerleave", () => { if (!scrubbing && !edgeDrag) $("trimTip").hidden = true; });
 
 let edTracks = [];
 // Номера оставленных дорожек; null — все на месте (звук как есть).
@@ -741,6 +909,11 @@ async function openEditor(clip) {
   $("edPrev").disabled = !prev;
   $("edNext").disabled = !next;
   $("editor").hidden = false;
+  segs = []; segSel = -1; segUndo = [];
+  $("tlCuts").innerHTML = ""; $("tlRuler").innerHTML = "";
+  $("tlStrip").style.backgroundImage = "";
+  api.clip_strip(clip.path).then((res) => { if (edClip === clip && res && res.image) $("tlStrip").style.backgroundImage = 'url("' + res.image + '")'; });
+  renderMontage();
   $("edJob").hidden = true;
   $("trimText").textContent = "Загружаю клип…";
   $("pSpeed").value = "1";
@@ -760,14 +933,13 @@ async function openEditor(clip) {
     const label = document.createElement("label");
     const box = document.createElement("input");
     box.type = "checkbox"; box.checked = true; box.dataset.track = String(i + 1); box.tabIndex = -1;
-    box.onchange = () => { const [a, b] = trimValues(); setTrim(a, b); applyTracks(); };
+    box.onchange = () => { drawTrim(); applyTracks(); };
     label.append(box, document.createTextNode(name));
     list.appendChild(label);
     edTracks.push(box);
   });
   $("edTracks").hidden = false;
-  const [a, b] = trimValues();
-  setTrim(a, b);
+  drawTrim();
   const urls = (await api.clip_track_urls(clip.path)) || [];
   if (edClip !== clip || urls.length !== edTracks.length) return;
   edAudio = urls.map((url) => { const a = new Audio(); a.preload = "auto"; a.src = url; return a; });
@@ -784,21 +956,19 @@ function closeEditor() {
   edClip = null;
 }
 video.addEventListener("loadedmetadata", () => {
-  const dur = video.duration;
-  ["trimStart", "trimEnd"].forEach((id) => { $(id).max = dur; });
-  setTrim(0, dur);
+  segUndo = [];
+  setSegs([{ a: 0, b: video.duration }], -1);
+  if (edSeekTo != null) { seekTo(edSeekTo); edSeekTo = null; }
   applyVolume();
 });
 video.addEventListener("error", () => { if (edClip) $("trimText").textContent = "Этот клип не открывается во встроенном плеере — нажмите «Открыть в плеере»."; });
-$("trimStart").addEventListener("input", () => { const [a, b] = trimValues(); setTrim(Math.min(a, b - 0.5), b); seekTo(trimValues()[0]); });
-$("trimEnd").addEventListener("input", () => { const [a, b] = trimValues(); setTrim(a, Math.max(b, a + 0.5)); seekTo(trimValues()[1]); });
-["trimStart", "trimEnd"].forEach((id) => $(id).addEventListener("change", () => $(id).blur()));
-function markStart() { setTrim(video.currentTime, Math.max(trimValues()[1], video.currentTime + 0.5)); osd("Начало отрезка"); }
-function markEnd() { setTrim(Math.min(trimValues()[0], video.currentTime - 0.5), video.currentTime); osd("Конец отрезка"); }
 $("trimSetStart").onclick = markStart;
 $("trimSetEnd").onclick = markEnd;
-$("trimPlayRange").onclick = () => { seekTo(trimValues()[0]); video.play().catch(() => {}); };
-$("trimReset").onclick = () => setTrim(0, video.duration || 0);
+$("cutSplit").onclick = splitHere;
+$("cutDelete").onclick = deleteSeg;
+$("cutUndo").onclick = undoSegs;
+$("trimReset").onclick = () => { rememberSegs(); setSegs([{ a: 0, b: video.duration || 0 }], -1); };
+$("cutToMontage").onclick = addToMontage;
 $("edClose").onclick = closeEditor;
 $("edPrev").onclick = () => stepClip(-1);
 $("edNext").onclick = () => stepClip(1);
@@ -808,8 +978,10 @@ document.addEventListener("keydown", (e) => {
   if ($("editor").hidden || !$("modal").hidden) return;
   const el = e.target, tag = el.tagName;
   if (tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable || (tag === "INPUT" && !["range", "checkbox"].includes(el.type))) return;
+  if (e.ctrlKey && e.code === "KeyZ") { e.preventDefault(); undoSegs(); return; }
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   const keys = {
+    KeyS: splitHere, Delete: deleteSeg, Backspace: deleteSeg,
     Space: togglePlay, KeyK: togglePlay,
     ArrowLeft: () => seekBy(e.shiftKey ? -1 : -5), ArrowRight: () => seekBy(e.shiftKey ? 1 : 5),
     ArrowUp: () => setVolume(edVol + 0.05), ArrowDown: () => setVolume(edVol - 0.05),
@@ -832,13 +1004,17 @@ document.addEventListener("keyup", (e) => {
 function setEditorBusy(busy) {
   edBusy = busy;
   ["edCompress", "edSend"].forEach((id) => { $(id).disabled = busy; });
+  $("mtJoin").disabled = busy || montage.length < 2;
   drawTrim();
 }
 async function runAction(action) {
   if (!edClip || edBusy) return;
   const dur = video.duration || 0;
-  let [a, b] = dur ? trimValues() : [null, null];
-  if (dur && a < 0.05 && b > dur - 0.05) { a = null; b = null; }
+  let a = null, b = null, parts = null;
+  if (dur && trimmed()) {
+    a = segs[0].a; b = segs[segs.length - 1].b;
+    if (segs.length > 1) parts = segs.map((g) => [g.a, g.b]);
+  }
   if (action === "send" && !(settings.discord_webhook || "").trim()) {
     flash("Сначала вставьте ссылку вебхука: Настройки → Discord", true);
     return;
@@ -846,7 +1022,7 @@ async function runAction(action) {
   video.pause();
   setEditorBusy(true);
   showJob({ stage: "Начинаю…", percent: null });
-  if (!(await api.clip_action(edClip.path, action, a, b, pickedTracks()))) {
+  if (!(await api.clip_action(edClip.path, action, a, b, pickedTracks(), parts))) {
     finishJob({ ok: false, text: "Сейчас занято другой задачей — подождите." });
   }
 }
@@ -860,11 +1036,93 @@ function finishJob(result) {
   setEditorBusy(false);
   $("edJob").hidden = true;
   flash(result.text, !result.ok);
+  if (result.action === "montage" && result.ok) { montage = []; renderMontage(); }
   if (result.path || (result.ok && result.action !== "send")) loadClips();   // при отправке рядом остаётся сжатая копия
 }
 $("edTrim").onclick = () => runAction("trim");
 $("edCompress").onclick = () => runAction("compress");
 $("edSend").onclick = () => runAction("send");
+
+// ---------------------------------------------------------------- монтаж: куски разных клипов в один ролик
+
+let montage = [];   // [{path, name, a, b, tracks}] — b = null: до конца клипа
+let mtDrag = -1;
+function pieceLength(p) { return p.b != null ? p.b - p.a : null; }
+function addToMontage() {
+  if (!edClip || !edDur()) return;
+  const tracks = pickedTracks();
+  segs.forEach((g) => montage.push({ path: edClip.path, name: edClip.name, a: g.a, b: g.b, tracks }));
+  renderMontage();
+  flash("В монтаж: " + segs.length + " " + plural(segs.length, "кусок", "куска", "кусков") + " из «" + edClip.name + "»");
+}
+function renderMontage() {
+  const box = $("mtList");
+  $("montage").hidden = montage.length === 0;
+  box.innerHTML = "";
+  let total = 0, known = true;
+  montage.forEach((p, i) => {
+    const len = pieceLength(p);
+    if (len == null) known = false; else total += len;
+    const card = document.createElement("div");
+    card.className = "mt-card" + (edClip && p.path === edClip.path ? " is-current" : "");
+    card.draggable = true;
+    card.title = "Открыть этот клип — нажатие. Перетащите, чтобы поменять порядок";
+    const thumb = document.createElement("div");
+    thumb.className = "mt-thumb";
+    thumb.innerHTML = "<em>" + (i + 1) + "</em><b>" + (len != null ? fmtTime(len) : "весь") + "</b>";
+    api.get_thumb(p.path).then((res) => { if (res && res.image) thumb.style.backgroundImage = 'url("' + res.image + '")'; });
+    const name = document.createElement("div");
+    name.className = "mt-name"; name.textContent = p.name;
+    const range = document.createElement("div");
+    range.className = "mt-range";
+    range.textContent = p.b != null ? fmtTime(p.a) + " – " + fmtTime(p.b) : "весь клип";
+    const del = document.createElement("button");
+    del.className = "mt-x"; del.textContent = "×"; del.title = "Убрать из монтажа";
+    del.onclick = (e) => { e.stopPropagation(); montage.splice(i, 1); renderMontage(); };
+    card.append(thumb, name, range, del);
+    card.onclick = () => {
+      const clip = clips.find((c) => c.path === p.path);
+      if (!clip) { flash("Этого клипа больше нет в папке", true); return; }
+      if (edClip && edClip.path === p.path) seekTo(p.a);
+      else { edSeekTo = p.a; openEditor(clip); }
+    };
+    card.addEventListener("dragstart", (e) => { mtDrag = i; card.classList.add("is-drag"); e.dataTransfer.effectAllowed = "move"; });
+    card.addEventListener("dragend", () => { mtDrag = -1; renderMontage(); });
+    card.addEventListener("dragover", (e) => { if (mtDrag >= 0) { e.preventDefault(); card.classList.add("is-over"); } });
+    card.addEventListener("dragleave", () => card.classList.remove("is-over"));
+    card.addEventListener("drop", (e) => {
+      e.preventDefault();
+      if (mtDrag < 0 || mtDrag === i) return;
+      const [moved] = montage.splice(mtDrag, 1);
+      montage.splice(mtDrag < i ? i - 1 : i, 0, moved);
+      mtDrag = -1;
+      renderMontage();
+    });
+    box.appendChild(card);
+  });
+  $("mtInfo").textContent = montage.length + " " + plural(montage.length, "кусок", "куска", "кусков") +
+    (known ? " · " + fmtTime(total) : "");
+  $("mtJoin").disabled = edBusy || montage.length < 2;
+}
+$("mtClear").onclick = () => { montage = []; renderMontage(); };
+$("mtJoin").onclick = async () => {
+  if (edBusy || montage.length < 2) return;
+  video.pause();
+  setEditorBusy(true);
+  showJob({ stage: "Начинаю склейку…", percent: null });
+  const pieces = montage.map((p) => ({ path: p.path, start: p.a, end: p.b != null ? p.b : 0, tracks: p.tracks }));
+  if (!(await api.montage(pieces))) finishJob({ ok: false, text: "Сейчас занято другой задачей — подождите." });
+};
+$("selJoin").onclick = () => {
+  const chosen = clips.filter((c) => picked.has(c.path)).sort((x, y) => x.mtime - y.mtime);   // по порядку записи
+  if (chosen.length < 2) { flash("Выберите хотя бы два клипа", true); return; }
+  chosen.forEach((c) => montage.push({ path: c.path, name: c.name, a: 0, b: c.duration || null, tracks: null }));
+  picked.clear();
+  syncPicked();
+  openEditor(chosen[0]);
+  renderMontage();
+  flash("Клипы в монтаже. Подрежьте их, если нужно, и нажмите «Склеить в один ролик»");
+};
 
 // ---------------------------------------------------------------- где хранить клипы
 

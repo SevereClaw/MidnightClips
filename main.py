@@ -53,10 +53,12 @@ class App:
         self.mover = storage.Mover(self.on_move_event)
         self.tools = ClipTools(self.cfg, self.ffmpeg, os.path.join(cache_dir(), "tools"), self.on_tool_event,
                                self.log_path)
+        self.recorder_encoders = lambda: getattr(self.recorder, "_encoders", None) or []
         self.recorder = Recorder(
             self.cfg, self.ffmpeg, os.path.join(cache_dir(), "buffer"), self.log_path,
             self.on_event, winutil.monitors, self.overlay_diag, find_engine(self.res), winutil.find_window,
             winutil.detect_game)
+        self.tools.encoders = self.recorder_encoders   # склейка кодирует той же видеокартой, что и запись
 
     # ---------------------------------------------------------------- запуск
 
@@ -675,11 +677,42 @@ class Api:
         files = clip_tools.split_tracks(self._app.ffmpeg, path, os.path.join(cache_dir(), "tracks"))
         return [self._app.media.allow(f) for f in files]
 
-    def clip_action(self, path, action, start=None, end=None, tracks=None):
-        """action: trim — сохранить обрезку, compress — сжать под лимит, send — отправить в Discord."""
+    def clip_action(self, path, action, start=None, end=None, tracks=None, segments=None):
+        """action: trim — сохранить обрезку, compress — сжать под лимит, send — отправить в Discord.
+        segments — оставленные куски [[начало, конец], ...]; если их несколько, они склеиваются."""
         if not (self._app.library.inside(path) and os.path.isfile(path)):
             return False
-        return self._app.tools.start(path, action, start, end, tracks)
+        try:
+            segments = [[float(a), float(b)] for a, b in (segments or [])][:80]
+        except (TypeError, ValueError):
+            segments = []
+        return self._app.tools.start(path, action, start, end, tracks, segments)
+
+    def clip_strip(self, path):
+        """Полоса кадров для шкалы в окне клипа."""
+        if not (self._app.library.inside(path) and os.path.isfile(path) and self._app.ffmpeg):
+            return None
+        return clip_tools.film_strip(self._app.ffmpeg, path, os.path.join(cache_dir(), "strips"))
+
+    def montage(self, pieces):
+        """Склеить куски разных клипов в один ролик. pieces = [{path, start, end, tracks}]. Ролик ложится
+        в папку первого клипа под именем «Монтаж <дата>»."""
+        clean = []
+        for p in list(pieces or [])[:80]:
+            try:
+                path = str(p["path"])
+                if not (self._app.library.inside(path) and os.path.isfile(path)):
+                    return False
+                tracks = p.get("tracks")
+                clean.append({"path": path, "start": float(p["start"]), "end": float(p["end"]),
+                              "tracks": [int(t) for t in tracks] if tracks is not None else None})
+            except (KeyError, TypeError, ValueError):
+                return False
+        if not clean:
+            return False
+        folder = os.path.dirname(clean[0]["path"])
+        out = os.path.join(folder, "Монтаж %s.mp4" % time.strftime("%Y-%m-%d %H-%M-%S"))
+        return self._app.tools.montage(clean, clip_tools.unique(out))
 
     def cancel_job(self):
         self._app.tools.cancel()

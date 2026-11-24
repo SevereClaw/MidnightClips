@@ -286,6 +286,7 @@
   <strong id="selectText"></strong>
   <button class="mini mini-strong" id="selDelete">Удалить</button>
   <button class="mini" id="selFav">В избранное</button>
+  <button class="mini" id="selJoin" title="Склеить выбранные клипы в один ролик (по порядку записи) — сначала их можно подрезать">Склеить</button>
   <button class="mini" id="selAll">Выбрать все</button>
   <button class="mini mini-quiet" id="selCancel">Отменить</button>
 </div>
@@ -313,13 +314,13 @@
         <div class="big-play" id="edBig" hidden></div>
         <div class="osd" id="edOsd" hidden></div>
       </div>
-      <div class="trim-track" id="edTrack">
-        <div class="trim-range" id="trimRange"></div>
-        <div class="trim-play" id="trimPlay"></div>
-        <div class="trim-tip" id="trimTip" hidden></div>
-        <input type="range" id="trimStart" min="0" max="1" step="0.05" value="0" aria-label="Начало отрезка" tabindex="-1">
-        <input type="range" id="trimEnd" min="0" max="1" step="0.05" value="1" aria-label="Конец отрезка" tabindex="-1">
+      <div class="tl" id="edTrack" title="Нажмите или проведите — перемотка. Жёлтые ручки — края куска">
+        <div class="tl-strip" id="tlStrip"></div>
+        <div class="tl-cuts" id="tlCuts"></div>
+        <div class="tl-head" id="tlHead"><i></i></div>
+        <div class="tl-tip" id="trimTip" hidden></div>
       </div>
+      <div class="tl-ruler" id="tlRuler"></div>
       <div class="player">
         <button class="pbtn pbtn-main" id="pPlay" title="Играть / пауза (Пробел)" aria-label="Играть или пауза"></button>
         <button class="pbtn" id="pBack" title="Назад на 5 секунд (←), с Shift — на 1 секунду">−5 с</button>
@@ -337,12 +338,15 @@
         <button class="pbtn" id="pFull" title="На весь экран (F)" aria-label="На весь экран"></button>
       </div>
     </div>
-    <div class="trim-info">
+    <div class="cut-bar">
       <strong id="trimText"></strong>
-      <button class="link" id="trimSetStart" title="Клавиша I">Начало здесь</button>
-      <button class="link" id="trimSetEnd" title="Клавиша O">Конец здесь</button>
-      <button class="link" id="trimPlayRange">Смотреть отрезок</button>
-      <button class="link" id="trimReset">Весь клип</button>
+      <button class="cbtn" id="cutSplit" title="Разрезать кусок там, где сейчас метка (S)"><svg viewBox="0 0 24 24"><path d="M9.6 7.2a3.6 3.6 0 10-1.4 1.6L10.6 12l-2.4 3.2a3.6 3.6 0 101.4 1.6L12 13.6l7.6 10H23L13.4 12 23 .4h-3.4L12 10.4zM6.6 7.4a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6zm0 12.8a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6z"/></svg>Разрезать</button>
+      <button class="cbtn" id="cutDelete" title="Убрать выбранный кусок из клипа (Delete)">Убрать кусок</button>
+      <button class="cbtn" id="trimSetStart" title="Начало куска — здесь (I)">[ Начало здесь</button>
+      <button class="cbtn" id="trimSetEnd" title="Конец куска — здесь (O)">Конец здесь ]</button>
+      <button class="cbtn" id="cutUndo" title="Отменить (Ctrl+Z)">↶</button>
+      <button class="cbtn" id="trimReset" title="Вернуть весь клип одним куском">Весь клип</button>
+      <button class="cbtn cbtn-add" id="cutToMontage" title="Добавить оставленные куски в монтаж — потом их можно склеить с кусками других клипов">＋ В монтаж</button>
     </div>
     <div class="tracks" id="edTracks" hidden>
       <strong>Звук в клипе</strong>
@@ -355,7 +359,16 @@
       <button class="mini mini-discord" id="edSend">Отправить в Discord</button>
       <button class="mini mini-quiet" id="edOpen">Открыть в плеере</button>
     </div>
-    <small class="ed-keys">Пробел — пауза · ← → — 5 с (с Shift — 1 с) · , . — по кадру · I и O — начало и конец отрезка · F — на весь экран · PageUp и PageDown — другой клип</small>
+    <div class="montage" id="montage" hidden>
+      <div class="mt-head">
+        <strong>Монтаж</strong><span id="mtInfo"></span>
+        <small>Перетаскивайте куски, чтобы поменять порядок. Добавляйте куски из других клипов: ‹ › или PageUp / PageDown — другой клип</small>
+        <button class="mini mini-quiet" id="mtClear">Очистить</button>
+        <button class="mini" id="mtJoin">Склеить в один ролик</button>
+      </div>
+      <div class="mt-list" id="mtList"></div>
+    </div>
+    <small class="ed-keys">Пробел — пауза · ← → — 5 с (с Shift — 1 с) · , . — по кадру · S — разрезать · Delete — убрать кусок · I и O — начало и конец куска · Ctrl+Z — отменить · F — на весь экран · PageUp и PageDown — другой клип</small>
     <div class="job" id="edJob" hidden>
       <div class="job-bar"><i id="edJobFill"></i></div>
       <span id="edJobText"></span>
