@@ -8,6 +8,7 @@
   --display: "Arial Black", "Segoe UI Black", "Arial", Impact, sans-serif;
   --body: "Segoe UI", "Trebuchet MS", Arial, sans-serif;
   --rail: 316px;
+  --tb: 34px;   /* своя полоса заголовка */
 }
 
 * { box-sizing: border-box; }
@@ -39,7 +40,60 @@ kbd {
 
 kbd.is-listening { background: var(--orange) !important; color: var(--black) !important; }
 
-.app { display: flex; height: 100%; }
+.app { display: flex; height: calc(100% - var(--tb)); }
+
+/* ---------------------------------------------------------- полоса заголовка (вместо рамки Windows) */
+
+.titlebar {
+  position: relative; z-index: 50; height: var(--tb); display: flex; align-items: stretch;
+  background: var(--black); color: var(--yellow); cursor: default;
+}
+/* жёлто-чёрная «лента» по нижнему краю — как в меню поверх игры */
+.titlebar::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 4px; pointer-events: none;
+  background: repeating-linear-gradient(-55deg, var(--yellow) 0 9px, var(--black) 9px 18px);
+}
+.tb-brand {
+  display: flex; align-items: center; gap: 9px; padding: 0 34px 4px 14px; background: var(--yellow); color: var(--black);
+  clip-path: polygon(0 0, 100% 0, calc(100% - 18px) 100%, 0 100%);
+}
+.tb-name { font-family: var(--display); font-style: italic; font-size: 14px; letter-spacing: -.3px; text-transform: uppercase; }
+.tb-name b { font-weight: inherit; margin-left: 5px; background: var(--black); color: var(--yellow); padding: 0 6px 0 4px; display: inline-block; transform: skewX(-12deg); }
+.tb-tv { position: relative; width: 20px; height: 15px; background: var(--black); transform: rotate(-6deg); }
+.tb-tv::before, .tb-tv::after { content: ""; position: absolute; top: -6px; width: 2px; height: 7px; background: var(--black); }
+.tb-tv::before { left: 6px; transform: rotate(-30deg); }
+.tb-tv::after { right: 6px; transform: rotate(30deg); }
+.tb-tv i { position: absolute; inset: 3px 5px 3px 3px; background: linear-gradient(90deg, #fff 0 25%, var(--yellow) 25% 50%, #3ec6ff 50% 75%, var(--red) 75%); }
+.tb-where {
+  align-self: center; margin: 0 0 4px -4px; padding: 2px 12px; font-family: var(--display); font-style: italic; font-size: 11.5px;
+  text-transform: uppercase; color: var(--yellow); background: #1d1d1d; transform: skewX(-14deg);
+}
+.tb-fill { flex: 1; }
+.tb-buttons { display: flex; height: calc(100% - 4px); }
+.tb-btn {
+  width: 50px; border: 0; background: transparent; display: flex; align-items: center; justify-content: center;
+  color: var(--yellow); position: relative; padding: 0;
+}
+.tb-btn svg { width: 12px; height: 12px; fill: currentColor; position: relative; z-index: 1; }
+.tb-btn::before { content: ""; position: absolute; inset: 0 -5px; transform: skewX(-18deg); background: transparent; transition: background .08s; }
+.tb-btn:hover::before { background: var(--yellow); }
+.tb-btn:hover { color: var(--black); }
+.tb-btn:active::before { background: var(--orange); }
+.tb-close:hover::before { background: var(--red); }
+.tb-close:hover { color: var(--white); }
+.tb-btn:focus-visible { outline: none; }
+.tb-btn:focus-visible::before { box-shadow: inset 0 0 0 3px var(--orange); }
+
+/* края для растягивания окна мышью */
+.rz { position: fixed; z-index: 60; }
+.rz-l, .rz-r { top: 6px; bottom: 6px; width: 5px; cursor: ew-resize; }
+.rz-l { left: 0; } .rz-r { right: 0; }
+.rz-t, .rz-b { left: 6px; right: 6px; height: 4px; cursor: ns-resize; }
+.rz-t { top: 0; } .rz-b { bottom: 0; }
+.rz-tl, .rz-tr, .rz-bl, .rz-br { width: 9px; height: 9px; }
+.rz-tl { left: 0; top: 0; cursor: nwse-resize; } .rz-br { right: 0; bottom: 0; cursor: nwse-resize; }
+.rz-tr { right: 0; top: 0; cursor: nesw-resize; } .rz-bl { left: 0; bottom: 0; cursor: nesw-resize; }
+body.is-max .rz { display: none; }
 
 /* ---------------------------------------------------------- левая колонка */
 
@@ -386,7 +440,7 @@ input.vol::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height:
 
 /* ------------------------------------------------ просмотр и обрезка */
 
-.editor { position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: 25; display: flex; align-items: center; justify-content: center; padding: 12px; }
+.editor { position: fixed; inset: var(--tb) 0 0 0; background: rgba(0,0,0,.82); z-index: 25; display: flex; align-items: center; justify-content: center; padding: 12px; }
 .editor-box {
   background: var(--yellow); border: 5px solid var(--black); box-shadow: 8px 8px 0 var(--black);
   padding: 10px 16px 12px; width: min(1700px, 100%); height: 100%; display: flex; flex-direction: column; gap: 9px;
@@ -466,7 +520,7 @@ input#inpWebhook { width: 300px; }
 .flash.is-error { border-right-color: var(--red); }
 @keyframes flash-in { from { transform: translateX(40px); opacity: 0; } }
 
-.modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 30; }
+.modal { position: fixed; inset: var(--tb) 0 0 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 30; }
 .modal-box { background: var(--yellow); border: 5px solid var(--black); box-shadow: 10px 10px 0 var(--black); padding: 22px 24px; width: 440px; transform: rotate(-1deg); }
 .modal-box h2 { font-family: var(--display); font-style: italic; font-size: 24px; margin: 0 0 8px; }
 .modal-box p { margin: 0 0 14px; line-height: 1.45; overflow-wrap: anywhere; }

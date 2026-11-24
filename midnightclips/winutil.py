@@ -322,6 +322,129 @@ def recycle(path):
         return False
 
 
+# ------------------------------------------------------ окно без рамки Windows
+# Своя полоса заголовка рисуется в интерфейсе; перетаскивание и растягивание отдаются самой Windows
+# (WM_NCLBUTTONDOWN) — двигается плавно, как обычное окно. Развёрнутое окно занимает рабочую область
+# монитора, а не весь экран: окно без рамки иначе закрывало бы панель задач.
+
+_HIT = {"move": 2, "l": 10, "r": 11, "t": 12, "tl": 13, "tr": 14, "b": 15, "bl": 16, "br": 17}
+_normal_rect = {}   # hwnd -> (x, y, w, h) до разворачивания
+
+
+def app_window(title):
+    """Главное окно программы (WinForms) по заголовку — только среди окон этого процесса."""
+    if not WIN:
+        return None
+    found = []
+    pid = os.getpid()
+    proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def callback(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value != pid:
+            return True
+        cls = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls, 256)
+        text = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, text, 256)
+        if cls.value.startswith("WindowsForms") and text.value == title:
+            found.append(hwnd)
+            return False
+        return True
+
+    try:
+        user32.EnumWindows(proc_type(callback), 0)
+    except Exception:
+        pass
+    return found[0] if found else None
+
+
+def prepare_frameless(hwnd):
+    """Окну без рамки — кнопка на панели задач сворачивает и разворачивает его, как обычное (WS_MINIMIZEBOX | WS_SYSMENU),
+    и острые углы в Windows 11 (жёлто-чёрный стиль — без скруглений)."""
+    if not WIN or not hwnd:
+        return
+    try:
+        style = user32.GetWindowLongW(hwnd, -16)
+        user32.SetWindowLongW(hwnd, -16, style | 0x00020000 | 0x00080000)
+        corner = ctypes.c_int(1)   # DWMWCP_DONOTROUND
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(wintypes.HWND(hwnd), 33, ctypes.byref(corner), ctypes.sizeof(corner))
+    except Exception:
+        pass
+
+
+def _rect(hwnd):
+    r = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return r.left, r.top, r.right - r.left, r.bottom - r.top
+
+
+def _work_area(hwnd):
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+    user32.MonitorFromWindow.restype = wintypes.HANDLE
+    mon = user32.MonitorFromWindow(hwnd, 2)   # MONITOR_DEFAULTTONEAREST
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    user32.GetMonitorInfoW(wintypes.HANDLE(mon), ctypes.byref(info))
+    w = info.rcWork
+    return w.left, w.top, w.right - w.left, w.bottom - w.top
+
+
+def is_maximized(hwnd):
+    if not WIN or not hwnd or hwnd not in _normal_rect:
+        return False
+    return _rect(hwnd) == _work_area(hwnd)
+
+
+def toggle_maximize(hwnd):
+    """Развернуть на рабочую область монитора или вернуть прежний размер. Возвращает новое состояние."""
+    if not WIN or not hwnd:
+        return False
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+    if is_maximized(hwnd):
+        x, y, w, h = _normal_rect.pop(hwnd)
+        user32.SetWindowPos(hwnd, None, x, y, w, h, 0x0004 | 0x0010)   # NOZORDER | NOACTIVATE
+        return False
+    _normal_rect[hwnd] = _rect(hwnd)
+    x, y, w, h = _work_area(hwnd)
+    user32.SetWindowPos(hwnd, None, x, y, w, h, 0x0004 | 0x0010)
+    return True
+
+
+def begin_drag(hwnd, edge="move"):
+    """Начать перетаскивание (edge="move") или растягивание за край (l, r, t, b, tl, tr, bl, br) мышью —
+    дальше окно ведёт сама Windows, пока кнопка мыши зажата."""
+    if not WIN or not hwnd or edge not in _HIT:
+        return False
+    if not user32.GetAsyncKeyState(0x01) & 0x8000:   # кнопку уже отпустили — не начинать «липкое» перетаскивание
+        return False
+    if is_maximized(hwnd):
+        if edge != "move":
+            return False
+        # тащат развёрнутое окно — вернуть прежний размер под курсором, как делает Windows
+        pt = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        wx, wy, ww, _wh = _rect(hwnd)
+        nx, ny, nw, nh = _normal_rect.pop(hwnd)
+        share = (pt.x - wx) / max(1, ww)
+        user32.SetWindowPos(hwnd, None, int(pt.x - nw * share), wy, nw, nh, 0x0004)
+    pt = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    user32.ReleaseCapture()
+    lparam = (pt.y & 0xFFFF) << 16 | (pt.x & 0xFFFF)
+    user32.PostMessageW(hwnd, 0x00A1, _HIT[edge], lparam)   # WM_NCLBUTTONDOWN
+    return True
+
+
+def minimize(hwnd):
+    if WIN and hwnd:
+        user32.ShowWindow(hwnd, 6)   # SW_MINIMIZE
+
+
 def drives():
     """Диски, на которые можно сохранять клипы: [{root, label, free, total, removable, network}].
     Пустые картридеры и дисководы пропускаются."""

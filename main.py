@@ -60,8 +60,16 @@ class App:
 
     # ---------------------------------------------------------------- запуск
 
+    def hwnd(self):
+        """Окно программы для Windows (своя полоса заголовка двигает и растягивает его через систему)."""
+        if not getattr(self, "_hwnd", None):
+            self._hwnd = winutil.app_window("MidnightClips")
+            winutil.prepare_frameless(self._hwnd)
+        return self._hwnd
+
     def on_start(self):
         """Вызывается, когда окно готово."""
+        threading.Thread(target=self.hwnd, daemon=True).start()
         self.hotkeys.start()
         self.bind_hotkeys()
         self.toast.start()
@@ -625,6 +633,33 @@ class Api:
             return []
         return clip_tools.audio_tracks(self._app.ffmpeg, path)
 
+    # ---- своя полоса заголовка
+    def win_state(self):
+        return {"maximized": winutil.is_maximized(self._app.hwnd())}
+
+    def win_drag(self, edge="move"):
+        return winutil.begin_drag(self._app.hwnd(), edge)
+
+    def win_minimize(self):
+        winutil.minimize(self._app.hwnd())
+        return True
+
+    def win_maximize(self):
+        return {"maximized": winutil.toggle_maximize(self._app.hwnd())}
+
+    def win_close(self):
+        """Крестик: как у обычного окна — в трей (если он есть), иначе выход."""
+        app = self._app
+        if app.tray is not None and not app.quitting:
+            try:
+                app.window.hide()
+                app.visible = False
+                return True
+            except Exception:
+                pass
+        threading.Thread(target=app.quit, daemon=True).start()
+        return True
+
     def set_fullscreen(self, on):
         """Плеер в окне клипа развернули на весь экран (или свернули) — окно программы следует за ним."""
         on = bool(on)
@@ -824,7 +859,7 @@ def main():
     app.window = webview.create_window(
         "MidnightClips", os.path.join(app.res, "ui", "index.html"), js_api=app.api,
         width=1180, height=760, min_size=(940, 620), background_color="#FFE100",
-        hidden=minimized)
+        hidden=minimized, frameless=True, easy_drag=False)   # полоса заголовка — своя, в стиле программы
     app.window.events.closing += app.on_closing
     webview.start(app.on_start)
     app.shutdown()

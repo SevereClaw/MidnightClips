@@ -1301,9 +1301,46 @@ document.querySelectorAll(".nav-item").forEach((item) => {
     document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("is-active", n === item));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("is-active", v.id === "view-" + item.dataset.view));
     if (item.dataset.view === "clips") loadClips();
-    if (item.dataset.view === "settings") renderDrives();   // флешку могли вставить или вынуть
+    if (item.dataset.view === "settings") renderDrives();
+    $("tbWhere").textContent = VIEW_NAMES[item.dataset.view] || "";   // флешку могли вставить или вынуть
     syncPicked();
   };
+});
+
+// ---------------------------------------------------------------- своя полоса заголовка
+
+const VIEW_NAMES = { clips: "Клипы", settings: "Настройки" };
+function setMaxState(max) {
+  document.body.classList.toggle("is-max", !!max);
+  $("tbMax").title = max ? "Вернуть размер" : "Развернуть";
+  $("tbMaxIcon").innerHTML = max
+    ? '<path d="M3 1h8v8H9V3H3z M1 3.6h7.4V11H1z M2.8 5.4v3.8h3.8V5.4z" fill-rule="evenodd"/>'
+    : '<path d="M1 1h10v10H1z M3.2 3.6v5.2h5.6V3.6z" fill-rule="evenodd"/>';
+}
+async function toggleMax() { const s = await api.win_maximize(); if (s) setMaxState(s.maximized); }
+let tbLastDown = 0, tbLastX = 0, tbLastY = 0;
+$("titlebar").addEventListener("mousedown", (e) => {
+  if (e.button !== 0 || e.target.closest(".tb-btn")) return;
+  const now = performance.now();
+  // двойной щелчок по полосе — развернуть; считаем сами: после первого щелчка окно ведёт Windows, и браузер его «не видит»
+  if (now - tbLastDown < 420 && Math.abs(e.screenX - tbLastX) < 6 && Math.abs(e.screenY - tbLastY) < 6) {
+    tbLastDown = 0;
+    toggleMax();
+    return;
+  }
+  tbLastDown = now; tbLastX = e.screenX; tbLastY = e.screenY;
+  api.win_drag("move").then(() => api.win_state()).then((s) => { if (s) setMaxState(s.maximized); });
+});
+document.querySelectorAll(".rz").forEach((el) => el.addEventListener("mousedown", (e) => {
+  if (e.button === 0) { e.preventDefault(); api.win_drag(el.dataset.edge); }
+}));
+$("tbMin").onclick = () => api.win_minimize();
+$("tbMax").onclick = toggleMax;
+$("tbClose").onclick = () => api.win_close();
+let tbResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(tbResizeTimer);
+  tbResizeTimer = setTimeout(async () => { const s = await api.win_state(); if (s) setMaxState(s.maximized); }, 150);
 });
 
 async function init() {

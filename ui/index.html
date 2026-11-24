@@ -7,6 +7,21 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<header class="titlebar" id="titlebar">
+  <div class="tb-brand">
+    <span class="tb-tv" aria-hidden="true"><i></i></span>
+    <span class="tb-name">Midnight<b>Clips</b></span>
+  </div>
+  <span class="tb-where" id="tbWhere">Клипы</span>
+  <div class="tb-fill" aria-hidden="true"></div>
+  <div class="tb-buttons">
+    <button class="tb-btn" id="tbMin" title="Свернуть" aria-label="Свернуть"><svg viewBox="0 0 12 12"><rect x="1" y="8.5" width="10" height="2.4"/></svg></button>
+    <button class="tb-btn" id="tbMax" title="Развернуть" aria-label="Развернуть"><svg viewBox="0 0 12 12" id="tbMaxIcon"><path d="M1 1h10v10H1z M3.2 3.6v5.2h5.6V3.6z" fill-rule="evenodd"/></svg></button>
+    <button class="tb-btn tb-close" id="tbClose" title="Закрыть (программа останется в трее)" aria-label="Закрыть"><svg viewBox="0 0 12 12"><path d="M1.6 0 6 4.4 10.4 0 12 1.6 7.6 6 12 10.4 10.4 12 6 7.6 1.6 12 0 10.4 4.4 6 0 1.6z"/></svg></button>
+  </div>
+</header>
+<div class="rz rz-l" data-edge="l"></div><div class="rz rz-r" data-edge="r"></div><div class="rz rz-t" data-edge="t"></div><div class="rz rz-b" data-edge="b"></div>
+<div class="rz rz-tl" data-edge="tl"></div><div class="rz rz-tr" data-edge="tr"></div><div class="rz rz-bl" data-edge="bl"></div><div class="rz rz-br" data-edge="br"></div>
 <div class="app">
 
   <aside class="rail">
