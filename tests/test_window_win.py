@@ -25,9 +25,11 @@ def drag(hwnd, edge, start, delta):
     time.sleep(0.15)
     import threading
     out = {}
-    worker = threading.Thread(target=lambda: out.update(ok=winutil.begin_drag(hwnd, edge)), daemon=True)
+    started = threading.Event()
+    worker = threading.Thread(target=lambda: out.update(ok=winutil.begin_drag(hwnd, edge, ready=started.set)), daemon=True)
     worker.start()   # как вызов из интерфейса: возвращается, когда кнопку отпустят
-    time.sleep(0.15)
+    started.wait(5)   # на загруженном сервере поток может стартовать не сразу — двигать мышь только после него
+    time.sleep(0.05)
     for i in range(1, 21):
         user32.SetCursorPos(start[0] + delta[0] * i // 20, start[1] + delta[1] * i // 20)
         time.sleep(0.025)

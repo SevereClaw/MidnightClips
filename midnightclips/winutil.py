@@ -415,7 +415,7 @@ def toggle_maximize(hwnd):
     return True
 
 
-def begin_drag(hwnd, edge="move", min_size=(400, 300)):
+def begin_drag(hwnd, edge="move", min_size=(400, 300), ready=None):
     """Перетаскивание (edge="move") или растягивание за край (l, r, t, b, tl, tr, bl, br): пока зажата левая
     кнопка мыши, окно идёт за курсором. Вызывается из потока js_api и возвращается, когда кнопку отпустили.
     (Системный способ — WM_NCLBUTTONDOWN — из чужого потока для окна с WebView2 не срабатывает.)"""
@@ -440,7 +440,10 @@ def begin_drag(hwnd, edge="move", min_size=(400, 300)):
         dpi = 96
     min_w, min_h = int(min_size[0] * dpi / 96), int(min_size[1] * dpi / 96)
     x0, y0, w0, h0 = _rect(hwnd)
+    user32.GetCursorPos(ctypes.byref(pt))
     sx, sy = pt.x, pt.y
+    if ready:
+        ready()   # точка отсчёта взята (для проверок: двигать мышь можно с этого момента)
     last = None
     while down():
         user32.GetCursorPos(ctypes.byref(pt))
