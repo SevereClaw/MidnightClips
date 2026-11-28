@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 
 from . import audio as audio_mod
@@ -146,6 +147,11 @@ class Recorder:
         self._partial = None              # кусочек, который ещё пишется: в клип идёт то, что уже готово
         self._partial_dur = 0.0
         self._mem_lock = threading.Lock()
+        # Сброс кусочков на диск — в своём потоке: если диск задумается, чтение потока движка не встанет.
+        self._spill_cv = threading.Condition()
+        self._spill_q = deque()
+        self._spill_thread = None
+        self._spill_slow = (0.0, 0.0)     # (когда последний раз писали в журнал о медленном диске, худшее время)
         self._mem_epoch = 0               # растёт при полной очистке буфера
         self.in_memory = False            # где сейчас лежит буфер повтора
         self._soft = False                # мягкий перезапуск: буфер не стирать
@@ -1279,14 +1285,57 @@ class Recorder:
                     self._mem.pop(name, None)
 
     def _spill(self, name, data):
-        try:
-            with open(os.path.join(self.work_dir, name), "wb") as f:
-                f.write(data)
-        except OSError as exc:
-            self._log("не удалось сбросить кусочек записи на диск: %s" % exc)
-            return
-        with self._mem_lock:
-            self._mem.pop(name, None)
+        """Готовый кусочек — на диск, но не из потока, который читает движок. Раньше запись шла прямо
+        здесь: стоило диску задуматься на десяток секунд (антивирус, индексатор, чужая запись), чтение
+        вставало, канал движка переполнялся — и захват замирал целиком, вместе со звуком. Теперь
+        кусочек ждёт в памяти (клип из него сохраняется как обычно), пока диск его не примет."""
+        with self._spill_cv:
+            self._spill_q.append((name, data))
+            if self._spill_thread is None:
+                self._spill_thread = threading.Thread(target=self._spill_loop, daemon=True, name="spill")
+                self._spill_thread.start()
+            self._spill_cv.notify()
+
+    def _spill_write(self, path, data):
+        with open(path, "wb") as f:
+            f.write(data)
+
+    def _spill_loop(self):
+        while True:
+            with self._spill_cv:
+                while not self._spill_q:
+                    if not self._spill_cv.wait(30) and not self._spill_q:
+                        self._spill_thread = None   # долго нечего писать — поток не держим
+                        return
+                name, data = self._spill_q.popleft()
+                backlog = len(self._spill_q)
+            with self._mem_lock:
+                wanted = self._mem.get(name) is data
+            if not wanted:
+                continue   # кусочек уже не нужен: буфер сдвинулся или захват перезапущен с нуля
+            path = os.path.join(self.work_dir, name)
+            began = time.monotonic()
+            try:
+                self._spill_write(path, data)
+            except OSError as exc:
+                self._log("не удалось сбросить кусочек записи на диск: %s — он остаётся в памяти" % exc)
+                continue
+            took = time.monotonic() - began
+            with self._mem_lock:
+                dropped = self._mem.get(name) is not data
+                if not dropped:
+                    self._mem.pop(name, None)   # теперь кусочек на диске
+            if dropped:
+                self._remove(path)   # пока писали, его успели стереть — файл не нужен
+            if took > 3:
+                last, worst = self._spill_slow
+                worst = max(worst, took)
+                if time.monotonic() - last > 60:
+                    self._spill_slow = (time.monotonic(), 0.0)
+                    self._log("диск не успевает: кусочек записи сохранялся %.0f с (ждут ещё %d). Захват не "
+                              "прерывался — кусочки подождали в памяти" % (worst, backlog))
+                else:
+                    self._spill_slow = (last, worst)
 
     def _seg_size(self, path):
         with self._mem_lock:

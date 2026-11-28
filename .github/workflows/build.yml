@@ -58,6 +58,10 @@ jobs:
         run: python tests/test_tools.py
         env:
           PYTHONUTF8: "1"
+      - name: Проверить, что медленный диск не останавливает захват
+        run: python tests/test_spill.py
+        env:
+          PYTHONUTF8: "1"
       - name: Проверить установщик обновлений
         run: python tests/test_updater_win.py
         env:
