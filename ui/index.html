@@ -268,9 +268,12 @@
 
       <div class="panel">
         <h2>Discord</h2>
-        <label class="row"><span>Ссылка вебхука
-          <small>В Discord: настройки канала → Интеграции → Вебхуки → Новый вебхук → Скопировать URL. Клипы будут приходить в этот канал</small></span>
-          <input type="text" data-key="discord_webhook" id="inpWebhook" placeholder="https://discord.com/api/webhooks/…" spellcheck="false"></label>
+        <div class="row row-top"><span>Каналы
+          <small>Для каждого канала — своя ссылка вебхука. В Discord: настройки канала → Интеграции → Вебхуки → Новый вебхук → Скопировать URL. При отправке канал выбирается из списка</small></span>
+          <div class="channels">
+            <div id="channelList"></div>
+            <button class="mini" id="btnAddChannel">＋ Добавить канал</button>
+          </div></div>
         <label class="row"><span>Предел размера файла
           <small>До него сжимает кнопка «Сжать», и под него подгоняется клип при отправке</small></span>
           <select data-key="discord_limit_mb" data-type="int">
@@ -335,6 +338,7 @@
   <strong id="selectText"></strong>
   <button class="mini mini-strong" id="selDelete">Удалить</button>
   <button class="mini" id="selFav">В избранное</button>
+  <button class="mini mini-discord" id="selSend" title="Отправить выбранные клипы в Discord — по очереди, в фоне">В Discord</button>
   <button class="mini" id="selJoin" title="Склеить выбранные клипы в один ролик (по порядку записи) — сначала их можно подрезать">Склеить</button>
   <button class="mini" id="selAll">Выбрать все</button>
   <button class="mini mini-quiet" id="selCancel">Отменить</button>
@@ -347,6 +351,15 @@
 </div>
 
 <div class="flashes" id="flashes" aria-live="polite"></div>
+
+<div class="sends" id="sends" hidden>
+  <button class="sends-head" id="sendsHead" title="Свернуть или развернуть" aria-expanded="true">
+    <span class="sends-logo"></span><strong id="sendsTitle">Отправка в Discord</strong><i class="sends-arrow"></i>
+  </button>
+  <div class="sends-list" id="sendsList"></div>
+</div>
+
+<div class="chan-menu" id="chanMenu" hidden role="menu"></div>
 
 <div class="editor" id="editor" hidden>
   <div class="editor-box" role="dialog" aria-modal="true">
@@ -412,7 +425,10 @@
     <div class="editor-actions" id="edActions">
       <button class="mini" id="edTrim">Сохранить обрезку</button>
       <button class="mini" id="edCompress">Сжать</button>
-      <button class="mini mini-discord" id="edSend">Отправить в Discord</button>
+      <span class="send-group">
+        <button class="mini mini-discord" id="edSend" title="Клип уйдёт в фоне — можно сразу открывать следующий">Отправить в Discord</button>
+        <select id="edChannel" title="В какой канал отправить" aria-label="Канал Discord" hidden></select>
+      </span>
       <button class="mini mini-quiet" id="edOpen">Открыть в плеере</button>
     </div>
     <small class="ed-keys">Пробел — пауза · ← → — 5 с (с Shift — 1 с) · , . — по кадру · S — разрезать · Delete — убрать кусок · B — отметка, Q / E — к отметкам · I и O — начало и конец куска · Ctrl+Z — отменить · F — на весь экран · PageUp и PageDown — другой клип</small>

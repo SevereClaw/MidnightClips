@@ -33,11 +33,16 @@ def main():
 
     def run(action, start=None, end=None):
         events.clear()
-        assert t.start(clip, action, start, end)
-        assert not t.start(clip, action)          # второй раз, пока занято, нельзя
+        first = t.start(clip, action, start, end)
+        assert first
+        second = t.start(clip, action)            # пока занято — встаёт в очередь, её можно снять
+        assert second and second != first and t.cancel(second)
         while t.busy:
             time.sleep(0.2)
-        done = [p for k, p in events if k == "job_done"][-1]
+        dropped = [p for k, p in events if k == "job_done" and p["id"] == second]
+        assert len(dropped) == 1 and dropped[0]["text"] == "Отменено.", dropped
+        done = [p for k, p in events if k == "job_done" and p["id"] == first][-1]
+        assert done["action"] == action and done["name"] == "Клип тест", done
         if not done["ok"]:
             try:
                 print("   ffmpeg:", open(os.path.join(tmp, "work", "tools_err.log"), encoding="utf-8", errors="replace").read()[-1500:], flush=True)
@@ -134,7 +139,7 @@ def main():
 
     # отправка: без вебхука — понятная ошибка
     done, _ = run("send")
-    assert not done["ok"] and "вебхук" in done["text"].lower(), done
+    assert not done["ok"] and "канал" in done["text"].lower(), done
 
     # отправка: поддельный «Discord» принимает файл
     got = {}
@@ -181,6 +186,48 @@ def main():
     done, _ = run("send", 2, 12)
     print("отказ при отправке →", done["text"])
     assert not done["ok"] and "сохранён" in done["text"] and os.path.isfile(done["path"]), done
+
+    # несколько каналов: клип уходит в выбранный, в имени итога — название канала
+    hits = {}
+
+    class Multi(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            hits[self.path] = hits.get(self.path, 0) + 1
+            self.send_response(204)
+            self.end_headers()
+
+    srv2 = HTTPServer(("127.0.0.1", 0), Multi)
+    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    base_url = "http://127.0.0.1:%d/api/webhooks/" % srv2.server_address[1]
+    import json as _json
+    cfg.update({"discord_channels": _json.dumps([{"name": "клипы", "url": base_url + "1/a"},
+                                                 {"name": "мемы", "url": base_url + "2/b"}]), "discord_limit_mb": 10})
+    assert [c["name"] for c in tools.channels(cfg)] == ["клипы", "мемы"]
+    assert tools.pick_channel(cfg)["name"] == "клипы"
+    cfg.update({"discord_channel": base_url + "2/b"})
+    assert tools.pick_channel(cfg)["name"] == "мемы"              # последний выбранный
+    assert tools.pick_channel(cfg, base_url + "1/a")["name"] == "клипы"
+    events.clear()
+    ids = [t.start(small, "send", channel=base_url + "1/a"), t.start(small, "send", channel=base_url + "2/b"),
+           t.start(small, "send")]                                 # три отправки подряд — все в очереди
+    assert all(ids) and len(set(ids)) == 3
+    while t.busy:
+        time.sleep(0.2)
+    finals = {p["id"]: p for k, p in events if k == "job_done"}
+    assert all(finals[i]["ok"] for i in ids), finals
+    assert finals[ids[0]]["channel"] == "клипы" and "«клипы»" in finals[ids[0]]["text"], finals[ids[0]]
+    assert finals[ids[1]]["channel"] == "мемы" and finals[ids[2]]["channel"] == "мемы"
+    assert hits == {"/api/webhooks/1/a": 1, "/api/webhooks/2/b": 2}, hits
+    queued = [p for k, p in events if k == "job" and p["stage"] == "В очереди…"]
+    assert {p["id"] for p in queued} >= set(ids[1:]), queued
+    print("каналы → %s, очередь из трёх отправок прошла" % hits)
+    srv2.shutdown()
+    cfg.update({"discord_channels": "", "discord_channel": ""})   # дальше — старая одиночная ссылка
+    assert tools.channels(cfg) == [{"name": "Канал", "url": hook}]
 
     # клип уже сжат целиком кнопкой «Сжать» — при отправке второй раз не сжимается
     got["code"] = 204

@@ -45,6 +45,7 @@ class App:
         self.quitting = False
         self.api = None
         self.visible = True
+        self._overlay_jobs = set()   # отправки, начатые из меню поверх игры: их итог — уведомлением
         self.updater = Updater(data_dir(), lambda kind, data: self.push(kind, data))
         self.hotkeys = Hotkeys()
         self.toast = Toast()
@@ -630,8 +631,11 @@ class App:
         rows = []
         if sel:
             items = [{"id": "gact:copy", "name": "Скопировать — Ctrl+V в Discord"}]
-            if self.cfg["discord_webhook"].strip():
-                items.append({"id": "gact:send", "name": "Отправить в Discord"})
+            chans = clip_tools.channels(self.cfg)
+            if len(chans) == 1:
+                items.append({"id": "gact:send:0", "name": "Отправить в Discord"})
+            for i, ch in enumerate(chans if len(chans) > 1 else []):   # несколько каналов — по пункту на канал
+                items.append({"id": "gact:send:%d" % i, "name": "В Discord → " + ch["name"][:24]})
             items.append({"id": "gact:fav", "name": "★ Убрать из избранного" if sel.get("favorite") else "★ В избранное"})
             items.append({"id": "gact:open", "name": "Открыть в программе"})
             rows.append({"label": "ВЫБРАН: " + sel["name"][:28].upper(), "items": items})
@@ -670,12 +674,20 @@ class App:
             if winutil.copy_file_to_clipboard(path):
                 self.toast.show("Клип скопирован", "Вставьте в Discord: Ctrl+V")
                 return True
-        elif what == "send":
-            if self.tools.start(path, "send"):
-                self._overlay_job = True   # результат — уведомлением, меню можно закрыть
-                self.toast.show("Отправляю в Discord", name)
+        elif what == "send" or what.startswith("send:"):
+            chans = clip_tools.channels(self.cfg)
+            try:
+                ch = chans[int(what.split(":", 1)[1])] if ":" in what else clip_tools.pick_channel(self.cfg)
+            except (ValueError, IndexError):
+                ch = None
+            if not ch:
+                self.toast.show("Нет канала", "Добавьте канал: Настройки → Discord")
+                return False
+            job = self.tools.start(path, "send", channel=ch["url"])
+            if job:
+                self._overlay_jobs.add(job)   # результат — уведомлением, меню можно закрыть
+                self.toast.show("Отправляю в «%s»" % ch["name"], name)
                 return True
-            self.toast.show("Подождите", "Сейчас идёт другая работа с клипом")
         elif what == "fav":
             clip = next((c for c in (self.overlay_facts().get("clips") or []) if c["path"] == path), None)
             self.library.set_favorite(path, not (clip or {}).get("favorite"))
@@ -845,9 +857,12 @@ class App:
         self.push(kind, payload)
 
     def on_tool_event(self, kind, payload):
-        if kind == "job_done" and getattr(self, "_overlay_job", False):   # отправка из меню поверх игры — итог уведомлением
-            self._overlay_job = False
-            self.toast.show("Discord" if payload.get("ok") else "Не получилось", payload.get("text", ""))
+        # Итог отправки — уведомлением, если её начали из меню поверх игры или окно программы спрятано в трей.
+        if kind == "job_done" and (payload.get("id") in self._overlay_jobs
+                                   or (payload.get("action") == "send" and not self.visible)):
+            self._overlay_jobs.discard(payload.get("id"))
+            self.toast.show(("Discord" if payload.get("ok") else "Не отправилось") + ": " + payload.get("name", "")[:40],
+                            payload.get("text", ""))
         if kind == "job_done":
             self.sound("saved" if payload.get("ok") else "error")
         self.push(kind, payload)
@@ -1078,16 +1093,36 @@ class Api:
         files = clip_tools.split_tracks(self._app.ffmpeg, path, os.path.join(cache_dir(), "tracks"))
         return [self._app.media.allow(f) for f in files]
 
-    def clip_action(self, path, action, start=None, end=None, tracks=None, segments=None):
+    def clip_action(self, path, action, start=None, end=None, tracks=None, segments=None, channel=None):
         """action: trim — сохранить обрезку, compress — сжать под лимит, send — отправить в Discord.
-        segments — оставленные куски [[начало, конец], ...]; если их несколько, они склеиваются."""
+        segments — оставленные куски [[начало, конец], ...]; если их несколько, они склеиваются.
+        channel — ссылка вебхука канала (из настроек). Возвращает номер работы в очереди или 0."""
         if not (self._app.library.inside(path) and os.path.isfile(path)):
-            return False
+            return 0
+        if action == "send" and channel and channel != self._app.cfg["discord_channel"]:
+            self._app.cfg.update({"discord_channel": str(channel)})   # в следующий раз — тот же канал
         try:
             segments = [[float(a), float(b)] for a, b in (segments or [])][:80]
         except (TypeError, ValueError):
             segments = []
-        return self._app.tools.start(path, action, start, end, tracks, segments, self._app.gate_for(path))
+        return self._app.tools.start(path, action, start, end, tracks, segments, self._app.gate_for(path), channel)
+
+    def send_clips(self, paths, channel=None):
+        """Отправить несколько клипов целиком в один канал — каждый встаёт в очередь. [{id, path}]."""
+        jobs = []
+        for path in list(paths or [])[:50]:
+            job = self.clip_action(str(path), "send", channel=channel)
+            if job:
+                jobs.append({"id": job, "path": str(path)})
+        return jobs
+
+    def clip_jobs(self):
+        """Идущие и ждущие работы (для панели отправок после перезагрузки окна)."""
+        return self._app.tools.jobs()
+
+    def webhook_name(self, url):
+        """Имя вебхука — подсказка для названия канала в настройках."""
+        return clip_tools.webhook_name(str(url or ""))
 
     def clip_strip(self, path):
         """Полоса кадров для шкалы в окне клипа и для кусков на дорожке монтажа."""
@@ -1118,9 +1153,8 @@ class Api:
         out = os.path.join(folder, "Монтаж %s.mp4" % time.strftime("%Y-%m-%d %H-%M-%S"))
         return self._app.tools.montage(clean, clip_tools.unique(out))
 
-    def cancel_job(self):
-        self._app.tools.cancel()
-        return True
+    def cancel_job(self, job_id=None):
+        return self._app.tools.cancel(int(job_id) if job_id else None)
 
     def open_clip(self, path):
         if self._app.library.inside(path) and os.path.isfile(path):

@@ -284,39 +284,142 @@ def post_file(url, path, filename):
         raise Fail("Нет связи с Discord: %s" % getattr(exc, "reason", exc))
 
 
+def _setting(cfg, key):
+    try:
+        return str(cfg[key] or "")
+    except (KeyError, TypeError):
+        return ""
+
+
+def channels(cfg):
+    """Каналы Discord из настроек: [{"name", "url"}]. Старая одиночная ссылка — как единственный канал."""
+    out, seen = [], set()
+    try:
+        data = json.loads(_setting(cfg, "discord_channels") or "[]")
+    except ValueError:
+        data = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append({"name": str(item.get("name") or "").strip() or "Канал %d" % (len(out) + 1), "url": url})
+    legacy = _setting(cfg, "discord_webhook").strip()
+    if not out and legacy:
+        out.append({"name": "Канал", "url": legacy})
+    return out
+
+
+def pick_channel(cfg, url=None):
+    """Канал для отправки: названный, иначе последний выбранный, иначе первый. None — каналов нет."""
+    found = channels(cfg)
+    for want in (url, _setting(cfg, "discord_channel")):
+        for ch in found:
+            if want and ch["url"] == want:
+                return ch
+    return found[0] if found else None
+
+
+def webhook_name(url, timeout=8):
+    """Имя вебхука из Discord (по ссылке, без входа в аккаунт) — подсказка для названия канала."""
+    if not WEBHOOK_RE.match(url or ""):
+        return ""
+    request = urllib.request.Request(url.strip(), headers={
+        "User-Agent": "%s (https://github.com/SevereClaw/MidnightClips, %s)" % (APP_NAME, __version__)})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return str(json.loads(response.read().decode("utf-8", "replace")).get("name") or "")
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        return ""
+
+
 class ClipTools:
     def __init__(self, cfg, ffmpeg, tmp_dir, on_event, log_path=None):
         self.log_path = log_path
         self.cfg = cfg
         self.ffmpeg = ffmpeg
         self.tmp_dir = tmp_dir
-        self.on_event = on_event      # "job" {stage, percent} / "job_done" {ok, text, action, path}
-        self.busy = False
+        # "job" {id, action, name, channel, stage, percent} / "job_done" {id, action, name, channel, ok, text, path}
+        self.on_event = on_event
         self._cancel = False
         self._proc = None
+        # Работы идут по очереди: отправка в Discord не занимает окно клипа — можно сразу браться за следующий.
+        self._lock = threading.Lock()
+        self._queue = []              # ждущие работы: {"id", "action", "name", "channel", "run": (функция, аргументы)}
+        self._current = None          # работа, которая идёт сейчас
+        self._next_id = 0
+        self._job = None
         self._audio, self._audio_copy = ["-map", "0:v", "-map", "0:a?"], True
         self.encoders = lambda: []    # кодировщики, найденные при записи (видеокарта) — задаёт программа
         os.makedirs(tmp_dir, exist_ok=True)
 
-    def start(self, path, action, start=None, end=None, tracks=None, segments=None, gate=None):
+    @property
+    def busy(self):
+        return self._current is not None or bool(self._queue)
+
+    def jobs(self):
+        """Идущая и ждущие работы — для панели отправок после перезагрузки окна."""
+        with self._lock:
+            items = ([self._current] if self._current else []) + list(self._queue)
+            return [{k: job[k] for k in ("id", "action", "name", "channel")} for job in items]
+
+    def start(self, path, action, start=None, end=None, tracks=None, segments=None, gate=None, channel=None):
         """tracks — номера отдельных звуковых дорожек, которые оставить (None — звук как есть).
-        segments — несколько оставленных кусков [[начало, конец], ...]: они склеиваются по порядку."""
-        if self.busy or action not in ("trim", "compress", "send"):
-            return False
-        self.busy = True
-        self._cancel = False
-        threading.Thread(target=self._run, args=(path, action, start, end, tracks, segments, gate), daemon=True,
-                         name="clip-tools").start()
-        return True
+        segments — несколько оставленных кусков [[начало, конец], ...]: они склеиваются по порядку.
+        channel — ссылка вебхука канала для отправки (None — последний выбранный или первый).
+        Возвращает номер работы (она встаёт в очередь) или 0."""
+        if action not in ("trim", "compress", "send"):
+            return 0
+        name = os.path.splitext(os.path.basename(path))[0]
+        url = label = ""
+        if action == "send":
+            ch = pick_channel(self.cfg, channel)
+            if ch:
+                url, label = ch["url"], ch["name"]
+        return self._enqueue(action, name, label, self._run, (path, action, start, end, tracks, segments, gate, url, label))
 
     def montage(self, pieces, out_path):
         """Склеить куски разных клипов в один ролик: pieces = [{"path", "start", "end", "tracks"}, ...]."""
-        if self.busy or not pieces:
-            return False
-        self.busy = True
-        self._cancel = False
-        threading.Thread(target=self._run_montage, args=(pieces, out_path), daemon=True, name="montage").start()
-        return True
+        if not pieces:
+            return 0
+        return self._enqueue("montage", os.path.splitext(os.path.basename(out_path))[0], "",
+                             self._run_montage, (pieces, out_path))
+
+    def _enqueue(self, action, name, channel, fn, args):
+        with self._lock:
+            self._next_id += 1
+            job = {"id": self._next_id, "action": action, "name": name, "channel": channel, "run": (fn, args)}
+            waiting = self._current is not None or bool(self._queue)
+            self._queue.append(job)
+            if self._current is None:
+                self._current = self._queue.pop(0)
+                threading.Thread(target=self._worker, daemon=True, name="clip-tools").start()
+        if waiting:
+            self._emit(job, "job", {"stage": "В очереди…", "percent": None})
+        return job["id"]
+
+    def _worker(self):
+        while True:
+            job = self._current
+            self._cancel = False
+            self._job = job
+            fn, args = job["run"]
+            try:
+                fn(*args)
+            except Exception as exc:  # не оставлять интерфейс в «занято»
+                self._emit(job, "job_done", {"ok": False, "text": "Ошибка: %s" % exc, "path": ""})
+            self._proc = None
+            with self._lock:
+                self._current = self._queue.pop(0) if self._queue else None
+                if self._current is None:
+                    return
+
+    def _emit(self, job, kind, payload):
+        data = {"id": job["id"], "action": job["action"], "name": job["name"], "channel": job["channel"]}
+        data.update(payload)
+        self.on_event(kind, data)
 
     def _run_montage(self, pieces, out_path):
         try:
@@ -324,12 +427,11 @@ class ClipTools:
             self._done("montage", "Ролик склеен: %d %s, %s" % (len(pieces), plural(len(pieces), "кусок", "куска", "кусков"),
                                                              clock(total)), out_path)
         except Fail as exc:
-            self.on_event("job_done", {"ok": False, "action": "montage",
-                                       "text": "Отменено." if self._cancel else str(exc), "path": ""})
+            self._emit(self._job, "job_done", {"ok": False,
+                                                 "text": "Отменено." if self._cancel else str(exc), "path": ""})
         except Exception as exc:  # не оставлять интерфейс в «занято»
-            self.on_event("job_done", {"ok": False, "action": "montage", "text": "Ошибка: %s" % exc, "path": ""})
+            self._emit(self._job, "job_done", {"ok": False, "text": "Ошибка: %s" % exc, "path": ""})
         finally:
-            self.busy = False
             self._proc = None
 
     def _join(self, pieces, out_path, label):
@@ -428,7 +530,18 @@ class ClipTools:
             found = []
         return found[:1] + ["libx264"]
 
-    def cancel(self):
+    def cancel(self, job_id=None):
+        """Отменить работу: идущую (job_id не указан или совпадает) или ждущую в очереди."""
+        with self._lock:
+            job = next((j for j in self._queue if j["id"] == job_id), None)
+            if job is not None:
+                self._queue.remove(job)
+            current = self._current
+        if job is not None:
+            self._emit(job, "job_done", {"ok": False, "text": "Отменено.", "path": ""})
+            return True
+        if current is None or (job_id is not None and current["id"] != job_id):
+            return False
         self._cancel = True
         proc = self._proc
         if proc and proc.poll() is None:
@@ -436,13 +549,14 @@ class ClipTools:
                 proc.terminate()
             except OSError:
                 pass
+        return True
 
     # ---------------------------------------------------------------- работа
 
     def _stage(self, text, percent=None):
-        self.on_event("job", {"stage": text, "percent": percent})
+        self._emit(self._job, "job", {"stage": text, "percent": percent})
 
-    def _run(self, path, action, start, end, tracks=None, segments=None, gate=None):
+    def _run(self, path, action, start, end, tracks=None, segments=None, gate=None, url="", channel=""):
         temps = []
         send_base = None
         try:
@@ -499,9 +613,10 @@ class ClipTools:
                 temps.remove(out)
                 self._done(action, "Сжатый клип сохранён: %.1f МБ" % (os.path.getsize(out) / 1048576), out)
             else:
-                url = self.cfg["discord_webhook"].strip()
+                url = (url or "").strip()
                 if not WEBHOOK_RE.match(url):
-                    raise Fail("Сначала вставьте ссылку вебхука: Настройки → Discord.")
+                    raise Fail("Сначала добавьте канал: Настройки → Discord." if not url
+                               else "Ссылка вебхука канала «%s» не похожа на настоящую — проверьте её в настройках." % channel)
                 source, kept = path, ""
                 if ranged or picked:
                     source = os.path.join(self.tmp_dir, "send_trim.mp4")
@@ -527,28 +642,26 @@ class ClipTools:
                 except Fail as exc:
                     if not kept:
                         raise
-                    self.on_event("job_done", {
-                        "ok": False, "action": action, "path": kept,
+                    self._emit(self._job, "job_done", {"ok": False, "path": kept,
                         "text": "%s Сжатый клип сохранён рядом с исходным (%s) — его можно отправить самому." % (
                             "Отправка отменена." if self._cancel else str(exc), os.path.basename(kept))})
                     return
-                self._done(action, "Клип отправлен в Discord" + (". Сжатая копия сохранена рядом" if kept else ""), kept)
+                self._done(action, "Клип отправлен в «%s»" % channel + (". Сжатая копия сохранена рядом" if kept else ""), kept)
         except Fail as exc:
-            self.on_event("job_done", {"ok": False, "action": action,
-                                       "text": "Отменено." if self._cancel else str(exc), "path": ""})
+            self._emit(self._job, "job_done", {"ok": False,
+                                                 "text": "Отменено." if self._cancel else str(exc), "path": ""})
         except Exception as exc:  # не оставлять интерфейс в «занято»
-            self.on_event("job_done", {"ok": False, "action": action, "text": "Ошибка: %s" % exc, "path": ""})
+            self._emit(self._job, "job_done", {"ok": False, "text": "Ошибка: %s" % exc, "path": ""})
         finally:
             for temp in temps:
                 try:
                     os.remove(temp)
                 except OSError:
                     pass
-            self.busy = False
             self._proc = None
 
     def _done(self, action, text, path):
-        self.on_event("job_done", {"ok": True, "action": action, "text": text, "path": path})
+        self._emit(self._job, "job_done", {"ok": True, "text": text, "path": path})
 
     def _ffmpeg(self, args, duration=None, base=0, span=100, label=""):
         """Запустить ffmpeg и передавать ход работы в интерфейс."""

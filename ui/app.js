@@ -12,7 +12,7 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9", hotkey_overlay: "Alt+Z", hotkey_marker: "Alt+F6", hotkey_clip_a: "Alt+F8", clip_a_seconds: 30, hotkey_clip_b: "Alt+F7", clip_b_seconds: 15,
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, capture_target: "game", window_exe: "p3r.exe", app_volumes: '{"discord.exe": {"on": true, "vol": 60}}', audio_mode: "apps", mic_on: true, separate_tracks: true, game_include: "", game_exclude: "", cursor: true, preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "https://discord.com/api/webhooks/1/demo", discord_channels: '[{"name": "клипы", "url": "https://discord.com/api/webhooks/1/demo"}, {"name": "мемы", "url": "https://discord.com/api/webhooks/2/demo"}]', discord_channel: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, capture_target: "game", window_exe: "p3r.exe", app_volumes: '{"discord.exe": {"on": true, "vol": 60}}', audio_mode: "apps", mic_on: true, separate_tracks: true, game_include: "", game_exclude: "", cursor: true, preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -76,16 +76,28 @@ const demoApi = {
   set_voices_off: async () => true,
   clip_track_urls: async () => window.DEMO_TRACKS || [],
   set_fullscreen: async (on) => on,
-  clip_action: async (p, action) => {
-    let n = 0;
-    const timer = setInterval(() => {
-      n += 20;
-      window.onBackendEvent("job", { stage: action === "send" ? "Отправляю в Discord…" : "Сжимаю до 10 МБ…", percent: action === "send" ? null : n });
-      if (n >= 100) { clearInterval(timer); window.onBackendEvent("job_done", { ok: true, action, text: "Готово (демо)", path: "" }); }
-    }, 300);
-    return true;
-  },
+  clip_action: async (p, action, a, b, t, parts, channel) => demoJob(p, action, channel),
+  send_clips: async (paths, channel) => paths.map((p) => ({ id: demoJob(p, "send", channel), path: p })),
+  clip_jobs: async () => [],
+  webhook_name: async () => "клипы-" + Math.floor(Math.random() * 90 + 10),
+  cancel_job: async (id) => { demoCancel.add(id); return true; },
 };
+let demoJobs = 0;
+const demoCancel = new Set();
+function demoJob(p, action, channel) {
+  const id = ++demoJobs;
+  const clip = demo.clips.find((c) => c.path === p);
+  const ch = channelsList().find((c) => c.url === channel) || channelsList()[0] || { name: "" };
+  const base = { id, action, name: clip ? clip.name : p, channel: action === "send" ? ch.name : "" };
+  let n = 0;
+  const timer = setInterval(() => {
+    n += 10;
+    if (demoCancel.has(id)) { clearInterval(timer); window.onBackendEvent("job_done", { ...base, ok: false, text: "Отменено.", path: "" }); return; }
+    window.onBackendEvent("job", { ...base, stage: action === "send" && n > 60 ? "Отправляю в Discord…" : "Сжимаю до 10 МБ…", percent: action === "send" && n > 60 ? null : n });
+    if (n >= 100) { clearInterval(timer); window.onBackendEvent("job_done", { ...base, ok: id % 4 !== 0, text: id % 4 ? (action === "send" ? "Клип отправлен в «" + ch.name + "»" : "Готово (демо)") : "Discord просит подождать — слишком много отправок подряд.", path: "" }); }
+  }, 400);
+  return id;
+}
 const api = new Proxy({}, {
   get: (_t, name) => (...args) => {
     const real = window.pywebview && window.pywebview.api && window.pywebview.api[name];
@@ -234,12 +246,12 @@ window.onBackendEvent = (kind, data) => {
   else if (kind === "open") { const item = document.querySelector('.nav-item[data-view="' + data.view + '"]'); if (item) item.click(); }
   else if (kind === "update") applyUpdate(data);
   else if (kind === "settings") api.get_settings().then(applySettings);
-  else if (kind === "job") (jobFrom === "montage" ? mvShowJob : showJob)(data);
+  else if (kind === "job") routeJob(data, false);
   else if (kind === "cleaned") {
     flash("Автоочистка: в корзину ушло клипов — " + data.count + " (" + fmtSize(data.bytes) + ")");
     loadClips();
   }
-  else if (kind === "job_done") { const from = jobFrom; jobFrom = "editor"; (from === "montage" ? mvFinishJob : finishJob)(data); }
+  else if (kind === "job_done") routeJob(data, true);
   else if (kind === "files_dropped") mvFilesDropped(data.items || []);
   else if (kind === "open_clip") {   // «Открыть в программе» из галереи меню поверх игры
     openView("clips");
@@ -383,6 +395,7 @@ function renderClips() {
     action("Скопировать", async () => {
       flash((await api.copy_clip(clip.path)) ? "Скопировано — вставьте через Ctrl+V" : "Не удалось скопировать", false);
     });
+    action("В Discord", (e) => sendWhole([clip.path], e.currentTarget), "link-discord");
     action("Показать в папке", () => api.reveal_clip(clip.path));
     action("Теги", async () => {
       const value = await ask({ title: "Теги клипа", text: "Через запятую, например: эйс, смешное, босс", input: (clip.tags || []).join(", "), okLabel: "Сохранить" });
@@ -462,6 +475,7 @@ async function deletePicked() {
   loadClips();
 }
 $("selDelete").onclick = deletePicked;
+$("selSend").onclick = async () => { if (await sendWhole([...picked], $("selSend"))) clearPicked(); };
 
 document.addEventListener("keydown", (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
@@ -1046,7 +1060,7 @@ async function openEditor(clip) {
   applyTracks();
 }
 function closeEditor() {
-  if (edBusy) api.cancel_job();
+  if (edBusy) api.cancel_job(edJobId || null);   // обрезку и сжатие — отменить; отправки идут дальше в фоне
   if (document.fullscreenElement) document.exitFullscreen();
   dropAudio();
   video.pause();
@@ -1107,7 +1121,7 @@ $("edClose").onclick = closeEditor;
 $("edPrev").onclick = () => stepClip(-1);
 $("edNext").onclick = () => stepClip(1);
 $("edOpen").onclick = () => { video.pause(); if (edClip) api.open_clip(edClip.path); };
-$("edCancel").onclick = () => api.cancel_job();
+$("edCancel").onclick = () => api.cancel_job(edJobId || null);
 document.addEventListener("keydown", (e) => {
   if ($("editor").hidden || !$("modal").hidden) return;
   const el = e.target, tag = el.tagName;
@@ -1138,29 +1152,44 @@ document.addEventListener("keyup", (e) => {
 
 function setEditorBusy(busy) {
   edBusy = busy;
-  ["edCompress", "edSend"].forEach((id) => { $(id).disabled = busy; });
+  $("edCompress").disabled = busy;
   drawTrim();
 }
+let edJobId = 0;
 async function runAction(action) {
-  if (!edClip || edBusy) return;
+  if (!edClip || (edBusy && action !== "send")) return;
   const dur = video.duration || 0;
   let a = null, b = null, parts = null;
   if (dur && trimmed()) {
     a = segs[0].a; b = segs[segs.length - 1].b;
     if (segs.length > 1) parts = segs.map((g) => [g.a, g.b]);
   }
-  if (action === "send" && !(settings.discord_webhook || "").trim()) {
-    flash("Сначала вставьте ссылку вебхука: Настройки → Discord", true);
+  if (action === "send") {   // отправка уходит в фон: окно свободно, можно сразу открывать следующий клип
+    const chans = channelsList();
+    if (!chans.length) { flash("Сначала добавьте канал: Настройки → Discord", true); return; }
+    const ch = chans.find((c) => c.url === $("edChannel").value) || chans[0];
+    const id = await api.clip_action(edClip.path, "send", a, b, pickedTracks(), parts, ch.url);
+    if (!id) { flash("Не получилось поставить клип в очередь", true); return; }
+    sendUpsert({ id, name: edClip.name, channel: ch.name, stage: "Готовлю…", percent: null });
+    settings.discord_channel = ch.url;
+    osd("В очередь → " + ch.name);
     return;
   }
   video.pause();
   setEditorBusy(true);
+  edJobId = 0;
   showJob({ stage: "Начинаю…", percent: null });
-  if (!(await api.clip_action(edClip.path, action, a, b, pickedTracks(), parts))) {
-    finishJob({ ok: false, text: "Сейчас занято другой задачей — подождите." });
-  }
+  const id = await api.clip_action(edClip.path, action, a, b, pickedTracks(), parts);
+  if (!id) finishJob({ ok: false, text: "Не получилось начать — подождите и попробуйте ещё раз." });
+  else if (edBusy) edJobId = id;
+}
+function routeJob(data, done) {
+  if (data.action === "send") (done ? sendDone : sendUpsert)(data);
+  else if (data.action === "montage") (done ? mvFinishJob : mvShowJob)(data);
+  else (done ? finishJob : showJob)(data);
 }
 function showJob(job) {
+  if (job.id) edJobId = job.id;
   $("edJob").hidden = false;
   $("edJobText").textContent = job.stage + (job.percent != null ? " " + job.percent + "%" : "");
   $("edJobFill").parentElement.classList.toggle("is-unknown", job.percent == null);
@@ -1168,20 +1197,261 @@ function showJob(job) {
 }
 function finishJob(result) {
   setEditorBusy(false);
+  edJobId = 0;
   $("edJob").hidden = true;
   flash(result.text, !result.ok);
-  if (result.path || (result.ok && result.action !== "send")) loadClips();   // при отправке рядом остаётся сжатая копия
+  if (result.path || result.ok) loadClips();
 }
 $("edTrim").onclick = () => runAction("trim");
 $("edCompress").onclick = () => runAction("compress");
 $("edSend").onclick = () => runAction("send");
+
+// ---------------------------------------------------------------- Discord: каналы и отправка в фоне
+// Каждая отправка встаёт в очередь и идёт сама: окно клипа свободно, можно сразу открыть и кинуть следующий.
+// Ход отправок — в панели в левом нижнем углу, её можно свернуть.
+
+const WEBHOOK_RE = /^https:\/\/(?:[a-z]+\.)?discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/[\w-]+/i;
+function channelsList() {
+  let list = [];
+  try { list = JSON.parse(settings.discord_channels || "[]"); } catch (_e) { list = []; }
+  const out = [], seen = new Set();
+  (Array.isArray(list) ? list : []).forEach((c) => {
+    const url = String((c && c.url) || "").trim();
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    out.push({ name: String(c.name || "").trim() || "Канал " + (out.length + 1), url });
+  });
+  const legacy = String(settings.discord_webhook || "").trim();
+  if (!out.length && legacy) out.push({ name: "Канал", url: legacy });
+  return out;
+}
+function lastChannel(chans) {
+  return chans.find((c) => c.url === settings.discord_channel) || chans[0];
+}
+
+// выбор канала: один канал — сразу он, несколько — меню у кнопки
+let chanMenuDone = null;
+function closeChanMenu(value) {
+  $("chanMenu").hidden = true;
+  const done = chanMenuDone;
+  chanMenuDone = null;
+  if (done) done(value);
+}
+function chooseChannel(anchor) {
+  const chans = channelsList();
+  if (!chans.length) {
+    flash("Сначала добавьте канал: Настройки → Discord", true);
+    return Promise.resolve(null);
+  }
+  if (chans.length === 1) return Promise.resolve(chans[0]);
+  closeChanMenu(null);
+  const menu = $("chanMenu");
+  menu.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "chan-menu-head";
+  head.textContent = "В какой канал?";
+  menu.appendChild(head);
+  const last = lastChannel(chans);
+  chans.forEach((ch) => {
+    const b = document.createElement("button");
+    b.className = "chan-item" + (ch === last ? " is-last" : "");
+    b.setAttribute("role", "menuitem");
+    b.textContent = "# " + ch.name;
+    b.onclick = (e) => { e.stopPropagation(); closeChanMenu(ch); };
+    menu.appendChild(b);
+  });
+  menu.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.left)) + "px";
+  menu.style.top = (r.bottom + h + 8 < window.innerHeight ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + "px";
+  (menu.querySelector(".is-last") || menu.querySelector(".chan-item")).focus();
+  return new Promise((resolve) => { chanMenuDone = resolve; });
+}
+document.addEventListener("mousedown", (e) => { if (!$("chanMenu").hidden && !$("chanMenu").contains(e.target)) closeChanMenu(null); }, true);
+document.addEventListener("keydown", (e) => {
+  if ($("chanMenu").hidden) return;
+  if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closeChanMenu(null); return; }
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const items = [...$("chanMenu").querySelectorAll(".chan-item")];
+    const i = items.indexOf(document.activeElement);
+    items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
+  }
+}, true);
+
+// клипы целиком — из галереи (одной кнопкой или выбранные пачкой)
+async function sendWhole(paths, anchor) {
+  if (!paths.length) return false;
+  const ch = await chooseChannel(anchor);
+  if (!ch) return false;
+  const jobs = (await api.send_clips(paths, ch.url)) || [];
+  jobs.forEach((j) => {
+    const clip = clips.find((c) => c.path === j.path);
+    sendUpsert({ id: j.id, name: clip ? clip.name : j.path, channel: ch.name, stage: "В очереди…", percent: null });
+  });
+  if (!jobs.length) { flash("Не получилось поставить в очередь", true); return false; }
+  settings.discord_channel = ch.url;
+  syncChannelSelect();
+  if (jobs.length > 1) flash("В очередь на отправку в «" + ch.name + "»: " + jobs.length);
+  return true;
+}
+
+// панель отправок
+const sends = new Map();          // id → {id, name, channel, stage, percent, state: run | ok | err, text}
+const sendsFinished = new Set();  // итог мог прийти раньше, чем ответ «поставлено в очередь»
+let sendsCollapsed = false;
+try { sendsCollapsed = localStorage.getItem("mc_sends_collapsed") === "1"; } catch (_e) { /* хранилище недоступно */ }
+function sendUpsert(d) {
+  if (!d.id || sendsFinished.has(d.id)) return;
+  const item = sends.get(d.id) || { id: d.id, state: "run" };
+  ["name", "channel", "stage", "percent"].forEach((k) => { if (d[k] !== undefined && d[k] !== "") item[k] = d[k]; });
+  if (d.percent === null) item.percent = null;
+  sends.set(d.id, item);
+  renderSends();
+}
+function sendDone(d) {
+  sendsFinished.add(d.id);
+  const item = sends.get(d.id) || { id: d.id };
+  Object.assign(item, { name: d.name || item.name, channel: d.channel || item.channel, state: d.ok ? "ok" : "err", text: d.text || "" });
+  sends.set(d.id, item);
+  if (d.ok) setTimeout(() => { sends.delete(d.id); renderSends(); }, 7000);
+  else if (d.text === "Отменено.") setTimeout(() => { sends.delete(d.id); renderSends(); }, 2500);
+  if (d.path || d.ok) loadClips();   // рядом могла остаться сжатая копия
+  renderSends();
+}
+function renderSends() {
+  const list = $("sendsList");
+  const items = [...sends.values()];
+  $("sends").hidden = !items.length;
+  if (!items.length) { document.documentElement.style.setProperty("--sends-h", "0px"); return; }
+  const active = items.filter((i) => i.state === "run").length;
+  const failed = items.filter((i) => i.state === "err").length;
+  $("sendsTitle").textContent = active ? "Отправка в Discord · " + active : failed ? "Не отправилось: " + failed : "Отправлено";
+  $("sends").classList.toggle("is-collapsed", sendsCollapsed);
+  $("sends").classList.toggle("is-busy", active > 0);
+  $("sendsHead").setAttribute("aria-expanded", sendsCollapsed ? "false" : "true");
+  list.innerHTML = "";
+  items.forEach((it) => {
+    const row = document.createElement("div");
+    row.className = "send-item is-" + it.state;
+    const top = document.createElement("div");
+    top.className = "send-top";
+    const name = document.createElement("b");
+    name.textContent = name.title = it.name || "Клип";
+    const ch = document.createElement("span");
+    ch.className = "send-ch";
+    ch.textContent = it.channel ? "# " + it.channel : "";
+    const x = document.createElement("button");
+    x.className = "send-x";
+    x.textContent = "×";
+    x.title = it.state === "run" ? "Отменить отправку" : "Убрать из списка";
+    x.onclick = () => {
+      if (it.state === "run") api.cancel_job(it.id);
+      else { sends.delete(it.id); renderSends(); }
+    };
+    top.append(name, ch, x);
+    row.appendChild(top);
+    if (it.state === "run") {
+      const bar = document.createElement("div");
+      bar.className = "job-bar" + (it.percent == null ? " is-unknown" : "");
+      const fill = document.createElement("i");
+      if (it.percent != null) fill.style.width = it.percent + "%";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+    }
+    const note = document.createElement("small");
+    note.textContent = it.state === "run" ? (it.stage || "") + (it.percent != null ? " " + it.percent + "%" : "") : it.text;
+    row.appendChild(note);
+    list.appendChild(row);
+  });
+  document.documentElement.style.setProperty("--sends-h", ($("sends").offsetHeight + 12) + "px");   // сообщения — над панелью
+}
+$("sendsHead").onclick = () => {
+  sendsCollapsed = !sendsCollapsed;
+  try { localStorage.setItem("mc_sends_collapsed", sendsCollapsed ? "1" : "0"); } catch (_e) { /* не страшно */ }
+  renderSends();
+};
+
+// выбор канала в окне клипа
+function syncChannelSelect() {
+  const sel = $("edChannel");
+  const chans = channelsList();
+  sel.innerHTML = "";
+  chans.forEach((c) => sel.add(new Option("# " + c.name, c.url)));
+  const last = lastChannel(chans);
+  if (last) sel.value = last.url;
+  sel.hidden = chans.length < 2;
+  $("edSend").title = (chans.length === 1 ? "В канал «" + chans[0].name + "». " : "") + "Клип уйдёт в фоне — можно сразу открывать следующий";
+}
+$("edChannel").addEventListener("change", () => { api.set_settings({ discord_channel: $("edChannel").value }); settings.discord_channel = $("edChannel").value; });
+
+// настройки: список каналов
+let chanRows = [];
+function renderChannels() {
+  syncChannelSelect();
+  const box = $("channelList");
+  if (box.contains(document.activeElement)) return;   // не мешать, пока пользователь печатает
+  chanRows = channelsList().map((c) => ({ ...c }));
+  drawChannelRows();
+}
+function drawChannelRows() {
+  const box = $("channelList");
+  box.innerHTML = "";
+  if (!chanRows.length) {
+    const empty = document.createElement("small");
+    empty.className = "channels-empty";
+    empty.textContent = "Каналов пока нет — добавьте первый";
+    box.appendChild(empty);
+  }
+  chanRows.forEach((row, i) => {
+    const line = document.createElement("div");
+    line.className = "channel";
+    const name = document.createElement("input");
+    name.type = "text"; name.className = "channel-name"; name.placeholder = "Название"; name.value = row.name; name.spellcheck = false;
+    const url = document.createElement("input");
+    url.type = "text"; url.className = "channel-url"; url.placeholder = "https://discord.com/api/webhooks/…"; url.value = row.url; url.spellcheck = false;
+    const markUrl = () => url.classList.toggle("is-bad", !!url.value.trim() && !WEBHOOK_RE.test(url.value.trim()));
+    markUrl();
+    const del = document.createElement("button");
+    del.className = "mini mini-quiet channel-del"; del.textContent = "×"; del.title = "Убрать канал";
+    name.onchange = () => { row.name = name.value.trim(); saveChannels(); };
+    url.oninput = markUrl;
+    url.onchange = async () => {
+      row.url = url.value.trim();
+      saveChannels();
+      if (row.url && !row.name && WEBHOOK_RE.test(row.url)) {   // имя вебхука из Discord — как подсказка
+        const found = await api.webhook_name(row.url);
+        if (found && !row.name) { row.name = found; name.value = found; saveChannels(); }
+      }
+    };
+    del.onclick = () => { chanRows.splice(i, 1); saveChannels(); drawChannelRows(); };
+    line.append(name, url, del);
+    box.appendChild(line);
+  });
+}
+async function saveChannels() {
+  const clean = chanRows.filter((c) => c.url).map((c, i) => ({ name: c.name || "Канал " + (i + 1), url: c.url }));
+  const values = { discord_channels: JSON.stringify(clean), discord_webhook: clean.length ? clean[0].url : "" };
+  if (settings.discord_channel && !clean.some((c) => c.url === settings.discord_channel)) values.discord_channel = "";
+  Object.assign(settings, values);
+  syncChannelSelect();
+  applySettings(await api.set_settings(values));
+}
+$("btnAddChannel").onclick = () => {
+  chanRows.push({ name: "", url: "" });
+  drawChannelRows();
+  const urls = $("channelList").querySelectorAll(".channel-url");
+  urls[urls.length - 1].focus();
+};
 
 // ---------------------------------------------------------------- монтаж: дорожка, как в видеоредакторе
 // Куски лежат на дорожке друг за другом, ширина — по длительности. Клипы перетаскиваются на дорожку
 // из списка внизу или из Проводника, куски — мышью по дорожке, края кусков подрезаются ручками.
 
 let montage = [];        // [{path, name, a, b, tracks}] — b = null: до конца (пока длина не известна)
-let jobFrom = "editor";  // чей ход работы показывать: окна клипа или монтажа
+let mvBusy = false;      // идёт склейка монтажа
+let mvJobId = 0;
 const mvVideo = $("mvVideo");
 const mvInfo = {};       // path -> {duration}
 const mvStrip = {};      // path -> data-URL полосы кадров
@@ -1294,7 +1564,7 @@ function mvRender() {
   }
   $("mvDelete").disabled = mvSel < 0;
   $("mvUndo").disabled = !mvUndo.length;
-  $("mvJoin").disabled = !montage.length || jobFrom === "montage";
+  $("mvJoin").disabled = !montage.length || mvBusy;
   $("mvClear").disabled = !montage.length;
   mvDrawHead();
 }
@@ -1516,23 +1786,25 @@ $("mvAdd").onclick = async () => {
   if (items.length) { mvAdd(items, null); flash("В монтаж: " + items.length + " видео"); }
 };
 $("mvJoin").onclick = async () => {
-  if (!montage.length || jobFrom === "montage") return;
+  if (!montage.length || mvBusy) return;
   mvVideo.pause();
-  jobFrom = "montage";
+  mvBusy = true;
   mvShowJob({ stage: "Начинаю склейку…", percent: null });
   mvRender();
   const pieces = montage.map((p) => ({ path: p.path, start: p.a, end: p.b != null ? p.b : 0, tracks: p.tracks }));
   if (!(await api.montage(pieces))) mvFinishJob({ ok: false, text: "Сейчас занято другой задачей — подождите." });
 };
-$("mvCancel").onclick = () => api.cancel_job();
+$("mvCancel").onclick = () => api.cancel_job(mvJobId || null);
 function mvShowJob(job) {
+  if (job.id) mvJobId = job.id;
   $("mvJob").hidden = false;
   $("mvJobText").textContent = job.stage + (job.percent != null ? " " + job.percent + "%" : "");
   $("mvJobFill").parentElement.classList.toggle("is-unknown", job.percent == null);
   $("mvJobFill").style.width = job.percent != null ? job.percent + "%" : "";
 }
 function mvFinishJob(result) {
-  jobFrom = "editor";
+  mvBusy = false;
+  mvJobId = 0;
   $("mvJob").hidden = true;
   flash(result.text, !result.ok);
   if (result.ok) loadClips();
@@ -1714,6 +1986,7 @@ function applySettings(s) {
   $("btnDefaultDir").hidden = !s.clips_dir;
   if (s.moving) $("moveBox").hidden = false;
   $("edCompress").textContent = "Сжать до " + s.discord_limit_mb + " МБ";
+  renderChannels();
   $("volText").textContent = s.sound_volume + "%" + (s.sound_volume > 100 ? " — громче исходного файла" : "");
   $("rowWindow").hidden = s.capture_target !== "window";
   $("rowGame").hidden = s.capture_target !== "game";
@@ -2114,6 +2387,7 @@ async function init() {
   renderDrives();
   renderSyv();
   loadMontage();
+  ((await api.clip_jobs()) || []).forEach((j) => { if (j.action === "send") sendUpsert({ ...j, stage: "В очереди…", percent: null }); });
   const options = await api.get_options();
   const mon = $("selMonitor");
   mon.innerHTML = "";

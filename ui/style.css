@@ -596,7 +596,60 @@ input.vol::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height:
 .job-bar i { display: block; height: 100%; width: 0; background: var(--black); transition: width .2s; }
 .job-bar.is-unknown i { width: 35%; animation: unknown 1s linear infinite; }
 @keyframes unknown { from { margin-left: -35%; } to { margin-left: 100%; } }
-input#inpWebhook { width: 300px; }
+.send-group { display: inline-flex; align-items: stretch; gap: 0; }
+.send-group select { border: 3px solid #5865F2; border-left: 0; font-weight: 700; max-width: 180px; transform: skewX(-8deg); margin-left: -2px; }
+.link-discord { border-bottom-color: #5865F2; }
+.link-discord:hover { background: #5865F2; color: var(--white); }
+
+/* каналы Discord в настройках */
+.channels { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+#channelList { display: flex; flex-direction: column; gap: 8px; }
+.channel { display: flex; gap: 8px; align-items: center; }
+.channel-name { width: 130px; font-weight: 700; }
+.channel-url { width: 300px; }
+.channel-url.is-bad { border-color: var(--red); background: #ffe6ea; }
+.channel-del { margin-left: 0; padding: 6px 12px; }
+.channels-empty { color: #4d4400; }
+
+/* выбор канала у кнопки */
+.chan-menu {
+  position: fixed; z-index: 45; min-width: 190px; max-width: 300px; max-height: 60vh; overflow-y: auto;
+  background: var(--black); color: var(--white); padding: 6px 0; border-left: 6px solid #5865F2;
+  box-shadow: 6px 6px 0 var(--orange);
+}
+.chan-menu-head { font-size: 12px; font-weight: 700; text-transform: uppercase; color: var(--yellow); padding: 4px 14px 6px; }
+.chan-item { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--white); font-weight: 700; padding: 7px 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chan-item.is-last::after { content: "  · в прошлый раз"; font-weight: 400; color: #aaa; font-size: 12px; }
+.chan-item:hover, .chan-item:focus { background: #5865F2; outline: none; }
+
+/* отправки в Discord — идут в фоне, панель можно свернуть */
+.sends {
+  position: fixed; right: 22px; bottom: 20px; z-index: 28; width: 330px;
+  background: var(--black); color: var(--white); border-left: 8px solid #5865F2; box-shadow: 6px 6px 0 var(--orange);
+}
+.sends-head { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: 0; color: var(--white); padding: 9px 14px; text-align: left; }
+.sends-head strong { flex: 1; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sends-head:hover { background: #1d1d1d; }
+.sends-logo { width: 12px; height: 12px; background: #5865F2; transform: skewX(-12deg); flex: none; }
+.sends.is-busy .sends-logo { animation: sends-pulse 1s ease-in-out infinite alternate; }
+@keyframes sends-pulse { to { background: var(--yellow); } }
+.sends-arrow { width: 9px; height: 9px; border-right: 3px solid var(--yellow); border-bottom: 3px solid var(--yellow); transform: rotate(45deg) translate(-2px, -2px); flex: none; }
+.sends.is-collapsed .sends-arrow { transform: rotate(-135deg) translate(-2px, -2px); }
+.sends.is-collapsed .sends-list { display: none; }
+.sends-list { max-height: 280px; overflow-y: auto; padding: 0 14px 10px; display: flex; flex-direction: column; gap: 10px; }
+.send-item { display: flex; flex-direction: column; gap: 5px; padding-top: 8px; border-top: 2px solid #262626; }
+.send-top { display: flex; align-items: baseline; gap: 8px; }
+.send-top b { flex: 1; min-width: 0; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.send-ch { color: #9aa3ff; font-size: 12px; font-weight: 700; max-width: 110px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.send-x { background: none; border: 0; color: #bbb; font-size: 18px; line-height: 1; padding: 0 2px; }
+.send-x:hover { color: var(--yellow); }
+.send-item small { font-size: 12px; color: #ccc; overflow-wrap: anywhere; }
+.send-item .job-bar { flex: none; height: 12px; border-color: var(--white); background: #222; }
+.send-item .job-bar i { background: var(--yellow); }
+.send-item.is-ok small { color: #8be28b; }
+.send-item.is-ok small::before { content: "✓ "; }
+.send-item.is-err small { color: #ff8a9c; }
+.send-item.is-err small::before { content: "✗ "; }
 
 .update-bar {
   position: fixed; left: calc(var(--rail) + 6px); bottom: 18px; z-index: 15;
@@ -609,7 +662,7 @@ input#inpWebhook { width: 300px; }
 
 /* ----------------------------------------------- сообщения и диалог */
 
-.flashes { position: fixed; right: 22px; bottom: 20px; display: flex; flex-direction: column; gap: 10px; z-index: 40; align-items: flex-end; }
+.flashes { position: fixed; right: 22px; bottom: calc(20px + var(--sends-h, 0px)); display: flex; flex-direction: column; gap: 10px; z-index: 40; align-items: flex-end; }
 .flash {
   background: var(--black); color: var(--white); padding: 11px 20px 11px 30px; max-width: 420px;
   font-weight: 600; clip-path: polygon(16px 0, 100% 0, 100% 100%, 0 100%);
@@ -632,5 +685,5 @@ input#inpWebhook { width: 300px; }
   h1 { font-size: 42px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .tv-static, .tv-rec .dot, .flash, .job-bar.is-unknown i { animation: none; }
+  .tv-static, .tv-rec .dot, .flash, .job-bar.is-unknown i, .sends.is-busy .sends-logo { animation: none; }
 }
