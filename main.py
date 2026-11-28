@@ -158,6 +158,27 @@ class App:
             self.recorder.start()
         threading.Thread(target=self.update_loop, daemon=True, name="updater").start()
         threading.Thread(target=self.cleanup_loop, daemon=True, name="cleanup").start()
+        threading.Thread(target=self.syv_mic_loop, daemon=True, name="syv-mic").start()
+
+    def syv_mic_loop(self):
+        """Какое устройство у Steal Your Voice микрофон: с него пишется дорожка «Голос без эффекта».
+        Запоминаем его в настройках — тогда дорожка есть и пока панель закрыта."""
+        time.sleep(5)
+        while not self.quitting:
+            mic = (self.cfg["mic"] or "").lower()
+            if self.cfg["clean_voice"] and "voicemeeter" in mic:
+                reply = syv.call("state", timeout=3.0)
+                device = str((reply or {}).get("micDevice") or "").strip()
+                if reply and reply.get("ok"):
+                    self.syv.state, self.syv.checked = reply, time.time()
+                # во время записи набор дорожек не меняем — поменяется после неё
+                if device and device != self.cfg["syv_mic_device"] and self.recorder.recording_since is None:
+                    self.recorder._log("Steal Your Voice: микрофон — «%s», пишу с него и голос без эффекта" % device)
+                    if self.api is not None:
+                        self.apply_settings({"syv_mic_device": device})
+                    else:
+                        self.cfg.update({"syv_mic_device": device})
+            time.sleep(15)
 
     def cleanup_loop(self):
         """Автоочистка: вскоре после запуска и дальше раз в полчаса."""

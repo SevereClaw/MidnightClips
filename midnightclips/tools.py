@@ -148,12 +148,22 @@ def gate_filter(spans, offset=0.0, pad=0.12):
     return "volume=0:enable='%s'" % "+".join(parts[:400]) if parts else ""
 
 
-def audio_choice(tracks, total, gate=None, offset=0.0):
+CLEAN_VOICE = "Голос без эффекта"   # дорожка-запаска: голос до Steal Your Voice, в «Всё вместе» не входит
+
+
+def extra_tracks(names):
+    """Номера дорожек, которых нет в общей («Всё вместе»): чистый голос без эффекта."""
+    return {i for i, name in enumerate(names) if i > 0 and name == CLEAN_VOICE}
+
+
+def audio_choice(tracks, total, gate=None, offset=0.0, extra=()):
     """Какой звук положить в готовый файл. tracks — номера выбранных отдельных дорожек (1..total-1) или None.
     gate — {номер дорожки: [(начало, конец)]}: в эти моменты дорожка молчит (друг из Discord выключен).
+    extra — дорожки, которых нет в общей (чистый голос): «выбрано всё» — это всё, кроме них.
     Возвращает (доп. параметры ffmpeg перед выходным файлом, копируется ли звук без перекодирования)."""
+    full = [t for t in range(1, total) if t not in extra]
     if gate and total >= 2:
-        chosen = list(range(1, total)) if tracks is None else sorted({int(t) for t in tracks if 1 <= int(t) < total})
+        chosen = full if tracks is None else sorted({int(t) for t in tracks if 1 <= int(t) < total})
         filters = {t: gate_filter(gate.get(t) or gate.get(str(t)), offset) for t in chosen}
         if chosen and any(filters.values()):
             # общий звук собирается заново из отдельных дорожек — в нём Discord уже приглушён где нужно
@@ -166,7 +176,7 @@ def audio_choice(tracks, total, gate=None, offset=0.0):
     chosen = sorted({int(t) for t in tracks if 1 <= int(t) < total})
     if not chosen:
         return ["-map", "0:v", "-an"], True
-    if len(chosen) == total - 1:
+    if chosen == full:
         return ["-map", "0:v", "-map", "0:a:0"], True          # выбрано всё — это и есть общая дорожка
     if len(chosen) == 1:
         return ["-map", "0:v", "-map", "0:a:%d" % chosen[0]], True
@@ -462,12 +472,14 @@ class ClipTools:
                           "setsar=1,fps=%d,format=yuv420p,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=1,"
                           "trim=duration=%.3f[v%d]" % (i, w, h, w, h, fps, dur, i))
             n = info["audio"]
+            extra = extra_tracks(audio_tracks(self.ffmpeg, p["path"])) if n >= 2 else set()
+            full = [t for t in range(1, n) if t not in extra]
             tracks = p.get("tracks")
             chosen = sorted({int(t) for t in tracks if 1 <= int(t) < n}) if tracks is not None and n >= 2 else None
             gate = p.get("gate") or {}
             gates = {}
             if gate and n >= 2:   # друзья из Discord выключены: собираем звук из отдельных дорожек, Discord приглушён
-                every = chosen if chosen is not None else list(range(1, n))
+                every = chosen if chosen is not None else full
                 gates = {t: gate_filter(gate.get(t) or gate.get(str(t)), a) for t in every}
                 if any(gates.values()):
                     chosen = every
@@ -482,7 +494,7 @@ class ClipTools:
                 mix = "".join("[g%d_%d]" % (i, t) for t in chosen)
                 chains.append("%samix=inputs=%d:normalize=0,%s[a%d]" % (mix, len(chosen), fix, i) if len(chosen) > 1
                               else "%sanull,%s[a%d]" % (mix, fix, i))
-            elif chosen is None or len(chosen) == n - 1:
+            elif chosen is None or chosen == full:
                 chains.append("[%d:a:0]%s[a%d]" % (i, fix, i))
             elif len(chosen) == 1:
                 chains.append("[%d:a:%d]%s[a%d]" % (i, chosen[0], fix, i))
@@ -592,9 +604,11 @@ class ClipTools:
             if e - s < 0.3:
                 raise Fail("Отрезок слишком короткий.")
             ranged = s > 0.05 or e < duration - 0.05
-            total = len(audio_tracks(self.ffmpeg, path)) if tracks is not None or gate else 0
-            self._audio, self._audio_copy = audio_choice(tracks, total, gate, s)
-            picked = (tracks is not None and total >= 2 and len({int(t) for t in tracks if 1 <= int(t) < total}) < total - 1) \
+            names = audio_tracks(self.ffmpeg, path) if tracks is not None or gate else []
+            total, extra = len(names), extra_tracks(names)
+            self._audio, self._audio_copy = audio_choice(tracks, total, gate, s, extra)
+            picked = (tracks is not None and total >= 2
+                      and sorted({int(t) for t in tracks if 1 <= int(t) < total}) != [t for t in range(1, total) if t not in extra]) \
                 or not self._audio_copy   # друзья из Discord приглушены — звук уже не тот, что в исходном клипе
             base = send_base or os.path.splitext(path)[0]
             limit = max(1, int(self.cfg["discord_limit_mb"]))

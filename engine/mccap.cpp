@@ -127,9 +127,11 @@ struct Args {
     bool audioSystem = true;   // записывать звук компьютера
     float volSystem = 1.0f, volMic = 1.0f;
     std::wstring mic;          // название микрофона; "default" — основной; пусто — без микрофона
+    std::wstring micClean;     // само устройство микрофона, если mic — шина Voicemeeter: голос до эффектов
+                               // Steal Your Voice. Пишется только на свою дорожку, в общую не идёт
     std::map<std::wstring, float> appVol;   // своя громкость программ: имя exe (строчными) -> громкость
     // Отдельные звуковые дорожки: кроме общей (всё вместе) — ещё tracks штук, каналы «<audio-pipe>_1», «_2»...
-    int tracks = 0, trackMic = 0, trackOther = 0;
+    int tracks = 0, trackMic = 0, trackOther = 0, trackMicClean = 0;
     std::map<std::wstring, int> appTrack;   // программа -> номер дорожки (1..tracks)
     bool includeParent = false;             // записывать и звуки запустившей нас программы (сигналы MidnightClips)
     bool listApps = false;     // вывести программы, у которых сейчас есть звук, и выйти
@@ -1663,6 +1665,8 @@ struct AudioSource {
     bool loopback = false;
     std::wstring name;         // для микрофона: название устройства или "default"
     float gain = 1.0f;
+    bool main = true;          // идёт и в общую дорожку (чистый голос без эффекта — только в свою)
+    bool clean = false;
     IMMDevice* dev = nullptr;
     IAudioClient* client = nullptr;
     IAudioCaptureClient* cap = nullptr;
@@ -1679,7 +1683,7 @@ struct AudioSource {
         if (evt) { CloseHandle(evt); evt = nullptr; }
     }
 
-    std::string label() const { return pid ? narrow(exe) : (loopback ? "system" : "mic"); }
+    std::string label() const { return pid ? narrow(exe) : (loopback ? "system" : (clean ? "mic-clean" : "mic")); }
 
     // Общая часть: попросить у Windows сразу 48 кГц, стерео (пересчёт она делает сама) и запустить.
     bool startClient(DWORD extraFlags, REFERENCE_TIME buffer) {
@@ -1871,7 +1875,7 @@ struct AudioSource {
         const long long n = std::min(have, count - offset);
         for (long long i = 0; i < n * 2; i++) {
             const float v = fifo[(size_t)i] * gain;
-            out[(size_t)(offset * 2 + i)] += v;
+            if (main) out[(size_t)(offset * 2 + i)] += v;
             if (extra) (*extra)[(size_t)(offset * 2 + i)] += v;
         }
         fifo.erase(fifo.begin(), fifo.begin() + (size_t)n * 2);
@@ -2217,6 +2221,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--audio-offset") a.audioOffset = _wtoi(next());
         else if (k == L"--tracks") a.tracks = std::max(0, std::min(8, _wtoi(next())));
         else if (k == L"--track-mic") a.trackMic = _wtoi(next());
+        else if (k == L"--mic-clean") a.micClean = next();
+        else if (k == L"--track-mic-clean") a.trackMicClean = _wtoi(next());
         else if (k == L"--track-other") a.trackOther = _wtoi(next());
         else if (k == L"--include-parent") a.includeParent = true;
         else if (k == L"--track") {     // имя.exe=номер дорожки
@@ -2389,6 +2395,11 @@ int wmain(int argc, wchar_t** argv) {
         g_perApp = a.audioSystem && (!a.appVol.empty() || !a.appTrack.empty());
         if (a.audioSystem && !g_perApp) { AudioSource* s = new AudioSource(); s->loopback = true; s->gain = a.volSystem; s->track = a.trackOther; g_sources.push_back(s); }
         if (!a.mic.empty()) { AudioSource* s = new AudioSource(); s->name = a.mic; s->gain = a.volMic; s->track = a.trackMic; g_sources.push_back(s); }
+        if (!a.mic.empty() && !a.micClean.empty() && a.trackMicClean > 0 && a.trackMicClean <= a.tracks) {
+            AudioSource* s = new AudioSource();
+            s->name = a.micClean; s->gain = a.volMic; s->track = a.trackMicClean; s->main = false; s->clean = true;
+            g_sources.push_back(s);
+        }
         CloseHandle(CreateThread(nullptr, 0, controlThread, nullptr, 0, nullptr));
         audioWorker = CreateThread(nullptr, 0, audioThread, nullptr, 0, nullptr);
     }

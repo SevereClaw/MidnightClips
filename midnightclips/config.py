@@ -90,12 +90,14 @@ DEFAULTS = {
     "discord_channels": "",     # каналы для отправки: JSON [{"name": "клипы", "url": "https://discord.com/api/webhooks/…"}]
     "discord_channel": "",      # ссылка канала, выбранного в прошлый раз
     "discord_limit_mb": 10,     # предел размера файла при сжатии и отправке
+    "clean_voice": True,        # микрофон с шины Voicemeeter + эффекты Steal Your Voice: писать и голос без эффекта
+    "syv_mic_device": "",       # какое устройство у Steal Your Voice микрофон (узнаётся у него само)
 }
 
 # Изменение этих ключей требует перезапуска захвата.
 CAPTURE_KEYS = {
     "buffer_enabled", "buffer_seconds", "fps", "height", "bitrate_mbps", "monitor",
-    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe", "cursor", "audio_mode", "mic_on", "separate_tracks", "codec", "color_path"}
+    "encoder", "capture", "audio", "mic", "audio_offset_ms", "rec_volume_system", "rec_volume_mic", "buffer_storage", "app_volumes", "capture_target", "window_exe", "cursor", "audio_mode", "mic_on", "separate_tracks", "codec", "color_path", "clean_voice", "syv_mic_device"}
 
 
 class Config:

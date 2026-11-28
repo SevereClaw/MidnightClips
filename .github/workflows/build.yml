@@ -58,6 +58,10 @@ jobs:
         run: python tests/test_tools.py
         env:
           PYTHONUTF8: "1"
+      - name: Проверить дорожку «Голос без эффекта»
+        run: python tests/test_clean_voice.py
+        env:
+          PYTHONUTF8: "1"
       - name: Проверить, что медленный диск не останавливает захват
         run: python tests/test_spill.py
         env:

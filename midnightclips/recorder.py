@@ -20,6 +20,7 @@ from collections import deque
 from datetime import datetime
 
 from . import audio as audio_mod
+from .tools import CLEAN_VOICE
 
 SEGMENT = 2  # секунд в одном кусочке
 MEMORY_LIMIT_MB = 768   # буфер больше этого в режиме «авто» держим на диске
@@ -802,13 +803,17 @@ class Recorder:
         mic = bool(self.cfg["mic"]) and self._degrade < 1
         mic_gain = max(0, min(200, int(self.cfg["rec_volume_mic"]))) / 100.0 if self.cfg["mic_on"] else 0.0
         plan = {"default": default, "gains": gains, "include_parent": include_parent, "mic": mic, "mic_gain": mic_gain,
-                "names": ["Всё вместе"], "mic_track": 0, "other_track": 0, "app_track": {}}
+                "names": ["Всё вместе"], "mic_track": 0, "other_track": 0, "app_track": {}, "clean_mic": "", "clean_track": 0}
         if self.cfg["separate_tracks"]:
             def add(name):
                 plan["names"].append(name)
                 return len(plan["names"]) - 1
             if mic:
                 plan["mic_track"] = add("Микрофон")
+                clean = self.clean_mic()
+                if clean:   # голос до эффекта Steal Your Voice — запасная дорожка, в общую не входит
+                    plan["clean_mic"] = clean
+                    plan["clean_track"] = add(CLEAN_VOICE)
             # Дорожка игры есть всегда, когда записывается игра или окно, — даже пока игра не запущена
             # или выключена: иначе набор дорожек менялся бы при входе в игру или нажатии выключателя,
             # и буфер приходилось бы начинать заново. Выключенная программа просто молчит на своей дорожке.
@@ -830,7 +835,18 @@ class Recorder:
     def _audio_fixed(self, plan):
         """То в настройках звука, что на ходу поменять нельзя (набор дорожек и источников)."""
         return (tuple(plan["names"]), tuple(sorted(plan["app_track"].items())), plan["mic_track"], plan["other_track"],
-                plan["mic"], plan["include_parent"], bool(self.cfg["audio"]), self.cfg["mic"])
+                plan["mic"], plan["include_parent"], bool(self.cfg["audio"]), self.cfg["mic"], plan["clean_mic"])
+
+    def clean_mic(self):
+        """Само устройство микрофона, если записывается шина Voicemeeter, а эффекты голоса на ней — от
+        Steal Your Voice (он сообщает, какой вход у него микрофон). Пусто — чистый голос не нужен или не узнать."""
+        device = (self.cfg["syv_mic_device"] or "").strip()
+        mic = (self.cfg["mic"] or "").strip()
+        if not (self.cfg["clean_voice"] and device and mic and self.engine) or "voicemeeter" not in mic.lower():
+            return ""
+        if "voicemeeter" in device.lower() or device.lower() == mic.lower():
+            return ""   # вход Voicemeeter — сам виртуальный: чистого голоса из него не взять
+        return device
 
     def update_audio(self):
         """Применить новую громкость записи без перезапуска захвата. False — так нельзя, нужен перезапуск."""
@@ -896,6 +912,8 @@ class Recorder:
             if len(tracks) > 1:   # отдельные дорожки
                 args += ["--tracks", str(len(tracks) - 1), "--track-mic", str(plan["mic_track"]),
                          "--track-other", str(plan["other_track"])]
+                if plan["clean_track"]:
+                    args += ["--mic-clean", plan["clean_mic"], "--track-mic-clean", str(plan["clean_track"])]
                 for exe, index in sorted(plan["app_track"].items()):
                     args += ["--track", "%s=%d" % (exe, index)]
         if not self.cfg["cursor"]:

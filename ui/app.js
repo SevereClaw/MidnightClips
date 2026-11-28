@@ -12,7 +12,7 @@ const demo = {
     clips_dir: "", clips_dir_resolved: "C:\\Users\\you\\Videos\\MidnightClips", buffer_enabled: true,
     buffer_seconds: 60, fps: 60, height: 0, bitrate_mbps: 12, monitor: 0, encoder: "auto", capture: "auto",
     audio: true, mic: "", audio_offset_ms: 0, hotkey_clip: "Alt+F10", hotkey_record: "Alt+F9", hotkey_overlay: "Alt+Z", hotkey_marker: "Alt+F6", hotkey_clip_a: "Alt+F8", clip_a_seconds: 30, hotkey_clip_b: "Alt+F7", clip_b_seconds: 15,
-    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "https://discord.com/api/webhooks/1/demo", discord_channels: '[{"name": "клипы", "url": "https://discord.com/api/webhooks/1/demo"}, {"name": "мемы", "url": "https://discord.com/api/webhooks/2/demo"}]', discord_channel: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, capture_target: "game", window_exe: "p3r.exe", app_volumes: '{"discord.exe": {"on": true, "vol": 60}}', audio_mode: "apps", mic_on: true, separate_tracks: true, game_include: "", game_exclude: "", cursor: true, preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
+    folder_per_game: true, sound: true, toast: true, autostart: false, auto_update: true, discord_webhook: "https://discord.com/api/webhooks/1/demo", discord_channels: '[{"name": "клипы", "url": "https://discord.com/api/webhooks/1/demo"}, {"name": "мемы", "url": "https://discord.com/api/webhooks/2/demo"}]', discord_channel: "", discord_limit_mb: 10, cleanup_days: 0, cleanup_gb: 0, capture_target: "game", window_exe: "p3r.exe", app_volumes: '{"discord.exe": {"on": true, "vol": 60}}', audio_mode: "apps", mic_on: true, separate_tracks: true, mic: "Voicemeeter Out B2 (VB-Audio Voicemeeter VAIO)", clean_voice: true, syv_mic_device: "Микрофон (Fifine K669)", game_include: "", game_exclude: "", cursor: true, preset_record: "Высокое качество", buffer_storage: "auto", rec_volume_system: 60, rec_volume_mic: 100, indicator: true, indicator_corner: "tl", sound_volume: 100, sound_saved: "C:\\Sounds\\velvet.mp3", sound_rec_on: "", sound_rec_off: "", sound_error: "",
   },
   clips: [
     ["P3R 2026-11-12 21-40-03", "P3R", 60, 88e6, 0], ["P3R 2026-11-12 21-12-47", "P3R", 60, 91e6, 0],
@@ -72,7 +72,7 @@ const demoApi = {
   set_tags: async (p, tags) => { demo.clips.find((c) => c.path === p).tags = tags; return true; },
   cleanup_preview: async (days, gb) => ({ count: days || gb ? 3 : 0, bytes: 1.25e9 }),
   media_url: async () => window.DEMO_VIDEO || "",
-  clip_tracks: async () => ["Всё вместе", "Микрофон", "Игра", "Discord", "Остальное"],
+  clip_tracks: async () => ["Всё вместе", "Микрофон", "Голос без эффекта", "Игра", "Discord", "Остальное"],
   set_voices_off: async () => true,
   clip_track_urls: async () => window.DEMO_TRACKS || [],
   set_fullscreen: async (on) => on,
@@ -963,8 +963,10 @@ function renderFriends() {
     : "Discord отдаёт звук всех друзей одним потоком: где выключенный друг говорил одновременно с другими, приглушатся и они";
 }
 // Номера оставленных дорожек; null — все на месте (звук как есть).
+const CLEAN_VOICE = "Голос без эффекта";
 function pickedTracks() {
-  if (!edTracks.length || edTracks.every((b) => b.checked)) return null;
+  // как есть (общая дорожка) — все обычные дорожки включены, а запасной голос без эффекта выключен
+  if (!edTracks.length || edTracks.every((b) => b.checked === !b.dataset.spare)) return null;
   return edTracks.filter((b) => b.checked).map((b) => parseInt(b.dataset.track, 10));
 }
 // Отдельные дорожки играют рядом с видео: слышно только включённые — так же, как будет в сохранённом клипе.
@@ -1044,7 +1046,9 @@ async function openEditor(clip) {
   names.slice(1).forEach((name, i) => {
     const label = document.createElement("label");
     const box = document.createElement("input");
-    box.type = "checkbox"; box.checked = true; box.dataset.track = String(i + 1); box.tabIndex = -1;
+    const spare = name === CLEAN_VOICE;   // голос без эффекта — запаска: в «Всё вместе» его нет, включается вместо «Микрофона»
+    box.type = "checkbox"; box.checked = !spare; box.dataset.track = String(i + 1); box.dataset.spare = spare ? "1" : ""; box.tabIndex = -1;
+    if (spare) label.title = "Голос до эффекта Steal Your Voice, прямо с микрофона. Выключите «Микрофон» и включите эту — в клипе будет обычный голос";
     box.onchange = () => { drawTrim(); applyTracks(); };
     label.append(box, document.createTextNode(name));
     list.appendChild(label);
@@ -1988,6 +1992,13 @@ function applySettings(s) {
   $("edCompress").textContent = "Сжать до " + s.discord_limit_mb + " МБ";
   renderChannels();
   $("volText").textContent = s.sound_volume + "%" + (s.sound_volume > 100 ? " — громче исходного файла" : "");
+  // голос без эффекта: только когда микрофон — шина Voicemeeter (там эффекты Steal Your Voice)
+  const vmMic = /voicemeeter/i.test(s.mic || "");
+  $("rowCleanVoice").hidden = !vmMic || !s.separate_tracks;
+  $("cleanVoiceNote").dataset.base = $("cleanVoiceNote").dataset.base || $("cleanVoiceNote").textContent;
+  $("cleanVoiceNote").textContent = $("cleanVoiceNote").dataset.base + (s.syv_mic_device
+    ? ". Микрофон: " + s.syv_mic_device
+    : ". Устройство микрофона узнаётся у Steal Your Voice — запустите его хотя бы раз");
   $("rowWindow").hidden = s.capture_target !== "window";
   $("rowGame").hidden = s.capture_target !== "game";
   const selWin = $("selWindow");

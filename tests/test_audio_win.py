@@ -325,6 +325,15 @@ if __name__ == "__main__":
     check("только микрофон", ["--audio-system", "0", "--mic", "CABLE Output"], 6000, 14000, tone)
     check("компьютер + микрофон", ["--mic", "CABLE Output"], 2000, 27000, tone)
     check("микрофон не найден", ["--mic", "Нет такого микрофона"], 10500, 13500, tone)
+    # голос без эффекта (само устройство микрофона) — только на свою дорожку, в общую не попадает
+    path, err = record("чистый голос", 6, ["--audio-system", "0", "--mic", "CABLE Output", "--tracks", "2",
+                                           "--track-mic", "1", "--mic-clean", "CABLE Output", "--track-mic-clean", "2"],
+                       play=tone)
+    lv = [tone_level(audio_of(path, k), 440, 1.8, 1.2) for k in range(3)]
+    print("чистый голос: общая %.0f, «Микрофон» %.0f, «Голос без эффекта» %.0f" % tuple(lv), flush=True)
+    assert "mic-clean opened" in err, "устройство для чистого голоса не открылось\n" + err[-900:]
+    assert lv[1] > 1000 and lv[2] > 1000, "дорожки микрофона пустые\n" + err[-900:]
+    assert 0.75 < lv[0] / lv[1] < 1.33, "чистый голос попал в общую дорожку (там голос дважды)\n" + err[-900:]
     path, err = record("тишина", 4, [])
     a = audio_of(path)
     print("%-28s звук %.2f c, пик %d" % ("тишина", len(a) / 48000, max(abs(x) for x in a)), flush=True)
